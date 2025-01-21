@@ -13,13 +13,14 @@
  */
 package io.trino.sql.planner.iterative.rule;
 
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import io.trino.SystemSessionProperties;
+import io.trino.cost.TaskCountEstimator;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.metadata.Metadata;
+import io.trino.sql.planner.OptimizerConfig.DistinctAggregationsStrategy;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.AggregationNode;
@@ -33,7 +34,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static io.trino.SystemSessionProperties.distinctAggregationsStrategy;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.sql.planner.OptimizerConfig.DistinctAggregationsStrategy.AUTOMATIC;
+import static io.trino.sql.planner.OptimizerConfig.DistinctAggregationsStrategy.MARK_DISTINCT;
+import static io.trino.sql.planner.iterative.rule.DistinctAggregationStrategyChooser.createDistinctAggregationStrategyChooser;
 import static io.trino.sql.planner.plan.Patterns.aggregation;
 import static java.util.stream.Collectors.toSet;
 
@@ -63,12 +68,13 @@ public class MultipleDistinctAggregationToMarkDistinct
         implements Rule<AggregationNode>
 {
     private static final Pattern<AggregationNode> PATTERN = aggregation()
-            .matching(
-                    Predicates.and(
-                            MultipleDistinctAggregationToMarkDistinct::hasNoDistinctWithFilterOrMask,
-                            Predicates.or(
-                                    MultipleDistinctAggregationToMarkDistinct::hasMultipleDistincts,
-                                    MultipleDistinctAggregationToMarkDistinct::hasMixedDistinctAndNonDistincts)));
+            .matching(MultipleDistinctAggregationToMarkDistinct::canUseMarkDistinct);
+
+    public static boolean canUseMarkDistinct(AggregationNode aggregationNode)
+    {
+        return hasNoDistinctWithFilterOrMask(aggregationNode) &&
+               (hasMultipleDistincts(aggregationNode) || hasMixedDistinctAndNonDistincts(aggregationNode));
+    }
 
     private static boolean hasNoDistinctWithFilterOrMask(AggregationNode aggregationNode)
     {
@@ -98,6 +104,13 @@ public class MultipleDistinctAggregationToMarkDistinct
         return distincts > 0 && distincts < aggregationNode.getAggregations().size();
     }
 
+    private final DistinctAggregationStrategyChooser distinctAggregationStrategyChooser;
+
+    public MultipleDistinctAggregationToMarkDistinct(TaskCountEstimator taskCountEstimator, Metadata metadata)
+    {
+        this.distinctAggregationStrategyChooser = createDistinctAggregationStrategyChooser(taskCountEstimator, metadata);
+    }
+
     @Override
     public Pattern<AggregationNode> getPattern()
     {
@@ -107,7 +120,9 @@ public class MultipleDistinctAggregationToMarkDistinct
     @Override
     public Result apply(AggregationNode parent, Captures captures, Context context)
     {
-        if (!SystemSessionProperties.useMarkDistinct(context.getSession())) {
+        DistinctAggregationsStrategy distinctAggregationsStrategy = distinctAggregationsStrategy(context.getSession());
+        if (!(distinctAggregationsStrategy.equals(MARK_DISTINCT) ||
+                (distinctAggregationsStrategy.equals(AUTOMATIC) && distinctAggregationStrategyChooser.shouldAddMarkDistinct(parent, context.getSession(), context.getStatsProvider(), context.getLookup())))) {
             return Result.empty();
         }
 
@@ -127,7 +142,7 @@ public class MultipleDistinctAggregationToMarkDistinct
 
                 Symbol marker = markers.get(inputs);
                 if (marker == null) {
-                    marker = context.getSymbolAllocator().newSymbol(Iterables.getLast(inputs).getName(), BOOLEAN, "distinct");
+                    marker = context.getSymbolAllocator().newSymbol(Iterables.getLast(inputs).name() + "_distinct", BOOLEAN);
                     markers.put(inputs, marker);
 
                     ImmutableSet.Builder<Symbol> distinctSymbols = ImmutableSet.<Symbol>builder()
@@ -159,14 +174,10 @@ public class MultipleDistinctAggregationToMarkDistinct
         }
 
         return Result.ofPlanNode(
-                new AggregationNode(
-                        parent.getId(),
-                        subPlan,
-                        newAggregations,
-                        parent.getGroupingSets(),
-                        ImmutableList.of(),
-                        parent.getStep(),
-                        parent.getHashSymbol(),
-                        parent.getGroupIdSymbol()));
+                AggregationNode.builderFrom(parent)
+                        .setSource(subPlan)
+                        .setAggregations(newAggregations)
+                        .setPreGroupedSymbols(ImmutableList.of())
+                        .build());
     }
 }

@@ -16,25 +16,23 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
 import io.trino.cost.StatsProvider;
 import io.trino.cost.TaskCountEstimator;
-import io.trino.metadata.InMemoryNodeManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.TableHandle;
-import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TestTableScanNodePartitioning.TestPartitioningProvider;
 import io.trino.sql.planner.assertions.MatchResult;
 import io.trino.sql.planner.assertions.Matcher;
 import io.trino.sql.planner.assertions.SymbolAliases;
 import io.trino.sql.planner.iterative.rule.test.RuleTester;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.TableScanNode;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static io.airlift.testing.Closeables.closeAllRuntimeException;
 import static io.trino.sql.planner.TestTableScanNodePartitioning.BUCKET_COUNT;
@@ -42,37 +40,34 @@ import static io.trino.sql.planner.TestTableScanNodePartitioning.COLUMN_A;
 import static io.trino.sql.planner.TestTableScanNodePartitioning.COLUMN_B;
 import static io.trino.sql.planner.TestTableScanNodePartitioning.COLUMN_HANDLE_A;
 import static io.trino.sql.planner.TestTableScanNodePartitioning.COLUMN_HANDLE_B;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.CONNECTOR_FIXED_PARTITIONED_TABLE_HANDLE;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.CONNECTOR_PARTITIONED_TABLE_HANDLE;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.CONNECTOR_SINGLE_BUCKET_TABLE_HANDLE;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.CONNECTOR_UNPARTITIONED_TABLE_HANDLE;
 import static io.trino.sql.planner.TestTableScanNodePartitioning.DISABLE_PLAN_WITH_TABLE_NODE_PARTITIONING;
 import static io.trino.sql.planner.TestTableScanNodePartitioning.ENABLE_PLAN_WITH_TABLE_NODE_PARTITIONING;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.FIXED_PARTITIONED_TABLE_HANDLE;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.MOCK_CATALOG;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.PARTITIONED_TABLE_HANDLE;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.SINGLE_BUCKET_TABLE_HANDLE;
-import static io.trino.sql.planner.TestTableScanNodePartitioning.UNPARTITIONED_TABLE_HANDLE;
+import static io.trino.sql.planner.TestTableScanNodePartitioning.FIXED_PARTITIONED_TABLE;
+import static io.trino.sql.planner.TestTableScanNodePartitioning.PARTITIONED_TABLE;
+import static io.trino.sql.planner.TestTableScanNodePartitioning.SINGLE_BUCKET_TABLE;
+import static io.trino.sql.planner.TestTableScanNodePartitioning.TEST_SCHEMA;
+import static io.trino.sql.planner.TestTableScanNodePartitioning.UNPARTITIONED_TABLE;
 import static io.trino.sql.planner.TestTableScanNodePartitioning.createMockFactory;
 import static io.trino.sql.planner.assertions.MatchResult.NO_MATCH;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
-import static io.trino.sql.planner.iterative.rule.test.RuleTester.defaultRuleTester;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestDetermineTableScanNodePartitioning
 {
     private RuleTester tester;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
-        tester = defaultRuleTester();
-        tester.getQueryRunner().createCatalog(MOCK_CATALOG, createMockFactory(), ImmutableMap.of());
-        tester.getQueryRunner().getNodePartitioningManager().addPartitioningProvider(
-                new CatalogName(MOCK_CATALOG),
-                new TestPartitioningProvider(new InMemoryNodeManager()));
+        tester = RuleTester.builder()
+                .withDefaultCatalogConnectorFactory(createMockFactory())
+                .build();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         closeAllRuntimeException(tester);
@@ -84,8 +79,7 @@ public class TestDetermineTableScanNodePartitioning
     {
         testPlanWithTableNodePartitioning(
                 ENABLE_PLAN_WITH_TABLE_NODE_PARTITIONING,
-                PARTITIONED_TABLE_HANDLE,
-                CONNECTOR_PARTITIONED_TABLE_HANDLE,
+                PARTITIONED_TABLE,
                 BUCKET_COUNT,
                 true);
     }
@@ -95,8 +89,7 @@ public class TestDetermineTableScanNodePartitioning
     {
         testPlanWithTableNodePartitioning(
                 DISABLE_PLAN_WITH_TABLE_NODE_PARTITIONING,
-                PARTITIONED_TABLE_HANDLE,
-                CONNECTOR_PARTITIONED_TABLE_HANDLE,
+                PARTITIONED_TABLE,
                 BUCKET_COUNT,
                 false);
     }
@@ -106,8 +99,7 @@ public class TestDetermineTableScanNodePartitioning
     {
         testPlanWithTableNodePartitioning(
                 ENABLE_PLAN_WITH_TABLE_NODE_PARTITIONING,
-                UNPARTITIONED_TABLE_HANDLE,
-                CONNECTOR_UNPARTITIONED_TABLE_HANDLE,
+                UNPARTITIONED_TABLE,
                 BUCKET_COUNT,
                 false);
     }
@@ -117,8 +109,7 @@ public class TestDetermineTableScanNodePartitioning
     {
         testPlanWithTableNodePartitioning(
                 DISABLE_PLAN_WITH_TABLE_NODE_PARTITIONING,
-                FIXED_PARTITIONED_TABLE_HANDLE,
-                CONNECTOR_FIXED_PARTITIONED_TABLE_HANDLE,
+                FIXED_PARTITIONED_TABLE,
                 BUCKET_COUNT,
                 true);
     }
@@ -128,45 +119,43 @@ public class TestDetermineTableScanNodePartitioning
     {
         testPlanWithTableNodePartitioning(
                 ENABLE_PLAN_WITH_TABLE_NODE_PARTITIONING,
-                PARTITIONED_TABLE_HANDLE,
-                CONNECTOR_PARTITIONED_TABLE_HANDLE,
+                PARTITIONED_TABLE,
                 BUCKET_COUNT * 2,
                 true);
 
         testPlanWithTableNodePartitioning(
                 ENABLE_PLAN_WITH_TABLE_NODE_PARTITIONING,
-                PARTITIONED_TABLE_HANDLE,
-                CONNECTOR_PARTITIONED_TABLE_HANDLE,
+                PARTITIONED_TABLE,
                 BUCKET_COUNT * 2 + 1,
                 false);
 
         testPlanWithTableNodePartitioning(
                 ENABLE_PLAN_WITH_TABLE_NODE_PARTITIONING,
-                SINGLE_BUCKET_TABLE_HANDLE,
-                CONNECTOR_SINGLE_BUCKET_TABLE_HANDLE,
+                SINGLE_BUCKET_TABLE,
                 3,
                 false);
     }
 
     private void testPlanWithTableNodePartitioning(
             Session session,
-            TableHandle tableHandle,
-            ConnectorTableHandle connectorTableHandle,
+            String tableName,
             int numberOfTasks,
             boolean expectedEnabled)
     {
-        tester.assertThat(new DetermineTableScanNodePartitioning(tester.getMetadata(), tester.getQueryRunner().getNodePartitioningManager(), new TaskCountEstimator(() -> numberOfTasks)))
+        TableHandle tableHandle = tester.getCurrentCatalogTableHandle(TEST_SCHEMA, tableName);
+        tester.assertThat(new DetermineTableScanNodePartitioning(tester.getMetadata(), tester.getPlanTester().getNodePartitioningManager(), new TaskCountEstimator(() -> numberOfTasks)))
+                .withSession(session)
                 .on(p -> {
                     Symbol a = p.symbol(COLUMN_A);
                     Symbol b = p.symbol(COLUMN_B);
-                    return p.tableScan(tableHandle,
+                    return p.tableScan(
+                            tableHandle,
                             ImmutableList.of(a, b),
                             ImmutableMap.of(a, COLUMN_HANDLE_A, b, COLUMN_HANDLE_B));
                 })
-                .withSession(session)
                 .matches(
                         tableScan(
-                                connectorTableHandle::equals,
+                                tableHandle.connectorHandle()::equals,
                                 TupleDomain.all(),
                                 ImmutableMap.of(
                                         "A", COLUMN_HANDLE_A::equals,

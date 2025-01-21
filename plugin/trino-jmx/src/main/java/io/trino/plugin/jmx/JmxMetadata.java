@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Streams;
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -27,16 +28,16 @@ import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorTableProperties;
+import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
 
-import javax.inject.Inject;
 import javax.management.JMException;
 import javax.management.MBeanAttributeInfo;
 import javax.management.MBeanInfo;
@@ -46,24 +47,25 @@ import javax.management.ObjectName;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.plugin.jmx.JmxErrorCode.JMX_INVALID_TABLE_NAME;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
+import static java.util.Collections.emptyIterator;
 import static java.util.Comparator.comparing;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -97,21 +99,13 @@ public class JmxMetadata
     }
 
     @Override
-    public JmxTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName)
+    public JmxTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+        }
+
         return getTableHandle(tableName);
-    }
-
-    @Override
-    public boolean usesLegacyTableLayouts()
-    {
-        return false;
-    }
-
-    @Override
-    public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
-    {
-        return new ConnectorTableProperties();
     }
 
     public JmxTableHandle getTableHandle(SchemaTableName tableName)
@@ -134,8 +128,8 @@ public class JmxMetadata
         }
         ImmutableList.Builder<JmxColumnHandle> builder = ImmutableList.builder();
         builder.add(new JmxColumnHandle(TIMESTAMP_COLUMN_NAME, createTimestampWithTimeZoneType(3)));
-        builder.addAll(handle.getColumnHandles());
-        return new JmxTableHandle(handle.getTableName(), handle.getObjectNames(), builder.build(), false, TupleDomain.all());
+        builder.addAll(handle.columnHandles());
+        return new JmxTableHandle(handle.tableName(), handle.objectNames(), builder.build(), false, TupleDomain.all());
     }
 
     private JmxTableHandle getJmxTableHandle(SchemaTableName tableName)
@@ -161,7 +155,7 @@ public class JmxMetadata
             // that attributes are in the same order on all of them.
             columns = columns.stream()
                     .distinct()
-                    .sorted(comparing(JmxColumnHandle::getColumnName))
+                    .sorted(comparing(JmxColumnHandle::columnName))
                     .collect(toImmutableList());
 
             return new JmxTableHandle(tableName, objectNames.stream().map(ObjectName::toString).collect(toImmutableList()), columns, true, TupleDomain.all());
@@ -210,7 +204,7 @@ public class JmxMetadata
             if (JMX_SCHEMA_NAME.equals(schema)) {
                 return listJmxTables();
             }
-            else if (HISTORY_SCHEMA_NAME.equals(schema)) {
+            if (HISTORY_SCHEMA_NAME.equals(schema)) {
                 return jmxHistoricalData.getTables().stream()
                         .map(tableName -> new SchemaTableName(JmxMetadata.HISTORY_SCHEMA_NAME, tableName))
                         .collect(toList());
@@ -233,7 +227,7 @@ public class JmxMetadata
     public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         JmxTableHandle jmxTableHandle = (JmxTableHandle) tableHandle;
-        return ImmutableMap.copyOf(Maps.uniqueIndex(jmxTableHandle.getColumnHandles(), column -> column.getColumnName().toLowerCase(ENGLISH)));
+        return ImmutableMap.copyOf(Maps.uniqueIndex(jmxTableHandle.columnHandles(), column -> column.columnName().toLowerCase(ENGLISH)));
     }
 
     @Override
@@ -245,11 +239,17 @@ public class JmxMetadata
     @Override
     public Map<SchemaTableName, List<ColumnMetadata>> listTableColumns(ConnectorSession session, SchemaTablePrefix prefix)
     {
+        throw new UnsupportedOperationException("The deprecated listTableColumns is not supported because streamTableColumns is implemented instead");
+    }
+
+    @Override
+    public Iterator<TableColumnsMetadata> streamTableColumns(ConnectorSession session, SchemaTablePrefix prefix)
+    {
         requireNonNull(prefix, "prefix is null");
         if (prefix.getSchema().isPresent() &&
                 !prefix.getSchema().get().equals(JMX_SCHEMA_NAME) &&
                 !prefix.getSchema().get().equals(HISTORY_SCHEMA_NAME)) {
-            return ImmutableMap.of();
+            return emptyIterator();
         }
 
         List<SchemaTableName> tableNames;
@@ -261,24 +261,22 @@ public class JmxMetadata
         }
 
         return tableNames.stream()
-                .collect(toImmutableMap(Function.identity(), tableName -> getTableHandle(session, tableName).getTableMetadata().getColumns()));
+                .map(tableName -> TableColumnsMetadata.forTable(tableName, getTableHandle(session, tableName, Optional.empty(), Optional.empty()).getTableMetadata().getColumns()))
+                .iterator();
     }
 
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle handle, Constraint constraint)
     {
-        Optional<Map<ColumnHandle, Domain>> domains = constraint.getSummary().getDomains();
-        if (domains.isEmpty()) {
-            return Optional.empty();
-        }
+        Map<ColumnHandle, Domain> domains = constraint.getSummary().getDomains().orElseThrow(() -> new IllegalArgumentException("constraint summary is NONE"));
 
         JmxTableHandle tableHandle = (JmxTableHandle) handle;
 
         Map<ColumnHandle, Domain> nodeDomains = new LinkedHashMap<>();
         Map<ColumnHandle, Domain> otherDomains = new LinkedHashMap<>();
-        domains.get().forEach((column, domain) -> {
+        domains.forEach((column, domain) -> {
             JmxColumnHandle columnHandle = (JmxColumnHandle) column;
-            if (columnHandle.getColumnName().equals(NODE_COLUMN_NAME)) {
+            if (columnHandle.columnName().equals(NODE_COLUMN_NAME)) {
                 nodeDomains.put(column, domain);
             }
             else {
@@ -286,40 +284,25 @@ public class JmxMetadata
             }
         });
 
-        TupleDomain<ColumnHandle> oldDomain = tableHandle.getNodeFilter();
+        TupleDomain<ColumnHandle> oldDomain = tableHandle.nodeFilter();
         TupleDomain<ColumnHandle> newDomain = oldDomain.intersect(TupleDomain.withColumnDomains(nodeDomains));
 
         if (oldDomain.equals(newDomain)) {
             return Optional.empty();
         }
 
-        JmxTableHandle newTableHandle = new JmxTableHandle(tableHandle.getTableName(), tableHandle.getObjectNames(), tableHandle.getColumnHandles(), tableHandle.isLiveData(), newDomain);
+        JmxTableHandle newTableHandle = new JmxTableHandle(tableHandle.tableName(), tableHandle.objectNames(), tableHandle.columnHandles(), tableHandle.liveData(), newDomain);
 
-        return Optional.of(new ConstraintApplicationResult<>(newTableHandle, TupleDomain.withColumnDomains(otherDomains), false));
+        return Optional.of(new ConstraintApplicationResult<>(newTableHandle, TupleDomain.withColumnDomains(otherDomains), constraint.getExpression(), false));
     }
 
     private static Type getColumnType(MBeanAttributeInfo attribute)
     {
-        switch (attribute.getType()) {
-            case "boolean":
-            case "java.lang.Boolean":
-                return BOOLEAN;
-            case "byte":
-            case "java.lang.Byte":
-            case "short":
-            case "java.lang.Short":
-            case "int":
-            case "java.lang.Integer":
-            case "long":
-            case "java.lang.Long":
-                return BIGINT;
-            case "java.lang.Number":
-            case "float":
-            case "java.lang.Float":
-            case "double":
-            case "java.lang.Double":
-                return DOUBLE;
-        }
-        return createUnboundedVarcharType();
+        return switch (attribute.getType()) {
+            case "boolean", "java.lang.Boolean" -> BOOLEAN;
+            case "byte", "java.lang.Byte", "short", "java.lang.Short", "int", "java.lang.Integer", "long", "java.lang.Long" -> BIGINT;
+            case "java.lang.Number", "float", "java.lang.Float", "double", "java.lang.Double" -> DOUBLE;
+            default -> createUnboundedVarcharType();
+        };
     }
 }

@@ -16,6 +16,7 @@ package io.trino.spi.connector;
 import io.trino.spi.Page;
 
 import java.util.Iterator;
+import java.util.List;
 
 import static java.util.Objects.requireNonNull;
 
@@ -28,14 +29,23 @@ public class FixedPageSource
     private long completedBytes;
     private boolean closed;
 
-    public FixedPageSource(Iterable<Page> pages)
+    public FixedPageSource(List<Page> pages)
     {
-        this.pages = requireNonNull(pages, "pages is null").iterator();
+        this(pages.iterator(), memoryUsage(pages));
+    }
 
+    private static long memoryUsage(List<Page> pages)
+    {
         long memoryUsageBytes = 0;
         for (Page page : pages) {
             memoryUsageBytes += page.getRetainedSizeInBytes();
         }
+        return memoryUsageBytes;
+    }
+
+    public FixedPageSource(Iterator<Page> pages, long memoryUsageBytes)
+    {
+        this.pages = requireNonNull(pages, "pages is null");
         this.memoryUsageBytes = memoryUsageBytes;
     }
 
@@ -75,7 +85,7 @@ public class FixedPageSource
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
         return memoryUsageBytes;
     }

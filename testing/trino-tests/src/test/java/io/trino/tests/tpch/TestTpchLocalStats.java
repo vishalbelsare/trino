@@ -16,16 +16,17 @@ package io.trino.tests.tpch;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.plugin.tpch.ColumnNaming;
-import io.trino.plugin.tpch.TpchConnectorFactory;
-import io.trino.testing.LocalQueryRunner;
+import io.trino.plugin.tpch.TpchPlugin;
+import io.trino.testing.QueryRunner;
+import io.trino.testing.StandaloneQueryRunner;
 import io.trino.testing.statistics.StatisticsAssertion;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static io.trino.SystemSessionProperties.COLLECT_PLAN_STATISTICS_FOR_ALL_QUERIES;
-import static io.trino.SystemSessionProperties.PREFER_PARTIAL_AGGREGATION;
-import static io.trino.plugin.tpch.TpchConnectorFactory.TPCH_COLUMN_NAMING_PROPERTY;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.statistics.MetricComparisonStrategies.absoluteError;
@@ -37,32 +38,35 @@ import static io.trino.testing.statistics.Metrics.distinctValuesCount;
 import static io.trino.testing.statistics.Metrics.highValue;
 import static io.trino.testing.statistics.Metrics.lowValue;
 import static io.trino.testing.statistics.Metrics.nullsFraction;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestTpchLocalStats
 {
     private StatisticsAssertion statisticsAssertion;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         Session defaultSession = testSessionBuilder()
                 .setCatalog("tpch")
                 .setSchema(TINY_SCHEMA_NAME)
-                // We are not able to calculate stats for PARTIAL aggregations
-                .setSystemProperty(PREFER_PARTIAL_AGGREGATION, "false")
                 // Stats for non-EXPLAIN queries are not collected by default
                 .setSystemProperty(COLLECT_PLAN_STATISTICS_FOR_ALL_QUERIES, "true")
                 .build();
 
-        LocalQueryRunner queryRunner = LocalQueryRunner.create(defaultSession);
-        queryRunner.createCatalog(
-                "tpch",
-                new TpchConnectorFactory(1),
-                ImmutableMap.of(TPCH_COLUMN_NAMING_PROPERTY, ColumnNaming.STANDARD.name()));
+        QueryRunner queryRunner = new StandaloneQueryRunner(defaultSession);
+        queryRunner.installPlugin(new TpchPlugin());
+        queryRunner.createCatalog("tpch", "tpch", ImmutableMap.<String, String>builder()
+                .put("tpch.splits-per-node", "1")
+                .put("tpch.column-naming", ColumnNaming.STANDARD.name())
+                .buildOrThrow());
         statisticsAssertion = new StatisticsAssertion(queryRunner);
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         statisticsAssertion.close();
@@ -238,12 +242,12 @@ public class TestTpchLocalStats
         // simple non-equi join
         statisticsAssertion.check("SELECT * FROM partsupp LEFT JOIN lineitem ON ps_partkey = l_partkey AND ps_suppkey < l_suppkey",
                 checks -> checks
-                        .estimate(OUTPUT_ROW_COUNT, relativeError(4.0))
+                        .estimate(OUTPUT_ROW_COUNT, relativeError(0.3, 0.4))
                         .verifyExactColumnStatistics("ps_partkey")
-                        .verifyColumnStatistics("l_partkey", relativeError(0.10))
+                        .verifyColumnStatistics("l_partkey", relativeError(0.7))
                         .verifyExactColumnStatistics("ps_suppkey")
-                        .verifyColumnStatistics("l_suppkey", relativeError(1.0))
-                        .verifyColumnStatistics("l_orderkey", relativeError(0.10)));
+                        .verifyColumnStatistics("l_suppkey", relativeError(0.7))
+                        .verifyColumnStatistics("l_orderkey", relativeError(0.7)));
     }
 
     @Test
@@ -293,12 +297,12 @@ public class TestTpchLocalStats
         // simple non-equi join
         statisticsAssertion.check("SELECT * FROM lineitem RIGHT JOIN partsupp ON ps_partkey = l_partkey AND ps_suppkey < l_suppkey",
                 checks -> checks
-                        .estimate(OUTPUT_ROW_COUNT, relativeError(4.0))
+                        .estimate(OUTPUT_ROW_COUNT, relativeError(0.3, 0.4))
                         .verifyExactColumnStatistics("ps_partkey")
-                        .verifyColumnStatistics("l_partkey", relativeError(0.10))
+                        .verifyColumnStatistics("l_partkey", relativeError(0.7))
                         .verifyExactColumnStatistics("ps_suppkey")
-                        .verifyColumnStatistics("l_suppkey", relativeError(1.0))
-                        .verifyColumnStatistics("l_orderkey", relativeError(0.10)));
+                        .verifyColumnStatistics("l_suppkey", relativeError(0.7))
+                        .verifyColumnStatistics("l_orderkey", relativeError(0.7)));
     }
 
     @Test
@@ -343,12 +347,12 @@ public class TestTpchLocalStats
         // simple non-equi join
         statisticsAssertion.check("SELECT * FROM lineitem FULL JOIN partsupp ON ps_partkey = l_partkey AND ps_suppkey < l_suppkey",
                 checks -> checks
-                        .estimate(OUTPUT_ROW_COUNT, relativeError(4.0))
-                        .verifyColumnStatistics("ps_partkey", relativeError(0.10))
-                        .verifyColumnStatistics("l_partkey", relativeError(0.10))
-                        .verifyColumnStatistics("ps_suppkey", relativeError(0.10))
-                        .verifyColumnStatistics("l_suppkey", relativeError(1.0))
-                        .verifyColumnStatistics("l_orderkey", relativeError(0.10)));
+                        .estimate(OUTPUT_ROW_COUNT, relativeError(0.4, 0.5))
+                        .verifyColumnStatistics("ps_partkey", relativeError(0.6))
+                        .verifyColumnStatistics("l_partkey", relativeError(0.6))
+                        .verifyColumnStatistics("ps_suppkey", relativeError(0.6))
+                        .verifyColumnStatistics("l_suppkey", relativeError(0.6))
+                        .verifyColumnStatistics("l_orderkey", relativeError(0.6)));
     }
 
     @Test
@@ -448,21 +452,23 @@ public class TestTpchLocalStats
     @Test
     public void testIntersect()
     {
+        // Estimates are significantly off as they are generated by NON_ESTIMATABLE_PREDICATE_APPROXIMATION_ENABLED
         statisticsAssertion.check("SELECT * FROM nation INTERSECT SELECT * FROM nation",
-                checks -> checks.noEstimate(OUTPUT_ROW_COUNT));
+                checks -> checks.estimate(OUTPUT_ROW_COUNT, absoluteError(45)));
 
         statisticsAssertion.check("SELECT * FROM orders WHERE o_custkey < 900 INTERSECT SELECT * FROM orders WHERE o_custkey > 600",
-                checks -> checks.noEstimate(OUTPUT_ROW_COUNT));
+                checks -> checks.estimate(OUTPUT_ROW_COUNT, relativeError(4.3, 4.4)));
     }
 
     @Test
     public void testExcept()
     {
+        // Estimates are significantly off as they are generated by NON_ESTIMATABLE_PREDICATE_APPROXIMATION_ENABLED
         statisticsAssertion.check("SELECT * FROM nation EXCEPT SELECT * FROM nation",
-                checks -> checks.noEstimate(OUTPUT_ROW_COUNT));
+                checks -> checks.estimate(OUTPUT_ROW_COUNT, absoluteError(45)));
 
         statisticsAssertion.check("SELECT * FROM orders WHERE o_custkey < 900 EXCEPT SELECT * FROM orders WHERE o_custkey > 600",
-                checks -> checks.noEstimate(OUTPUT_ROW_COUNT));
+                checks -> checks.estimate(OUTPUT_ROW_COUNT, relativeError(1.7, 1.8)));
     }
 
     @Test

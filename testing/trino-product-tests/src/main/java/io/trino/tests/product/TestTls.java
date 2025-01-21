@@ -40,11 +40,11 @@ import static org.assertj.core.api.Assertions.fail;
 public class TestTls
 {
     @Inject(optional = true)
-    @Named("databases.presto.http_port")
+    @Named("databases.trino.http_port")
     private Integer httpPort;
 
     @Inject(optional = true)
-    @Named("databases.presto.https_port")
+    @Named("databases.trino.https_port")
     private Integer httpsPort;
 
     @Test(groups = {TLS, PROFILE_SPECIFIC_TESTS})
@@ -59,7 +59,7 @@ public class TestTls
         assertThat(activeNodesUrls).hasSize(3);
 
         List<String> hosts = activeNodesUrls.stream()
-                .map((uri) -> URI.create(uri).getHost())
+                .map(uri -> URI.create(uri).getHost())
                 .collect(toList());
 
         for (String host : hosts) {
@@ -87,7 +87,7 @@ public class TestTls
                 .executeQuery("SELECT http_uri FROM system.runtime.nodes");
         return queryResult.rows()
                 .stream()
-                .map((row) -> row.get(0).toString())
+                .map(row -> row.get(0).toString())
                 .collect(toList());
     }
 

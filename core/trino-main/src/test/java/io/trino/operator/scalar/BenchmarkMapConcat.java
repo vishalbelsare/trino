@@ -26,7 +26,6 @@ import io.trino.spi.type.MapType;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
-import io.trino.sql.tree.QualifiedName;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -134,7 +133,7 @@ public class BenchmarkMapConcat
             ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
 
             projectionsBuilder.add(new CallExpression(
-                    functionResolution.resolveFunction(QualifiedName.of(name), fromTypes(mapType, mapType)),
+                    functionResolution.resolveFunction(name, fromTypes(mapType, mapType)),
                     ImmutableList.of(field(0, mapType), field(1, mapType))));
 
             ImmutableList<RowExpression> projections = projectionsBuilder.build();
@@ -169,12 +168,12 @@ public class BenchmarkMapConcat
             for (int i = 0; i < keyIds.length; i++) {
                 keyIds[i] = i % keys.size();
             }
-            return new DictionaryBlock(keyDictionaryBlock, keyIds);
+            return DictionaryBlock.create(keyIds.length, keyDictionaryBlock, keyIds);
         }
 
         private static Block createValueBlock(int positionCount, int mapSize)
         {
-            BlockBuilder valueBlockBuilder = DOUBLE.createBlockBuilder(null, positionCount * mapSize);
+            BlockBuilder valueBlockBuilder = DOUBLE.createFixedSizeBlockBuilder(positionCount * mapSize);
             for (int i = 0; i < positionCount * mapSize; i++) {
                 DOUBLE.writeDouble(valueBlockBuilder, ThreadLocalRandom.current().nextDouble());
             }

@@ -16,23 +16,34 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.spi.function.OperatorType;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Logical;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.assertions.TopNRankingSymbolMatcher;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.Assignments;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.TopNRankingNode.RankingType;
 import io.trino.sql.planner.plan.WindowNode.Function;
-import io.trino.sql.planner.plan.WindowNode.Specification;
-import io.trino.sql.tree.QualifiedName;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
-import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_FIRST;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.Comparison.Operator.EQUAL;
+import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
+import static io.trino.sql.ir.Comparison.Operator.LESS_THAN;
+import static io.trino.sql.ir.Logical.Operator.AND;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
@@ -45,6 +56,9 @@ import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
 public class TestPushPredicateThroughProjectIntoWindow
         extends BaseRuleTest
 {
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction MODULUS_INTEGER = FUNCTIONS.resolveOperator(OperatorType.MODULUS, ImmutableList.of(INTEGER, INTEGER));
+
     @Test
     public void testRankingSymbolPruned()
     {
@@ -54,16 +68,16 @@ public class TestPushPredicateThroughProjectIntoWindow
 
     private void assertRankingSymbolPruned(Function rankingFunction)
     {
-        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getMetadata(), tester().getQueryRunner().getTypeOperators()))
+        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol ranking = p.symbol("ranking");
                     return p.filter(
-                            PlanBuilder.expression("a = 1"),
+                            new Comparison(EQUAL, new Reference(INTEGER, "a"), new Constant(INTEGER, 1L)),
                             p.project(
                                     Assignments.identity(a),
                                     p.window(
-                                            new Specification(
+                                            new DataOrganizationSpecification(
                                                     ImmutableList.of(),
                                                     Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, ASC_NULLS_FIRST)))),
                                             ImmutableMap.of(ranking, rankingFunction),
@@ -81,16 +95,16 @@ public class TestPushPredicateThroughProjectIntoWindow
 
     private void assertNoUpperBoundForRankingSymbol(Function rankingFunction)
     {
-        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getMetadata(), tester().getQueryRunner().getTypeOperators()))
+        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol ranking = p.symbol("ranking");
                     return p.filter(
-                            PlanBuilder.expression("a = 1"),
+                            new Comparison(EQUAL, new Reference(BIGINT, "a"), new Constant(BIGINT, 1L)),
                             p.project(
                                     Assignments.identity(a, ranking),
                                     p.window(
-                                            new Specification(
+                                            new DataOrganizationSpecification(
                                                     ImmutableList.of(),
                                                     Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, ASC_NULLS_FIRST)))),
                                             ImmutableMap.of(ranking, rankingFunction),
@@ -108,16 +122,16 @@ public class TestPushPredicateThroughProjectIntoWindow
 
     private void assertNonPositiveUpperBoundForRankingSymbol(Function rankingFunction)
     {
-        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getMetadata(), tester().getQueryRunner().getTypeOperators()))
+        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol ranking = p.symbol("ranking");
                     return p.filter(
-                            PlanBuilder.expression("a = 1 AND ranking < -10"),
+                            new Logical(AND, ImmutableList.of(new Comparison(EQUAL, new Reference(BIGINT, "a"), new Constant(BIGINT, 1L)), new Comparison(LESS_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, -10L)))),
                             p.project(
                                     Assignments.identity(a, ranking),
                                     p.window(
-                                            new Specification(
+                                            new DataOrganizationSpecification(
                                                     ImmutableList.of(),
                                                     Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, ASC_NULLS_FIRST)))),
                                             ImmutableMap.of(ranking, rankingFunction),
@@ -135,25 +149,25 @@ public class TestPushPredicateThroughProjectIntoWindow
 
     private void assertPredicateNotSatisfied(Function rankingFunction, RankingType rankingType)
     {
-        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getMetadata(), tester().getQueryRunner().getTypeOperators()))
+        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol ranking = p.symbol("ranking");
                     return p.filter(
-                            PlanBuilder.expression("ranking > 2 AND ranking < 5"),
+                            new Logical(AND, ImmutableList.of(new Comparison(GREATER_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, 2L)), new Comparison(LESS_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, 5L)))),
                             p.project(
                                     Assignments.identity(ranking),
                                     p.window(
-                                            new Specification(
+                                            new DataOrganizationSpecification(
                                                     ImmutableList.of(),
                                                     Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, ASC_NULLS_FIRST)))),
                                             ImmutableMap.of(ranking, rankingFunction),
                                             p.values(a))));
                 })
                 .matches(filter(
-                        "ranking > 2 AND ranking < 5",
+                        new Logical(AND, ImmutableList.of(new Comparison(GREATER_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, 2L)), new Comparison(LESS_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, 5L)))),
                         project(
-                                ImmutableMap.of("ranking", expression("ranking")),
+                                ImmutableMap.of("ranking", expression(new Reference(BIGINT, "ranking"))),
                                 topNRanking(
                                         pattern -> pattern
                                                 .specification(
@@ -176,23 +190,23 @@ public class TestPushPredicateThroughProjectIntoWindow
 
     private void assertPredicateSatisfied(Function rankingFunction, RankingType rankingType)
     {
-        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getMetadata(), tester().getQueryRunner().getTypeOperators()))
+        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol ranking = p.symbol("ranking");
                     return p.filter(
-                            PlanBuilder.expression("ranking < 5"),
+                            new Comparison(LESS_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, 5L)),
                             p.project(
                                     Assignments.identity(ranking),
                                     p.window(
-                                            new Specification(
+                                            new DataOrganizationSpecification(
                                                     ImmutableList.of(),
                                                     Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, ASC_NULLS_FIRST)))),
                                             ImmutableMap.of(ranking, rankingFunction),
                                             p.values(a))));
                 })
                 .matches(project(
-                        ImmutableMap.of("ranking", expression("ranking")),
+                        ImmutableMap.of("ranking", expression(new Reference(BIGINT, "ranking"))),
                         topNRanking(
                                 pattern -> pattern
                                         .specification(
@@ -215,25 +229,25 @@ public class TestPushPredicateThroughProjectIntoWindow
 
     private void assertPredicatePartiallySatisfied(Function rankingFunction, RankingType rankingType)
     {
-        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getMetadata(), tester().getQueryRunner().getTypeOperators()))
+        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol ranking = p.symbol("ranking");
                     return p.filter(
-                            PlanBuilder.expression("ranking < 5 AND a > 0"),
+                            new Logical(AND, ImmutableList.of(new Comparison(LESS_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, 5L)), new Comparison(GREATER_THAN, new Reference(BIGINT, "a"), new Constant(BIGINT, 0L)))),
                             p.project(
                                     Assignments.identity(ranking, a),
                                     p.window(
-                                            new Specification(
+                                            new DataOrganizationSpecification(
                                                     ImmutableList.of(),
                                                     Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, ASC_NULLS_FIRST)))),
                                             ImmutableMap.of(ranking, rankingFunction),
                                             p.values(a))));
                 })
                 .matches(filter(
-                        "a > 0",
+                        new Comparison(GREATER_THAN, new Reference(BIGINT, "a"), new Constant(BIGINT, 0L)),
                         project(
-                                ImmutableMap.of("ranking", expression("ranking"), "a", expression("a")),
+                                ImmutableMap.of("ranking", expression(new Reference(BIGINT, "ranking")), "a", expression(new Reference(BIGINT, "a"))),
                                 topNRanking(
                                         pattern -> pattern
                                                 .specification(
@@ -246,25 +260,25 @@ public class TestPushPredicateThroughProjectIntoWindow
                                         values(ImmutableList.of("a")))
                                         .withAlias("ranking", new TopNRankingSymbolMatcher()))));
 
-        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getMetadata(), tester().getQueryRunner().getTypeOperators()))
+        tester().assertThat(new PushPredicateThroughProjectIntoWindow(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol ranking = p.symbol("ranking");
                     return p.filter(
-                            PlanBuilder.expression("ranking < 5 AND ranking % 2 = 0"),
+                            new Logical(AND, ImmutableList.of(new Comparison(LESS_THAN, new Reference(BIGINT, "ranking"), new Constant(BIGINT, 5L)), new Comparison(EQUAL, new Call(MODULUS_INTEGER, ImmutableList.of(new Reference(INTEGER, "ranking"), new Constant(INTEGER, 2L))), new Constant(INTEGER, 0L)))),
                             p.project(
                                     Assignments.identity(ranking),
                                     p.window(
-                                            new Specification(
+                                            new DataOrganizationSpecification(
                                                     ImmutableList.of(),
                                                     Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, ASC_NULLS_FIRST)))),
                                             ImmutableMap.of(ranking, rankingFunction),
                                             p.values(a))));
                 })
                 .matches(filter(
-                        "ranking % 2 = 0",
+                        new Comparison(EQUAL, new Call(MODULUS_INTEGER, ImmutableList.of(new Reference(INTEGER, "ranking"), new Constant(INTEGER, 2L))), new Constant(INTEGER, 0L)),
                         project(
-                                ImmutableMap.of("ranking", expression("ranking")),
+                                ImmutableMap.of("ranking", expression(new Reference(BIGINT, "ranking"))),
                                 topNRanking(
                                         pattern -> pattern
                                                 .specification(
@@ -281,18 +295,22 @@ public class TestPushPredicateThroughProjectIntoWindow
     private Function rowNumberFunction()
     {
         return new Function(
-                tester().getMetadata().resolveFunction(TEST_SESSION, QualifiedName.of("row_number"), fromTypes()),
+                tester().getMetadata().resolveBuiltinFunction("row_number", fromTypes()),
                 ImmutableList.of(),
+                Optional.empty(),
                 DEFAULT_FRAME,
+                false,
                 false);
     }
 
     private Function rankFunction()
     {
         return new Function(
-                tester().getMetadata().resolveFunction(TEST_SESSION, QualifiedName.of("rank"), fromTypes()),
+                tester().getMetadata().resolveBuiltinFunction("rank", fromTypes()),
                 ImmutableList.of(),
+                Optional.empty(),
                 DEFAULT_FRAME,
+                false,
                 false);
     }
 }

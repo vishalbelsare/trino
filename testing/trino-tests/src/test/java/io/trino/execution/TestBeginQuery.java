@@ -22,7 +22,6 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
-import io.trino.spi.connector.ConnectorHandleResolver;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -38,15 +37,12 @@ import io.trino.spi.transaction.IsolationLevel;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
-import io.trino.testing.TestingHandleResolver;
 import io.trino.testing.TestingMetadata;
 import io.trino.testing.TestingPageSinkProvider;
 import io.trino.testing.TestingSplitManager;
 import io.trino.testing.TestingTransactionHandle;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.List;
 import java.util.Map;
@@ -54,13 +50,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.util.Objects.requireNonNull;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@Execution(SAME_THREAD) // TestMetadata is shared mutable state
 public class TestBeginQuery
         extends AbstractTestQueryFramework
 {
-    private TestMetadata metadata;
+    private final TestMetadata metadata = new TestMetadata();
 
     @Override
     protected QueryRunner createQueryRunner()
@@ -70,45 +67,30 @@ public class TestBeginQuery
                 .setCatalog("test")
                 .setSchema("default")
                 .build();
-        return DistributedQueryRunner.builder(session).build();
-    }
 
-    @BeforeClass
-    public void setUp()
-    {
-        metadata = new TestMetadata();
-        getQueryRunner().installPlugin(new TestPlugin(metadata));
-        getQueryRunner().installPlugin(new TpchPlugin());
-        getQueryRunner().createCatalog("test", "test", ImmutableMap.of());
-        getQueryRunner().createCatalog("tpch", "tpch", ImmutableMap.of());
-    }
-
-    @AfterMethod(alwaysRun = true)
-    public void afterMethod()
-    {
-        if (metadata != null) {
-            metadata.clear();
-        }
-    }
-
-    @AfterClass(alwaysRun = true)
-    public void tearDown()
-    {
-        if (metadata != null) {
-            metadata.clear();
-            metadata = null;
-        }
+        return DistributedQueryRunner.builder(session)
+                .setAdditionalSetup(runner -> {
+                    runner.installPlugin(new TestingPlugin(metadata));
+                    runner.installPlugin(new TpchPlugin());
+                    runner.createCatalog("test", "test", ImmutableMap.of());
+                    runner.createCatalog("tpch", "tpch", ImmutableMap.of());
+                })
+                .build();
     }
 
     @Test
     public void testCreateTableAsSelect()
     {
+        metadata.clear();
+
         assertBeginQuery("CREATE TABLE nation AS SELECT * FROM tpch.tiny.nation");
     }
 
     @Test
     public void testCreateTableAsSelectSameConnector()
     {
+        metadata.clear();
+
         assertBeginQuery("CREATE TABLE nation AS SELECT * FROM tpch.tiny.nation");
         assertBeginQuery("CREATE TABLE nation_copy AS SELECT * FROM nation");
     }
@@ -116,6 +98,8 @@ public class TestBeginQuery
     @Test
     public void testInsert()
     {
+        metadata.clear();
+
         assertBeginQuery("CREATE TABLE nation AS SELECT * FROM tpch.tiny.nation");
         assertBeginQuery("INSERT INTO nation SELECT * FROM tpch.tiny.nation");
         assertBeginQuery("INSERT INTO nation VALUES (12345, 'name', 54321, 'comment')");
@@ -124,6 +108,8 @@ public class TestBeginQuery
     @Test
     public void testInsertSelectSameConnector()
     {
+        metadata.clear();
+
         assertBeginQuery("CREATE TABLE nation AS SELECT * FROM tpch.tiny.nation");
         assertBeginQuery("INSERT INTO nation SELECT * FROM nation");
     }
@@ -131,6 +117,8 @@ public class TestBeginQuery
     @Test
     public void testSelect()
     {
+        metadata.clear();
+
         assertBeginQuery("CREATE TABLE nation AS SELECT * FROM tpch.tiny.nation");
         assertBeginQuery("SELECT * FROM nation");
     }
@@ -139,17 +127,17 @@ public class TestBeginQuery
     {
         metadata.resetCounters();
         computeActual(query);
-        assertEquals(metadata.begin.get(), 1);
-        assertEquals(metadata.end.get(), 1);
+        assertThat(metadata.begin.get()).isEqualTo(1);
+        assertThat(metadata.end.get()).isEqualTo(1);
         metadata.resetCounters();
     }
 
-    private static class TestPlugin
+    private static class TestingPlugin
             implements Plugin
     {
         private final TestMetadata metadata;
 
-        private TestPlugin(TestMetadata metadata)
+        private TestingPlugin(TestMetadata metadata)
         {
             this.metadata = requireNonNull(metadata, "metadata is null");
         }
@@ -163,12 +151,6 @@ public class TestBeginQuery
                 public String getName()
                 {
                     return "test";
-                }
-
-                @Override
-                public ConnectorHandleResolver getHandleResolver()
-                {
-                    return new TestingHandleResolver();
                 }
 
                 @Override
@@ -197,7 +179,7 @@ public class TestBeginQuery
         }
 
         @Override
-        public ConnectorMetadata getMetadata(ConnectorTransactionHandle transactionHandle)
+        public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle)
         {
             return metadata;
         }

@@ -22,7 +22,6 @@ import com.amazonaws.services.s3.model.ObjectListing;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.io.CharStreams;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.airlift.log.Logger;
@@ -31,8 +30,8 @@ import io.trino.plugin.kinesis.KinesisClientProvider;
 import io.trino.plugin.kinesis.KinesisConfig;
 import io.trino.plugin.kinesis.KinesisStreamDescription;
 import io.trino.spi.connector.SchemaTableName;
-
-import javax.annotation.PostConstruct;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -44,13 +43,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 
 /**
  * Utility class to retrieve table definitions from a common place on Amazon S3.
@@ -74,13 +74,14 @@ public class S3TableConfigClient
 
     private final Map<String, KinesisStreamDescription> descriptors = Collections.synchronizedMap(new HashMap<>());
 
+    private ScheduledExecutorService scheduler;
+
     @Inject
     public S3TableConfigClient(
             KinesisConfig connectorConfig,
             KinesisClientProvider clientManager,
             JsonCodec<KinesisStreamDescription> jsonCodec)
     {
-        requireNonNull(connectorConfig, "connectorConfig is null");
         this.tableDescriptionRefreshInterval = connectorConfig.getTableDescriptionRefreshInterval();
         this.clientManager = requireNonNull(clientManager, "clientManager is null");
         this.streamDescriptionCodec = requireNonNull(jsonCodec, "jsonCodec is null");
@@ -98,8 +99,16 @@ public class S3TableConfigClient
     protected void startS3Updates()
     {
         if (this.bucketUrl.isPresent()) {
-            ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+            scheduler = newSingleThreadScheduledExecutor(daemonThreadsNamed("s3-table-config-client-%s"));
             this.updateTaskHandle = scheduler.scheduleAtFixedRate(this::updateTablesFromS3, 5_000, tableDescriptionRefreshInterval.toMillis(), TimeUnit.MILLISECONDS);
+        }
+    }
+
+    @PreDestroy
+    public void destroy()
+    {
+        if (scheduler != null) {
+            scheduler.shutdownNow();
         }
     }
 
@@ -108,7 +117,7 @@ public class S3TableConfigClient
      */
     public boolean isUsingS3()
     {
-        return bucketUrl.isPresent() && (bucketUrl.get().startsWith("s3://"));
+        return bucketUrl.isPresent() && bucketUrl.get().startsWith("s3://");
     }
 
     /**
@@ -123,9 +132,9 @@ public class S3TableConfigClient
         Collection<KinesisStreamDescription> streamValues = this.descriptors.values();
         ImmutableMap.Builder<SchemaTableName, KinesisStreamDescription> builder = ImmutableMap.builder();
         for (KinesisStreamDescription stream : streamValues) {
-            builder.put(new SchemaTableName(stream.getSchemaName(), stream.getTableName()), stream);
+            builder.put(new SchemaTableName(stream.schemaName(), stream.tableName()), stream);
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     @Override
@@ -167,7 +176,7 @@ public class S3TableConfigClient
             log.info("Completed getting S3 object listing.");
         }
         catch (AmazonClientException e) {
-            log.error("Skipping update as faced error fetching table descriptions from S3 " + e.toString());
+            log.error("Skipping update as faced error fetching table descriptions from S3 %s", e);
         }
         return result;
     }
@@ -193,7 +202,7 @@ public class S3TableConfigClient
                 S3Object object = s3client.getObject(new GetObjectRequest(summary.getBucketName(), summary.getKey()));
 
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(object.getObjectContent(), UTF_8))) {
-                    KinesisStreamDescription table = streamDescriptionCodec.fromJson(CharStreams.toString(reader));
+                    KinesisStreamDescription table = streamDescriptionCodec.fromJson(reader);
                     descriptors.put(summary.getKey(), table);
                     log.info("Put table description into the map from %s", summary.getKey());
                 }

@@ -16,9 +16,8 @@ package io.trino.sql.planner.plan;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.sql.planner.Symbol;
-
-import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Optional;
@@ -178,5 +177,20 @@ public class SemiJoinNode
                 filteringSourceHashSymbol,
                 Optional.of(distributionType),
                 dynamicFilterId);
+    }
+
+    public SemiJoinNode withoutDynamicFilter()
+    {
+        return new SemiJoinNode(
+                getId(),
+                source,
+                filteringSource,
+                sourceJoinSymbol,
+                filteringSourceJoinSymbol,
+                semiJoinOutput,
+                sourceHashSymbol,
+                filteringSourceHashSymbol,
+                distributionType,
+                Optional.empty());
     }
 }

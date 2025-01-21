@@ -15,12 +15,13 @@ package io.trino.plugin.thrift;
 
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.inject.Inject;
 import io.airlift.drift.TException;
 import io.airlift.drift.client.DriftClient;
 import io.airlift.units.Duration;
+import io.trino.cache.NonEvictableLoadingCache;
 import io.trino.plugin.thrift.annotations.ForMetadataRefresh;
 import io.trino.plugin.thrift.api.TrinoThriftNullableSchemaName;
 import io.trino.plugin.thrift.api.TrinoThriftNullableTableMetadata;
@@ -36,7 +37,7 @@ import io.trino.spi.connector.ConnectorResolvedIndex;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorTableProperties;
+import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.ProjectionApplicationResult;
@@ -46,8 +47,6 @@ import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.TypeManager;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
@@ -59,8 +58,10 @@ import java.util.concurrent.Executor;
 import static com.google.common.cache.CacheLoader.asyncReloading;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.plugin.thrift.ThriftErrorCode.THRIFT_SERVICE_INVALID_RESPONSE;
 import static io.trino.plugin.thrift.util.ThriftExceptions.toTrinoException;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
@@ -75,7 +76,7 @@ public class ThriftMetadata
     private final DriftClient<TrinoThriftService> client;
     private final ThriftHeaderProvider thriftHeaderProvider;
     private final TypeManager typeManager;
-    private final LoadingCache<SchemaTableName, Optional<ThriftTableMetadata>> tableCache;
+    private final NonEvictableLoadingCache<SchemaTableName, Optional<ThriftTableMetadata>> tableCache;
 
     @Inject
     public ThriftMetadata(
@@ -87,10 +88,11 @@ public class ThriftMetadata
         this.client = requireNonNull(client, "client is null");
         this.thriftHeaderProvider = requireNonNull(thriftHeaderProvider, "thriftHeaderProvider is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
-        this.tableCache = CacheBuilder.newBuilder()
-                .expireAfterWrite(EXPIRE_AFTER_WRITE.toMillis(), MILLISECONDS)
-                .refreshAfterWrite(REFRESH_AFTER_WRITE.toMillis(), MILLISECONDS)
-                .build(asyncReloading(CacheLoader.from(this::getTableMetadataInternal), metadataRefreshExecutor));
+        this.tableCache = buildNonEvictableCache(
+                CacheBuilder.newBuilder()
+                        .expireAfterWrite(EXPIRE_AFTER_WRITE.toMillis(), MILLISECONDS)
+                        .refreshAfterWrite(REFRESH_AFTER_WRITE.toMillis(), MILLISECONDS),
+                asyncReloading(CacheLoader.from(this::getTableMetadataInternal), metadataRefreshExecutor));
     }
 
     @Override
@@ -105,8 +107,12 @@ public class ThriftMetadata
     }
 
     @Override
-    public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName)
+    public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+        }
+
         return tableCache.getUnchecked(tableName)
                 .map(ThriftTableMetadata::getSchemaTableName)
                 .map(ThriftTableHandle::new)
@@ -159,15 +165,7 @@ public class ThriftMetadata
         if (tableMetadata.containsIndexableColumns(indexableColumns)) {
             return Optional.of(new ConnectorResolvedIndex(new ThriftIndexHandle(tableMetadata.getSchemaTableName(), tupleDomain, session), tupleDomain));
         }
-        else {
-            return Optional.empty();
-        }
-    }
-
-    @Override
-    public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
-    {
-        return new ConnectorTableProperties();
+        return Optional.empty();
     }
 
     @Override
@@ -187,7 +185,7 @@ public class ThriftMetadata
                 newDomain,
                 handle.getDesiredColumns());
 
-        return Optional.of(new ConstraintApplicationResult<>(handle, constraint.getSummary(), false));
+        return Optional.of(new ConstraintApplicationResult<>(handle, constraint.getSummary(), constraint.getExpression(), false));
     }
 
     @Override
@@ -215,21 +213,10 @@ public class ThriftMetadata
         return Optional.of(new ProjectionApplicationResult<>(handle, projections, assignmentList.build(), false));
     }
 
-    @Override
-    public boolean usesLegacyTableLayouts()
-    {
-        return false;
-    }
-
     private ThriftTableMetadata getRequiredTableMetadata(SchemaTableName schemaTableName)
     {
-        Optional<ThriftTableMetadata> table = tableCache.getUnchecked(schemaTableName);
-        if (table.isEmpty()) {
-            throw new TableNotFoundException(schemaTableName);
-        }
-        else {
-            return table.get();
-        }
+        return tableCache.getUnchecked(schemaTableName)
+                .orElseThrow(() -> new TableNotFoundException(schemaTableName));
     }
 
     // this method makes actual thrift request and should be called only by cache load method

@@ -13,22 +13,32 @@
  */
 package io.trino.plugin.hive;
 
-import io.trino.plugin.base.CatalogName;
-import io.trino.plugin.hive.metastore.Table;
+import com.google.common.collect.ImmutableList;
+import io.trino.metastore.Table;
 import io.trino.spi.TrinoException;
+import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.type.TypeId;
 
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.metastore.Table.TABLE_COMMENT;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
-import static io.trino.plugin.hive.HiveMetadata.TABLE_COMMENT;
 import static io.trino.plugin.hive.HiveToTrinoTranslator.translateHiveViewToTrino;
+import static io.trino.plugin.hive.util.HiveTypeUtil.getTypeSignature;
 
 public class LegacyHiveViewReader
         implements ViewReaderUtil.ViewReader
 {
+    private final boolean hiveViewsRunAsInvoker;
+
+    public LegacyHiveViewReader(boolean hiveViewsRunAsInvoker)
+    {
+        this.hiveViewsRunAsInvoker = hiveViewsRunAsInvoker;
+    }
+
     @Override
     public ConnectorViewDefinition decodeViewData(String viewData, Table table, CatalogName catalogName)
     {
@@ -38,11 +48,12 @@ public class LegacyHiveViewReader
                 translateHiveViewToTrino(viewText),
                 Optional.of(catalogName.toString()),
                 Optional.ofNullable(table.getDatabaseName()),
-                table.getDataColumns().stream()
-                        .map(column -> new ConnectorViewDefinition.ViewColumn(column.getName(), TypeId.of(column.getType().getTypeSignature().toString())))
+                Stream.concat(table.getDataColumns().stream(), table.getPartitionColumns().stream())
+                        .map(column -> new ConnectorViewDefinition.ViewColumn(column.getName(), TypeId.of(getTypeSignature(column.getType()).toString()), column.getComment()))
                         .collect(toImmutableList()),
                 Optional.ofNullable(table.getParameters().get(TABLE_COMMENT)),
-                table.getOwner(),
-                false); // don't run as invoker
+                Optional.empty(), // will be filled in later by HiveMetadata
+                hiveViewsRunAsInvoker,
+                ImmutableList.of());
     }
 }

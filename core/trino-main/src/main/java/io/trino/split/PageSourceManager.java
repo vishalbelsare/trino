@@ -13,71 +13,76 @@
  */
 package io.trino.split;
 
+import com.google.inject.Inject;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
+import io.trino.connector.CatalogServiceProvider;
 import io.trino.metadata.Split;
 import io.trino.metadata.TableHandle;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
+import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
 import static io.trino.SystemSessionProperties.isAllowPushdownIntoConnectors;
 import static java.util.Objects.requireNonNull;
 
 public class PageSourceManager
-        implements PageSourceProvider
+        implements PageSourceProviderFactory
 {
-    private final ConcurrentMap<CatalogName, ConnectorPageSourceProvider> pageSourceProviders = new ConcurrentHashMap<>();
+    private final CatalogServiceProvider<ConnectorPageSourceProviderFactory> pageSourceProviderFactory;
 
-    public void addConnectorPageSourceProvider(CatalogName catalogName, ConnectorPageSourceProvider pageSourceProvider)
+    @Inject
+    public PageSourceManager(CatalogServiceProvider<ConnectorPageSourceProviderFactory> pageSourceProviderFactory)
     {
-        requireNonNull(catalogName, "catalogName is null");
-        requireNonNull(pageSourceProvider, "pageSourceProvider is null");
-        checkState(pageSourceProviders.put(catalogName, pageSourceProvider) == null, "PageSourceProvider for connector '%s' is already registered", catalogName);
-    }
-
-    public void removeConnectorPageSourceProvider(CatalogName catalogName)
-    {
-        pageSourceProviders.remove(catalogName);
+        this.pageSourceProviderFactory = requireNonNull(pageSourceProviderFactory, "pageSourceProviderFactory is null");
     }
 
     @Override
-    public ConnectorPageSource createPageSource(Session session, Split split, TableHandle table, List<ColumnHandle> columns, DynamicFilter dynamicFilter)
+    public PageSourceProvider createPageSourceProvider(CatalogHandle catalogHandle)
     {
-        requireNonNull(columns, "columns is null");
-        checkArgument(split.getCatalogName().equals(table.getCatalogName()), "mismatched split and table");
-        CatalogName catalogName = split.getCatalogName();
-
-        ConnectorPageSourceProvider provider = getPageSourceProvider(catalogName);
-        TupleDomain<ColumnHandle> constraint = dynamicFilter.getCurrentPredicate();
-        if (constraint.isNone()) {
-            return new EmptyPageSource();
-        }
-        if (!isAllowPushdownIntoConnectors(session)) {
-            dynamicFilter = DynamicFilter.EMPTY;
-        }
-        return provider.createPageSource(
-                table.getTransaction(),
-                session.toConnectorSession(catalogName),
-                split.getConnectorSplit(),
-                table.getConnectorHandle(),
-                columns,
-                dynamicFilter);
+        ConnectorPageSourceProviderFactory provider = pageSourceProviderFactory.getService(catalogHandle);
+        return new PageSourceProviderInstance(provider.createPageSourceProvider());
     }
 
-    private ConnectorPageSourceProvider getPageSourceProvider(CatalogName catalogName)
+    private record PageSourceProviderInstance(ConnectorPageSourceProvider pageSourceProvider)
+            implements PageSourceProvider
     {
-        ConnectorPageSourceProvider provider = pageSourceProviders.get(catalogName);
-        checkArgument(provider != null, "No page source provider for connector: %s", catalogName);
-        return provider;
+        private PageSourceProviderInstance
+        {
+            requireNonNull(pageSourceProvider, "pageSourceProvider is null");
+        }
+
+        @Override
+        public ConnectorPageSource createPageSource(Session session,
+                Split split,
+                TableHandle table,
+                List<ColumnHandle> columns,
+                DynamicFilter dynamicFilter)
+        {
+            requireNonNull(columns, "columns is null");
+            checkArgument(split.getCatalogHandle().equals(table.catalogHandle()), "mismatched split and table");
+
+            TupleDomain<ColumnHandle> constraint = dynamicFilter.getCurrentPredicate();
+            if (constraint.isNone()) {
+                return new EmptyPageSource();
+            }
+            if (!isAllowPushdownIntoConnectors(session)) {
+                dynamicFilter = DynamicFilter.EMPTY;
+            }
+            return pageSourceProvider.createPageSource(
+                    table.transaction(),
+                    session.toConnectorSession(table.catalogHandle()),
+                    split.getConnectorSplit(),
+                    table.connectorHandle(),
+                    columns,
+                    dynamicFilter);
+        }
     }
 }

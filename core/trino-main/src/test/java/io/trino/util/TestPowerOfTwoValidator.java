@@ -13,7 +13,7 @@
  */
 package io.trino.util;
 
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static io.airlift.testing.ValidationAssertions.assertValidates;
@@ -52,7 +52,6 @@ public class TestPowerOfTwoValidator
         assertFailsValidation(object, "boxed", "is not a power of two", PowerOfTwo.class);
     }
 
-    @SuppressWarnings("UnusedDeclaration")
     public static class ConstrainedPowerOfTwo
     {
         private final int value;
@@ -75,7 +74,6 @@ public class TestPowerOfTwoValidator
         }
     }
 
-    @SuppressWarnings("UnusedDeclaration")
     public static class NullPowerOfTwoAnnotation
     {
         @PowerOfTwo

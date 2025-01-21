@@ -15,13 +15,14 @@ package io.trino.plugin.kinesis;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableList;
-import io.trino.spi.HostAddress;
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.ConnectorSplit;
 
-import java.util.List;
+import java.util.Map;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -31,6 +32,8 @@ import static java.util.Objects.requireNonNull;
 public class KinesisSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(KinesisSplit.class);
+
     private final String streamName;
     private final String messageDataFormat;
     private final KinesisCompressionCodec compressionCodec;
@@ -92,21 +95,26 @@ public class KinesisSplit
     }
 
     @Override
-    public boolean isRemotelyAccessible()
+    public Map<String, String> getSplitInfo()
     {
-        return true;
+        return ImmutableMap.of(
+                "streamName", streamName,
+                "shardId", shardId,
+                "messageDataFormat", messageDataFormat,
+                "compressionCodec", compressionCodec.name(),
+                "start", start,
+                "end", end);
     }
 
     @Override
-    public List<HostAddress> getAddresses()
+    public long getRetainedSizeInBytes()
     {
-        return ImmutableList.of();
-    }
-
-    @Override
-    public Object getInfo()
-    {
-        return this;
+        return INSTANCE_SIZE
+                + estimatedSizeOf(streamName)
+                + estimatedSizeOf(messageDataFormat)
+                + estimatedSizeOf(shardId)
+                + estimatedSizeOf(start)
+                + estimatedSizeOf(end);
     }
 
     @Override

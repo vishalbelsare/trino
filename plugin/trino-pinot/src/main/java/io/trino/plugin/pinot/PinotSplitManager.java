@@ -14,6 +14,7 @@
 package io.trino.plugin.pinot;
 
 import com.google.common.collect.Iterables;
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.plugin.pinot.client.PinotClient;
 import io.trino.spi.ErrorCode;
@@ -26,10 +27,10 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
-
-import javax.inject.Inject;
+import org.apache.pinot.spi.config.table.TableType;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -44,13 +45,15 @@ import static io.trino.plugin.pinot.PinotSplit.createBrokerSplit;
 import static io.trino.plugin.pinot.PinotSplit.createSegmentSplit;
 import static io.trino.spi.ErrorType.USER_ERROR;
 import static java.lang.String.format;
-import static java.util.Collections.singletonList;
 import static java.util.Objects.requireNonNull;
 
 public class PinotSplitManager
         implements ConnectorSplitManager
 {
     private static final Logger LOG = Logger.get(PinotSplitManager.class);
+    private static final String REALTIME_SUFFIX = "_" + TableType.REALTIME;
+    private static final String OFFLINE_SUFFIX = "_" + TableType.OFFLINE;
+
     private final PinotClient pinotClient;
 
     @Inject
@@ -59,23 +62,26 @@ public class PinotSplitManager
         this.pinotClient = requireNonNull(pinotClient, "pinotClient is null");
     }
 
-    protected ConnectorSplitSource generateSplitForBrokerBasedScan(PinotTableHandle pinotTableHandle)
+    protected ConnectorSplitSource generateSplitForBrokerBasedScan()
     {
-        return new FixedSplitSource(singletonList(createBrokerSplit()));
+        return new FixedSplitSource(createBrokerSplit());
     }
 
     protected ConnectorSplitSource generateSplitsForSegmentBasedScan(
             PinotTableHandle tableHandle,
             ConnectorSession session)
     {
-        String tableName = tableHandle.getTableName();
+        String tableName = tableHandle.tableName();
         Map<String, Map<String, List<String>>> routingTable = pinotClient.getRoutingTableForTable(tableName);
-        LOG.info("Got routing table for %s: %s", tableName, routingTable);
+        LOG.debug("Got routing table for %s: %s", tableName, routingTable);
         List<ConnectorSplit> splits = new ArrayList<>();
         if (!routingTable.isEmpty()) {
-            PinotClient.TimeBoundary timeBoundary = pinotClient.getTimeBoundaryForTable(tableName);
-            generateSegmentSplits(splits, routingTable, tableName, "_REALTIME", session, timeBoundary.getOnlineTimePredicate());
-            generateSegmentSplits(splits, routingTable, tableName, "_OFFLINE", session, timeBoundary.getOfflineTimePredicate());
+            PinotClient.TimeBoundary timeBoundary = new PinotClient.TimeBoundary(null, null);
+            if (routingTable.containsKey(tableName + REALTIME_SUFFIX) && routingTable.containsKey(tableName + OFFLINE_SUFFIX)) {
+                timeBoundary = pinotClient.getTimeBoundaryForTable(tableName);
+            }
+            generateSegmentSplits(splits, routingTable, tableName, REALTIME_SUFFIX, session, timeBoundary.getOnlineTimePredicate());
+            generateSegmentSplits(splits, routingTable, tableName, OFFLINE_SUFFIX, session, timeBoundary.getOfflineTimePredicate());
         }
 
         Collections.shuffle(splits);
@@ -155,8 +161,8 @@ public class PinotSplitManager
             ConnectorTransactionHandle transactionHandle,
             ConnectorSession session,
             ConnectorTableHandle tableHandle,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         PinotTableHandle pinotTableHandle = (PinotTableHandle) tableHandle;
         Supplier<TrinoException> errorSupplier = () -> new QueryNotAdequatelyPushedDownException(QueryNotAdequatelyPushedDownErrorCode.PQL_NOT_PRESENT, pinotTableHandle, "");
@@ -166,14 +172,13 @@ public class PinotSplitManager
             }
             return generateSplitsForSegmentBasedScan(pinotTableHandle, session);
         }
-        else {
-            return generateSplitForBrokerBasedScan(pinotTableHandle);
-        }
+        return generateSplitForBrokerBasedScan();
     }
 
     private static boolean isBrokerQuery(ConnectorSession session, PinotTableHandle tableHandle)
     {
-        return tableHandle.getQuery().isPresent() ||
-                (isPreferBrokerQueries(session) && tableHandle.getLimit().orElse(Integer.MAX_VALUE) < getNonAggregateLimitForBrokerQueries(session));
+        return tableHandle.query().isPresent() ||
+                tableHandle.limit().orElse(Integer.MAX_VALUE) < getNonAggregateLimitForBrokerQueries(session) ||
+                isPreferBrokerQueries(session);
     }
 }

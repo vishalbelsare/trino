@@ -13,9 +13,7 @@
  */
 package io.trino.sql.planner.iterative.rule;
 
-import com.google.common.collect.ImmutableSet;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.SymbolsExtractor;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.UnnestNode;
 
@@ -68,17 +66,12 @@ public class PruneUnnestColumns
     @Override
     protected Optional<PlanNode> pushDownProjectOff(Context context, UnnestNode unnestNode, Set<Symbol> referencedOutputs)
     {
-        ImmutableSet.Builder<Symbol> referencedAndFilterSymbolsBuilder = ImmutableSet.<Symbol>builder()
-                .addAll(referencedOutputs);
-        unnestNode.getFilter().ifPresent(expression -> referencedAndFilterSymbolsBuilder.addAll(SymbolsExtractor.extractUnique(expression)));
-        Set<Symbol> referencedAndFilterSymbols = referencedAndFilterSymbolsBuilder.build();
-
         List<Symbol> prunedReplicateSymbols = unnestNode.getReplicateSymbols().stream()
-                .filter(referencedAndFilterSymbols::contains)
+                .filter(referencedOutputs::contains)
                 .collect(toImmutableList());
 
         Optional<Symbol> prunedOrdinalitySymbol = unnestNode.getOrdinalitySymbol()
-                .filter(referencedAndFilterSymbols::contains);
+                .filter(referencedOutputs::contains);
 
         if (prunedReplicateSymbols.size() == unnestNode.getReplicateSymbols().size() && prunedOrdinalitySymbol.equals(unnestNode.getOrdinalitySymbol())) {
             return Optional.empty();
@@ -90,7 +83,6 @@ public class PruneUnnestColumns
                 prunedReplicateSymbols,
                 unnestNode.getMappings(),
                 prunedOrdinalitySymbol,
-                unnestNode.getJoinType(),
-                unnestNode.getFilter()));
+                unnestNode.getJoinType()));
     }
 }

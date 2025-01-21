@@ -16,8 +16,8 @@ package io.trino.sql.gen;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.airlift.bytecode.BytecodeBlock;
 import io.airlift.bytecode.ClassDefinition;
 import io.airlift.bytecode.MethodDefinition;
@@ -26,8 +26,9 @@ import io.airlift.bytecode.Scope;
 import io.airlift.bytecode.Variable;
 import io.airlift.bytecode.expression.BytecodeExpression;
 import io.airlift.bytecode.instruction.LabelNode;
-import io.airlift.jmx.CacheStatsMBean;
 import io.airlift.log.Logger;
+import io.trino.cache.CacheStatsMBean;
+import io.trino.cache.NonEvictableLoadingCache;
 import io.trino.operator.PageWithPositionComparator;
 import io.trino.operator.PagesIndex;
 import io.trino.operator.PagesIndexComparator;
@@ -45,8 +46,6 @@ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
-import javax.inject.Inject;
-
 import java.lang.invoke.MethodHandle;
 import java.util.List;
 import java.util.Objects;
@@ -59,6 +58,7 @@ import static io.airlift.bytecode.ParameterizedType.type;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantInt;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeDynamic;
 import static io.airlift.bytecode.expression.BytecodeExpressions.invokeStatic;
+import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
@@ -71,15 +71,17 @@ public class OrderingCompiler
 {
     private static final Logger log = Logger.get(OrderingCompiler.class);
 
-    private final LoadingCache<PagesIndexComparatorCacheKey, PagesIndexOrdering> pagesIndexOrderings = CacheBuilder.newBuilder()
-            .recordStats()
-            .maximumSize(1000)
-            .build(CacheLoader.from(key -> internalCompilePagesIndexOrdering(key.getSortTypes(), key.getSortChannels(), key.getSortOrders())));
+    private final NonEvictableLoadingCache<PagesIndexComparatorCacheKey, PagesIndexOrdering> pagesIndexOrderings = buildNonEvictableCache(
+            CacheBuilder.newBuilder()
+                    .recordStats()
+                    .maximumSize(1000),
+            CacheLoader.from(key -> internalCompilePagesIndexOrdering(key.getSortTypes(), key.getSortChannels(), key.getSortOrders())));
 
-    private final LoadingCache<PagesIndexComparatorCacheKey, PageWithPositionComparator> pageWithPositionComparators = CacheBuilder.newBuilder()
-            .recordStats()
-            .maximumSize(1000)
-            .build(CacheLoader.from(key -> internalCompilePageWithPositionComparator(key.getSortTypes(), key.getSortChannels(), key.getSortOrders())));
+    private final NonEvictableLoadingCache<PagesIndexComparatorCacheKey, PageWithPositionComparator> pageWithPositionComparators = buildNonEvictableCache(
+            CacheBuilder.newBuilder()
+                    .recordStats()
+                    .maximumSize(1000),
+            CacheLoader.from(key -> internalCompilePageWithPositionComparator(key.getSortTypes(), key.getSortChannels(), key.getSortOrders())));
 
     private final TypeOperators typeOperators;
 
@@ -269,7 +271,7 @@ public class OrderingCompiler
             comparator = pageWithPositionsComparatorClass.getConstructor().newInstance();
         }
         catch (Throwable t) {
-            log.error(t, "Error compiling comparator for channels %s with order %s", sortChannels, sortChannels);
+            log.error(t, "Error compiling comparator for channels %s with order %s", sortChannels, sortOrders);
             comparator = new SimplePageWithPositionComparator(types, sortChannels, sortOrders, typeOperators);
         }
         return comparator;

@@ -13,8 +13,6 @@
  */
 package io.trino.execution;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.units.Duration;
 import io.trino.Session;
@@ -23,8 +21,11 @@ import io.trino.client.StatementClient;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.spi.QueryId;
 import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.QueryRunner;
+import okhttp3.Call;
 import okhttp3.OkHttpClient;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.time.ZoneId;
 import java.util.Locale;
@@ -35,15 +36,16 @@ import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.client.StatementClientFactory.newStatementClient;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestFinalQueryInfo
 {
-    @Test(timeOut = 240_000)
+    @Test
+    @Timeout(240)
     public void testFinalQueryInfoSetOnAbort()
             throws Exception
     {
-        try (DistributedQueryRunner queryRunner = createQueryRunner(TEST_SESSION)) {
+        try (QueryRunner queryRunner = createQueryRunner(TEST_SESSION)) {
             QueryId queryId = startQuery("SELECT COUNT(*) FROM tpch.sf1000.lineitem", queryRunner);
             SettableFuture<QueryInfo> finalQueryInfoFuture = SettableFuture.create();
             queryRunner.getCoordinator().addFinalQueryInfoListener(queryId, finalQueryInfoFuture::set);
@@ -55,38 +57,27 @@ public class TestFinalQueryInfo
             // wait for final query info
             QueryInfo finalQueryInfo = tryGetFutureValue(finalQueryInfoFuture, 10, SECONDS)
                     .orElseThrow(() -> new AssertionError("Final query info never set"));
-            assertTrue(finalQueryInfo.isFinalQueryInfo());
+            assertThat(finalQueryInfo.isFinalQueryInfo()).isTrue();
         }
     }
 
-    private static QueryId startQuery(String sql, DistributedQueryRunner queryRunner)
+    private static QueryId startQuery(String sql, QueryRunner queryRunner)
     {
         OkHttpClient httpClient = new OkHttpClient();
         try {
-            ClientSession clientSession = new ClientSession(
-                    queryRunner.getCoordinator().getBaseUrl(),
-                    "user",
-                    Optional.empty(),
-                    "source",
-                    Optional.empty(),
-                    ImmutableSet.of(),
-                    null,
-                    null,
-                    null,
-                    null,
-                    ZoneId.of("America/Los_Angeles"),
-                    Locale.ENGLISH,
-                    ImmutableMap.of(),
-                    ImmutableMap.of(),
-                    ImmutableMap.of(),
-                    ImmutableMap.of(),
-                    ImmutableMap.of(),
-                    null,
-                    new Duration(2, MINUTES),
-                    true);
+            ClientSession clientSession = ClientSession.builder()
+                    .server(queryRunner.getCoordinator().getBaseUrl())
+                    .user(Optional.of("user"))
+                    .source("source")
+                    .timeZone(ZoneId.of("America/Los_Angeles"))
+                    .locale(Locale.ENGLISH)
+                    .transactionId(null)
+                    .clientRequestTimeout(new Duration(2, MINUTES))
+                    .compressionDisabled(true)
+                    .build();
 
             // start query
-            StatementClient client = newStatementClient(httpClient, clientSession, sql);
+            StatementClient client = newStatementClient((Call.Factory) httpClient, clientSession, sql);
 
             // wait for query to be fully scheduled
             while (client.isRunning() && !client.currentStatusInfo().getStats().isScheduled()) {
@@ -102,11 +93,11 @@ public class TestFinalQueryInfo
         }
     }
 
-    public static DistributedQueryRunner createQueryRunner(Session session)
+    public static QueryRunner createQueryRunner(Session session)
             throws Exception
     {
-        DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session)
-                .setNodeCount(2)
+        QueryRunner queryRunner = DistributedQueryRunner.builder(session)
+                .setWorkerCount(1)
                 .build();
 
         try {

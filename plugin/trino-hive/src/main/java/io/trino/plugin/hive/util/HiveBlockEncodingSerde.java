@@ -14,6 +14,7 @@
 package io.trino.plugin.hive.util;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.airlift.slice.SliceInput;
 import io.airlift.slice.SliceOutput;
 import io.trino.spi.block.ArrayBlockEncoding;
@@ -22,19 +23,18 @@ import io.trino.spi.block.BlockEncoding;
 import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.block.ByteArrayBlockEncoding;
 import io.trino.spi.block.DictionaryBlockEncoding;
+import io.trino.spi.block.Fixed12BlockEncoding;
 import io.trino.spi.block.Int128ArrayBlockEncoding;
 import io.trino.spi.block.IntArrayBlockEncoding;
 import io.trino.spi.block.LazyBlockEncoding;
 import io.trino.spi.block.LongArrayBlockEncoding;
+import io.trino.spi.block.MapBlockEncoding;
 import io.trino.spi.block.RowBlockEncoding;
 import io.trino.spi.block.RunLengthBlockEncoding;
 import io.trino.spi.block.ShortArrayBlockEncoding;
-import io.trino.spi.block.SingleRowBlockEncoding;
 import io.trino.spi.block.VariableWidthBlockEncoding;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeId;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
@@ -49,7 +49,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.HyperLogLogType.HYPER_LOG_LOG;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -59,7 +59,7 @@ import static java.util.Objects.requireNonNull;
 public final class HiveBlockEncodingSerde
         implements BlockEncodingSerde
 {
-    private static final List<Type> TYPES = ImmutableList.of(BOOLEAN, BIGINT, DOUBLE, INTEGER, VARCHAR, VARBINARY, TIMESTAMP_MILLIS, TIMESTAMP_WITH_TIME_ZONE, DATE, HYPER_LOG_LOG);
+    private static final List<Type> TYPES = ImmutableList.of(BOOLEAN, BIGINT, DOUBLE, INTEGER, VARCHAR, VARBINARY, TIMESTAMP_MILLIS, TIMESTAMP_TZ_MILLIS, DATE, HYPER_LOG_LOG);
     private final ConcurrentMap<String, BlockEncoding> blockEncodings = new ConcurrentHashMap<>();
 
     @Inject
@@ -70,11 +70,12 @@ public final class HiveBlockEncodingSerde
         addBlockEncoding(new ShortArrayBlockEncoding());
         addBlockEncoding(new IntArrayBlockEncoding());
         addBlockEncoding(new LongArrayBlockEncoding());
+        addBlockEncoding(new Fixed12BlockEncoding());
         addBlockEncoding(new Int128ArrayBlockEncoding());
         addBlockEncoding(new DictionaryBlockEncoding());
         addBlockEncoding(new ArrayBlockEncoding());
+        addBlockEncoding(new MapBlockEncoding());
         addBlockEncoding(new RowBlockEncoding());
-        addBlockEncoding(new SingleRowBlockEncoding());
         addBlockEncoding(new RunLengthBlockEncoding());
         addBlockEncoding(new LazyBlockEncoding());
     }
@@ -107,6 +108,7 @@ public final class HiveBlockEncodingSerde
 
             // look up the encoding factory
             BlockEncoding blockEncoding = blockEncodings.get(encodingName);
+            checkArgument(blockEncoding != null, "Cannot write block %s with encoding %s", block, encodingName);
 
             // see if a replacement block should be written instead
             Optional<Block> replacementBlock = blockEncoding.replacementBlockForWrite(block);

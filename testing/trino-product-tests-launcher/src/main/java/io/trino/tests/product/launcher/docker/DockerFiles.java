@@ -14,12 +14,11 @@
 package io.trino.tests.product.launcher.docker;
 
 import com.google.common.reflect.ClassPath;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import dev.failsafe.Failsafe;
+import dev.failsafe.RetryPolicy;
 import io.airlift.log.Logger;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.RetryPolicy;
-
-import javax.annotation.PreDestroy;
-import javax.annotation.concurrent.GuardedBy;
+import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -40,7 +39,7 @@ import static java.util.UUID.randomUUID;
 public final class DockerFiles
         implements AutoCloseable
 {
-    public static final String ROOT_PATH = "docker/presto-product-tests/";
+    public static final String ROOT_PATH = "docker/trino-product-tests/";
 
     private static final Logger log = Logger.get(DockerFiles.class);
 
@@ -57,8 +56,12 @@ public final class DockerFiles
             return;
         }
         if (dockerFilesHostPath != null) {
-            Failsafe.with(new RetryPolicy<>().withMaxAttempts(5))
-                    .run(() -> deleteRecursively(dockerFilesHostPath, ALLOW_INSECURE));
+            Failsafe.with(RetryPolicy.builder().withMaxAttempts(5).build())
+                    .run(() -> {
+                        synchronized (this) {
+                            deleteRecursively(dockerFilesHostPath, ALLOW_INSECURE);
+                        }
+                    });
             dockerFilesHostPath = null;
         }
         closed = true;

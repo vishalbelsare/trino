@@ -16,12 +16,10 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
 import io.trino.connector.MockConnectorColumnHandle;
 import io.trino.connector.MockConnectorFactory;
 import io.trino.connector.MockConnectorFactory.ApplyAggregation;
 import io.trino.connector.MockConnectorTableHandle;
-import io.trino.connector.MockConnectorTransactionHandle;
 import io.trino.metadata.TableHandle;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
@@ -29,11 +27,11 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import io.trino.testing.LocalQueryRunner;
+import io.trino.testing.PlanTester;
 import io.trino.testing.TestingSession;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.List;
 import java.util.Map;
@@ -45,32 +43,32 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.limit;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
+import static io.trino.testing.TestingHandles.TEST_CATALOG_NAME;
 import static java.util.stream.Collectors.toUnmodifiableList;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true) // shared mutable state
+@Execution(SAME_THREAD) // testApplyAggregation is shared mutable state
 public class TestPushDistinctLimitIntoTableScan
         extends BaseRuleTest
 {
-    private static final CatalogName TEST_CATALOG = new CatalogName("test_push_dl_catalog");
-
     private PushDistinctLimitIntoTableScan rule;
     private TableHandle tableHandle;
 
     private ApplyAggregation testApplyAggregation;
 
     @Override
-    protected Optional<LocalQueryRunner> createLocalQueryRunner()
+    protected Optional<PlanTester> createPlanTester()
     {
         Session defaultSession = TestingSession.testSessionBuilder()
-                .setCatalog(TEST_CATALOG.getCatalogName())
+                .setCatalog(TEST_CATALOG_NAME)
                 .setSchema("tiny")
                 .build();
 
-        LocalQueryRunner queryRunner = LocalQueryRunner.create(defaultSession);
+        PlanTester planTester = PlanTester.create(defaultSession);
 
-        queryRunner.createCatalog(
-                TEST_CATALOG.getCatalogName(),
+        planTester.createCatalog(
+                TEST_CATALOG_NAME,
                 MockConnectorFactory.builder()
                         .withApplyAggregation(
                                 (session, handle, aggregates, assignments, groupingSets) -> {
@@ -82,30 +80,21 @@ public class TestPushDistinctLimitIntoTableScan
                         .build(),
                 Map.of());
 
-        return Optional.of(queryRunner);
+        return Optional.of(planTester);
     }
 
-    @BeforeClass
+    @BeforeAll
     public void init()
     {
-        rule = new PushDistinctLimitIntoTableScan(tester().getMetadata());
+        rule = new PushDistinctLimitIntoTableScan(tester().getPlannerContext());
 
-        tableHandle = new TableHandle(
-                TEST_CATALOG,
-                new MockConnectorTableHandle(new SchemaTableName("mock_schema", "mock_nation")),
-                MockConnectorTransactionHandle.INSTANCE,
-                Optional.empty());
-    }
-
-    @BeforeMethod
-    public void reset()
-    {
-        testApplyAggregation = null;
+        tableHandle = tester().getCurrentCatalogTableHandle("mock_schema", "mock_nation");
     }
 
     @Test
     public void testDoesNotFireIfNoTableScan()
     {
+        testApplyAggregation = null;
         tester().assertThat(rule)
                 .on(p -> p.values(p.symbol("a", BIGINT)))
                 .doesNotFire();

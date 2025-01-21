@@ -17,16 +17,15 @@ import com.google.common.collect.ImmutableList;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.JoinNode;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static io.trino.sql.planner.assertions.PlanMatchPattern.equiJoinClause;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.sort;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.topN;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.planner.plan.JoinNode.Type.FULL;
-import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
-import static io.trino.sql.planner.plan.JoinNode.Type.RIGHT;
+import static io.trino.sql.planner.plan.JoinType.FULL;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
+import static io.trino.sql.planner.plan.JoinType.RIGHT;
 import static io.trino.sql.planner.plan.TopNNode.Step.FINAL;
 import static io.trino.sql.planner.plan.TopNNode.Step.PARTIAL;
 import static io.trino.sql.tree.SortItem.NullOrdering.FIRST;
@@ -53,11 +52,10 @@ public class TestPushTopNThroughOuterJoin
                                     new JoinNode.EquiJoinClause(leftKey, rightKey)));
                 })
                 .matches(
-                        join(
-                                LEFT,
-                                ImmutableList.of(equiJoinClause("leftKey", "rightKey")),
-                                topN(1, ImmutableList.of(sort("leftKey", ASCENDING, FIRST)), PARTIAL, values("leftKey")),
-                                values("rightKey")));
+                        join(LEFT, builder -> builder
+                                .equiCriteria("leftKey", "rightKey")
+                                .left(topN(1, ImmutableList.of(sort("leftKey", ASCENDING, FIRST)), PARTIAL, values("leftKey")))
+                                .right(values("rightKey"))));
     }
 
     @Test
@@ -78,11 +76,10 @@ public class TestPushTopNThroughOuterJoin
                                     new JoinNode.EquiJoinClause(leftKey, rightKey)));
                 })
                 .matches(
-                        join(
-                                RIGHT,
-                                ImmutableList.of(equiJoinClause("leftKey", "rightKey")),
-                                values("leftKey"),
-                                topN(1, ImmutableList.of(sort("rightKey", ASCENDING, FIRST)), PARTIAL, values("rightKey"))));
+                        join(RIGHT, builder -> builder
+                                .equiCriteria("leftKey", "rightKey")
+                                .left(values("leftKey"))
+                                .right(topN(1, ImmutableList.of(sort("rightKey", ASCENDING, FIRST)), PARTIAL, values("rightKey")))));
     }
 
     @Test

@@ -16,15 +16,20 @@ package io.trino.matching;
 import com.google.common.collect.Iterables;
 import io.trino.matching.pattern.CapturePattern;
 import io.trino.matching.pattern.FilterPattern;
+import io.trino.matching.pattern.OrPattern;
 import io.trino.matching.pattern.TypeOfPattern;
 import io.trino.matching.pattern.WithPattern;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.BiPredicate;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Predicates.not;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 public abstract class Pattern<T>
@@ -84,6 +89,15 @@ public abstract class Pattern<T>
         return new WithPattern<>(pattern, this);
     }
 
+    @SafeVarargs
+    public final Pattern<T> or(Function<Pattern<T>, Pattern<T>>... patternsSupplier)
+    {
+        List<Pattern<T>> patterns = Arrays.stream(patternsSupplier)
+                .map(supplier -> supplier.apply(this))
+                .collect(toImmutableList());
+        return new OrPattern<>(patterns, this);
+    }
+
     public Optional<Pattern<?>> previous()
     {
         return previous;
@@ -116,9 +130,7 @@ public abstract class Pattern<T>
             return previous.get().match(object, captures, context)
                     .flatMap(match -> accept(object, match.captures(), context));
         }
-        else {
-            return accept(object, captures, context);
-        }
+        return accept(object, captures, context);
     }
 
     @Override

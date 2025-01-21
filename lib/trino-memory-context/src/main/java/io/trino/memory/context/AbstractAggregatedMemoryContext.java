@@ -14,10 +14,8 @@
 package io.trino.memory.context;
 
 import com.google.common.util.concurrent.ListenableFuture;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
@@ -87,12 +85,9 @@ abstract class AbstractAggregatedMemoryContext
         usedBytes = addExact(usedBytes, bytes);
     }
 
-    abstract ListenableFuture<Void> updateBytes(String allocationTag, long bytes);
+    abstract ListenableFuture<Void> updateBytes(String allocationTag, long delta);
 
     abstract boolean tryUpdateBytes(String allocationTag, long delta);
-
-    @Nullable
-    abstract AbstractAggregatedMemoryContext getParent();
 
     abstract void closeContext();
 

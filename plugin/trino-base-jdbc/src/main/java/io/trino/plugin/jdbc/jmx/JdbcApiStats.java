@@ -13,12 +13,11 @@
  */
 package io.trino.plugin.jdbc.jmx;
 
+import com.google.errorprone.annotations.ThreadSafe;
 import io.airlift.stats.CounterStat;
 import io.airlift.stats.TimeStat;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
-
-import javax.annotation.concurrent.ThreadSafe;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
@@ -31,7 +30,7 @@ public class JdbcApiStats
     public <V, E extends Exception> V wrap(ThrowingCallable<V, E> callable)
             throws E
     {
-        try (TimeStat.BlockTimer ignored = time.time()) {
+        try (TimeStat.BlockTimer _ = time.time()) {
             return callable.call();
         }
         catch (Exception e) {
@@ -43,7 +42,7 @@ public class JdbcApiStats
     public <E extends Exception> void wrap(ThrowingRunnable<E> callable)
             throws E
     {
-        try (TimeStat.BlockTimer ignored = time.time()) {
+        try (TimeStat.BlockTimer _ = time.time()) {
             callable.run();
         }
         catch (Exception e) {

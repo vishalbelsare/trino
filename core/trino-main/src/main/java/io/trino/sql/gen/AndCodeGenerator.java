@@ -25,7 +25,6 @@ import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantFalse;
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class AndCodeGenerator
@@ -37,9 +36,9 @@ public class AndCodeGenerator
     {
         requireNonNull(specialForm, "specialForm is null");
 
-        checkArgument(specialForm.getArguments().size() >= 2);
+        checkArgument(specialForm.arguments().size() >= 2);
 
-        terms = specialForm.getArguments();
+        terms = specialForm.arguments();
     }
 
     @Override
@@ -58,12 +57,12 @@ public class AndCodeGenerator
             RowExpression term = terms.get(i);
             block.append(generator.generate(term));
 
-            IfStatement ifWasNull = new IfStatement(format("if term %s wasNull...", i))
+            IfStatement ifWasNull = new IfStatement("if term " + i + " wasNull...")
                     .condition(wasNull);
 
             ifWasNull.ifTrue()
                     .comment("clear the null flag, pop residual value off stack, and push was null flag on the stack (true)")
-                    .pop(term.getType().getJavaType()) // discard residual value
+                    .pop(term.type().getJavaType()) // discard residual value
                     .pop(boolean.class) // discard the previous "we've seen a null flag"
                     .push(true);
 

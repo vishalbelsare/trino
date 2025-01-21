@@ -14,20 +14,26 @@
 package io.trino.plugin.prometheus;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.net.HttpHeaders;
 import com.google.inject.ConfigurationException;
 import com.google.inject.spi.Message;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDuration;
-
-import javax.annotation.PostConstruct;
-import javax.validation.constraints.NotNull;
+import jakarta.annotation.PostConstruct;
+import jakarta.validation.constraints.NotNull;
 
 import java.io.File;
 import java.net.URI;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+
+import static java.lang.String.format;
 
 public class PrometheusConnectorConfig
 {
@@ -36,7 +42,12 @@ public class PrometheusConnectorConfig
     private Duration maxQueryRangeDuration = new Duration(21, TimeUnit.DAYS);
     private Duration cacheDuration = new Duration(30, TimeUnit.SECONDS);
     private Duration readTimeout = new Duration(10, TimeUnit.SECONDS);
+    private String httpAuthHeaderName = HttpHeaders.AUTHORIZATION;
     private File bearerTokenFile;
+    private String user;
+    private String password;
+    private boolean caseInsensitiveNameMatching;
+    private Map<String, String> additionalHeaders = ImmutableMap.of();
 
     @NotNull
     public URI getPrometheusURI()
@@ -94,6 +105,19 @@ public class PrometheusConnectorConfig
         return this;
     }
 
+    public String getHttpAuthHeaderName()
+    {
+        return httpAuthHeaderName;
+    }
+
+    @Config("prometheus.auth.http.header.name")
+    @ConfigDescription("Name of the HTTP header to use for authorization")
+    public PrometheusConnectorConfig setHttpAuthHeaderName(String httpHeaderName)
+    {
+        this.httpAuthHeaderName = httpHeaderName;
+        return this;
+    }
+
     public Optional<File> getBearerTokenFile()
     {
         return Optional.ofNullable(bearerTokenFile);
@@ -104,6 +128,33 @@ public class PrometheusConnectorConfig
     public PrometheusConnectorConfig setBearerTokenFile(File bearerTokenFile)
     {
         this.bearerTokenFile = bearerTokenFile;
+        return this;
+    }
+
+    @NotNull
+    public Optional<String> getUser()
+    {
+        return Optional.ofNullable(user);
+    }
+
+    @Config("prometheus.auth.user")
+    public PrometheusConnectorConfig setUser(String user)
+    {
+        this.user = user;
+        return this;
+    }
+
+    @NotNull
+    public Optional<String> getPassword()
+    {
+        return Optional.ofNullable(password);
+    }
+
+    @Config("prometheus.auth.password")
+    @ConfigSecuritySensitive
+    public PrometheusConnectorConfig setPassword(String password)
+    {
+        this.password = password;
         return this;
     }
 
@@ -121,6 +172,50 @@ public class PrometheusConnectorConfig
         return this;
     }
 
+    public boolean isCaseInsensitiveNameMatching()
+    {
+        return caseInsensitiveNameMatching;
+    }
+
+    @Config("prometheus.case-insensitive-name-matching")
+    @ConfigDescription("Where to match the prometheus metric name case insensitively ")
+    public PrometheusConnectorConfig setCaseInsensitiveNameMatching(boolean caseInsensitiveNameMatching)
+    {
+        this.caseInsensitiveNameMatching = caseInsensitiveNameMatching;
+        return this;
+    }
+
+    public Map<String, String> getAdditionalHeaders()
+    {
+        return additionalHeaders;
+    }
+
+    @Config("prometheus.http.additional-headers")
+    @ConfigDescription("Comma separated key:value pairs to be sent with the HTTP request to Prometheus as additional headers")
+    public PrometheusConnectorConfig setAdditionalHeaders(String httpHeaders)
+    {
+        try {
+            // we allow escaping the delimiters like , and : using back-slash.
+            // To support that we create a negative lookbehind of , and : which
+            // are not preceded by a back-slash.
+            String headersDelim = "(?<!\\\\),";
+            String kvDelim = "(?<!\\\\):";
+            Map<String, String> temp = new HashMap<>();
+            if (httpHeaders != null) {
+                for (String kv : httpHeaders.split(headersDelim)) {
+                    String key = kv.split(kvDelim, 2)[0].trim();
+                    String val = kv.split(kvDelim, 2)[1].trim();
+                    temp.put(key, val);
+                }
+                this.additionalHeaders = ImmutableMap.copyOf(temp);
+            }
+        }
+        catch (IndexOutOfBoundsException e) {
+            throw new IllegalArgumentException(format("Invalid format for 'prometheus.http.additional-headers' because %s. Value provided is %s", e.getMessage(), httpHeaders), e);
+        }
+        return this;
+    }
+
     @PostConstruct
     public void checkConfig()
     {
@@ -128,6 +223,15 @@ public class PrometheusConnectorConfig
         long queryChunkSizeDuration = (long) getQueryChunkSizeDuration().getValue(TimeUnit.SECONDS);
         if (maxQueryRangeDuration < queryChunkSizeDuration) {
             throw new ConfigurationException(ImmutableList.of(new Message("prometheus.max.query.range.duration must be greater than prometheus.query.chunk.size.duration")));
+        }
+        if (getBearerTokenFile().isPresent() && (getUser().isPresent() || getPassword().isPresent())) {
+            throw new IllegalStateException("Either on of bearer token file or basic authentication should be used");
+        }
+        if (getUser().isPresent() ^ getPassword().isPresent()) {
+            throw new IllegalStateException("Both username and password must be set when using basic authentication");
+        }
+        if (getAdditionalHeaders().containsKey(httpAuthHeaderName)) {
+            throw new IllegalStateException("Additional headers can not include: " + httpAuthHeaderName);
         }
     }
 }

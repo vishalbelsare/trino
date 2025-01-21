@@ -13,26 +13,20 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.util.Arrays;
-import java.util.function.BiConsumer;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
-import static io.trino.spi.block.BlockUtil.calculateBlockResetSize;
-import static io.trino.spi.block.BlockUtil.checkArrayRange;
-import static io.trino.spi.block.BlockUtil.checkValidRegion;
-import static io.trino.spi.block.BlockUtil.countUsedPositions;
+import static io.trino.spi.block.BlockUtil.calculateNewArraySize;
 import static java.lang.Math.max;
+import static java.util.Objects.checkIndex;
 
 public class ByteArrayBlockBuilder
         implements BlockBuilder
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(ByteArrayBlockBuilder.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(ByteArrayBlockBuilder.class);
     private static final Block NULL_VALUE_BLOCK = new ByteArrayBlock(0, 1, new boolean[] {true}, new byte[1]);
 
     @Nullable
@@ -55,81 +49,225 @@ public class ByteArrayBlockBuilder
         this.blockBuilderStatus = blockBuilderStatus;
         this.initialEntryCount = max(expectedEntries, 1);
 
-        updateDataSize();
+        updateRetainedSize();
     }
 
-    @Override
-    public BlockBuilder writeByte(int value)
+    public BlockBuilder writeByte(byte value)
     {
-        if (values.length <= positionCount) {
-            growCapacity();
-        }
+        ensureCapacity(positionCount + 1);
 
-        values[positionCount] = (byte) value;
+        values[positionCount] = value;
 
         hasNonNullValue = true;
         positionCount++;
         if (blockBuilderStatus != null) {
-            blockBuilderStatus.addBytes(Byte.BYTES + Byte.BYTES);
+            blockBuilderStatus.addBytes(ByteArrayBlock.SIZE_IN_BYTES_PER_POSITION);
         }
         return this;
     }
 
     @Override
-    public BlockBuilder closeEntry()
+    public void append(ValueBlock block, int position)
     {
-        return this;
+        ensureCapacity(positionCount + 1);
+
+        ByteArrayBlock byteArrayBlock = (ByteArrayBlock) block;
+        if (byteArrayBlock.isNull(position)) {
+            valueIsNull[positionCount] = true;
+            hasNullValue = true;
+        }
+        else {
+            values[positionCount] = byteArrayBlock.getByte(position);
+            hasNonNullValue = true;
+        }
+        positionCount++;
+
+        if (blockBuilderStatus != null) {
+            blockBuilderStatus.addBytes(ByteArrayBlock.SIZE_IN_BYTES_PER_POSITION);
+        }
+    }
+
+    @Override
+    public void appendRepeated(ValueBlock block, int position, int count)
+    {
+        if (count == 0) {
+            return;
+        }
+        if (count == 1) {
+            append(block, position);
+            return;
+        }
+
+        ensureCapacity(positionCount + count);
+
+        ByteArrayBlock byteArrayBlock = (ByteArrayBlock) block;
+
+        if (byteArrayBlock.isNull(position)) {
+            Arrays.fill(valueIsNull, positionCount, positionCount + count, true);
+            hasNullValue = true;
+        }
+        else {
+            byte value = byteArrayBlock.getByte(position);
+            Arrays.fill(values, positionCount, positionCount + count, value);
+            hasNonNullValue = true;
+        }
+        positionCount += count;
+
+        if (blockBuilderStatus != null) {
+            blockBuilderStatus.addBytes(count * ByteArrayBlock.SIZE_IN_BYTES_PER_POSITION);
+        }
+    }
+
+    @Override
+    public void appendRange(ValueBlock block, int offset, int length)
+    {
+        if (length == 0) {
+            return;
+        }
+        if (length == 1) {
+            append(block, offset);
+            return;
+        }
+
+        ensureCapacity(positionCount + length);
+
+        ByteArrayBlock byteArrayBlock = (ByteArrayBlock) block;
+        int rawOffset = byteArrayBlock.getRawValuesOffset();
+
+        byte[] rawValues = byteArrayBlock.getRawValues();
+        System.arraycopy(rawValues, rawOffset + offset, values, positionCount, length);
+
+        boolean[] rawValueIsNull = byteArrayBlock.getRawValueIsNull();
+        if (rawValueIsNull != null) {
+            for (int i = 0; i < length; i++) {
+                if (rawValueIsNull[rawOffset + offset + i]) {
+                    valueIsNull[positionCount + i] = true;
+                    hasNullValue = true;
+                }
+                else {
+                    hasNonNullValue = true;
+                }
+            }
+        }
+        else {
+            hasNonNullValue = true;
+        }
+        positionCount += length;
+
+        if (blockBuilderStatus != null) {
+            blockBuilderStatus.addBytes(length * ByteArrayBlock.SIZE_IN_BYTES_PER_POSITION);
+        }
+    }
+
+    @Override
+    public void appendPositions(ValueBlock block, int[] positions, int offset, int length)
+    {
+        if (length == 0) {
+            return;
+        }
+        if (length == 1) {
+            append(block, positions[offset]);
+            return;
+        }
+
+        ensureCapacity(positionCount + length);
+
+        ByteArrayBlock byteArrayBlock = (ByteArrayBlock) block;
+        int rawOffset = byteArrayBlock.getRawValuesOffset();
+        byte[] rawValues = byteArrayBlock.getRawValues();
+        boolean[] rawValueIsNull = byteArrayBlock.getRawValueIsNull();
+        if (rawValueIsNull != null) {
+            for (int i = 0; i < length; i++) {
+                int rawPosition = positions[offset + i] + rawOffset;
+                if (rawValueIsNull[rawPosition]) {
+                    valueIsNull[positionCount + i] = true;
+                    hasNullValue = true;
+                }
+                else {
+                    values[positionCount + i] = rawValues[rawPosition];
+                    hasNonNullValue = true;
+                }
+            }
+        }
+        else {
+            for (int i = 0; i < length; i++) {
+                int rawPosition = positions[offset + i] + rawOffset;
+                values[positionCount + i] = rawValues[rawPosition];
+            }
+            hasNonNullValue = true;
+        }
+        positionCount += length;
+
+        if (blockBuilderStatus != null) {
+            blockBuilderStatus.addBytes(length * ByteArrayBlock.SIZE_IN_BYTES_PER_POSITION);
+        }
     }
 
     @Override
     public BlockBuilder appendNull()
     {
-        if (values.length <= positionCount) {
-            growCapacity();
-        }
+        ensureCapacity(positionCount + 1);
 
         valueIsNull[positionCount] = true;
 
         hasNullValue = true;
         positionCount++;
         if (blockBuilderStatus != null) {
-            blockBuilderStatus.addBytes(Byte.BYTES + Byte.BYTES);
+            blockBuilderStatus.addBytes(ByteArrayBlock.SIZE_IN_BYTES_PER_POSITION);
         }
         return this;
+    }
+
+    @Override
+    public void resetTo(int position)
+    {
+        checkIndex(position, positionCount + 1);
+        positionCount = position;
     }
 
     @Override
     public Block build()
     {
         if (!hasNonNullValue) {
-            return new RunLengthEncodedBlock(NULL_VALUE_BLOCK, positionCount);
+            return RunLengthEncodedBlock.create(NULL_VALUE_BLOCK, positionCount);
         }
+        return buildValueBlock();
+    }
+
+    @Override
+    public ByteArrayBlock buildValueBlock()
+    {
         return new ByteArrayBlock(0, positionCount, hasNullValue ? valueIsNull : null, values);
     }
 
     @Override
-    public BlockBuilder newBlockBuilderLike(BlockBuilderStatus blockBuilderStatus)
+    public BlockBuilder newBlockBuilderLike(int expectedEntries, BlockBuilderStatus blockBuilderStatus)
     {
-        return new ByteArrayBlockBuilder(blockBuilderStatus, calculateBlockResetSize(positionCount));
+        return new ByteArrayBlockBuilder(blockBuilderStatus, expectedEntries);
     }
 
-    private void growCapacity()
+    private void ensureCapacity(int capacity)
     {
+        if (values.length >= capacity) {
+            return;
+        }
+
         int newSize;
         if (initialized) {
-            newSize = BlockUtil.calculateNewArraySize(values.length);
+            newSize = calculateNewArraySize(capacity);
         }
         else {
             newSize = initialEntryCount;
             initialized = true;
         }
+        newSize = max(newSize, capacity);
 
         valueIsNull = Arrays.copyOf(valueIsNull, newSize);
         values = Arrays.copyOf(values, newSize);
-        updateDataSize();
+        updateRetainedSize();
     }
 
-    private void updateDataSize()
+    private void updateRetainedSize()
     {
         retainedSizeInBytes = INSTANCE_SIZE + sizeOf(valueIsNull) + sizeOf(values);
         if (blockBuilderStatus != null) {
@@ -140,19 +278,7 @@ public class ByteArrayBlockBuilder
     @Override
     public long getSizeInBytes()
     {
-        return (Byte.BYTES + Byte.BYTES) * (long) positionCount;
-    }
-
-    @Override
-    public long getRegionSizeInBytes(int position, int length)
-    {
-        return (Byte.BYTES + Byte.BYTES) * (long) length;
-    }
-
-    @Override
-    public long getPositionsSizeInBytes(boolean[] positions)
-    {
-        return (Byte.BYTES + Byte.BYTES) * (long) countUsedPositions(positions);
+        return ByteArrayBlock.SIZE_IN_BYTES_PER_POSITION * (long) positionCount;
     }
 
     @Override
@@ -162,122 +288,9 @@ public class ByteArrayBlockBuilder
     }
 
     @Override
-    public long getEstimatedDataSizeForStats(int position)
-    {
-        return isNull(position) ? 0 : Byte.BYTES;
-    }
-
-    @Override
-    public void retainedBytesForEachPart(BiConsumer<Object, Long> consumer)
-    {
-        consumer.accept(values, sizeOf(values));
-        consumer.accept(valueIsNull, sizeOf(valueIsNull));
-        consumer.accept(this, (long) INSTANCE_SIZE);
-    }
-
-    @Override
     public int getPositionCount()
     {
         return positionCount;
-    }
-
-    @Override
-    public byte getByte(int position, int offset)
-    {
-        checkReadablePosition(position);
-        if (offset != 0) {
-            throw new IllegalArgumentException("offset must be zero");
-        }
-        return values[position];
-    }
-
-    @Override
-    public boolean mayHaveNull()
-    {
-        return hasNullValue;
-    }
-
-    @Override
-    public boolean isNull(int position)
-    {
-        checkReadablePosition(position);
-        return valueIsNull[position];
-    }
-
-    @Override
-    public void writePositionTo(int position, BlockBuilder blockBuilder)
-    {
-        checkReadablePosition(position);
-        blockBuilder.writeByte(values[position]);
-        blockBuilder.closeEntry();
-    }
-
-    @Override
-    public Block getSingleValueBlock(int position)
-    {
-        checkReadablePosition(position);
-        return new ByteArrayBlock(
-                0,
-                1,
-                valueIsNull[position] ? new boolean[] {true} : null,
-                new byte[] {values[position]});
-    }
-
-    @Override
-    public Block copyPositions(int[] positions, int offset, int length)
-    {
-        checkArrayRange(positions, offset, length);
-
-        if (!hasNonNullValue) {
-            return new RunLengthEncodedBlock(NULL_VALUE_BLOCK, length);
-        }
-        boolean[] newValueIsNull = null;
-        if (hasNullValue) {
-            newValueIsNull = new boolean[length];
-        }
-        byte[] newValues = new byte[length];
-        for (int i = 0; i < length; i++) {
-            int position = positions[offset + i];
-            checkReadablePosition(position);
-            if (hasNullValue) {
-                newValueIsNull[i] = valueIsNull[position];
-            }
-            newValues[i] = values[position];
-        }
-        return new ByteArrayBlock(0, length, newValueIsNull, newValues);
-    }
-
-    @Override
-    public Block getRegion(int positionOffset, int length)
-    {
-        checkValidRegion(getPositionCount(), positionOffset, length);
-
-        if (!hasNonNullValue) {
-            return new RunLengthEncodedBlock(NULL_VALUE_BLOCK, length);
-        }
-        return new ByteArrayBlock(positionOffset, length, hasNullValue ? valueIsNull : null, values);
-    }
-
-    @Override
-    public Block copyRegion(int positionOffset, int length)
-    {
-        checkValidRegion(getPositionCount(), positionOffset, length);
-
-        if (!hasNonNullValue) {
-            return new RunLengthEncodedBlock(NULL_VALUE_BLOCK, length);
-        }
-        boolean[] newValueIsNull = null;
-        if (hasNullValue) {
-            newValueIsNull = Arrays.copyOfRange(valueIsNull, positionOffset, positionOffset + length);
-        }
-        byte[] newValues = Arrays.copyOfRange(values, positionOffset, positionOffset + length);
-        return new ByteArrayBlock(0, length, newValueIsNull, newValues);
-    }
-
-    @Override
-    public String getEncodingName()
-    {
-        return ByteArrayBlockEncoding.NAME;
     }
 
     @Override
@@ -287,17 +300,5 @@ public class ByteArrayBlockBuilder
         sb.append("positionCount=").append(getPositionCount());
         sb.append('}');
         return sb.toString();
-    }
-
-    Slice getValuesSlice()
-    {
-        return Slices.wrappedBuffer(values, 0, positionCount);
-    }
-
-    private void checkReadablePosition(int position)
-    {
-        if (position < 0 || position >= getPositionCount()) {
-            throw new IllegalArgumentException("position is not valid");
-        }
     }
 }

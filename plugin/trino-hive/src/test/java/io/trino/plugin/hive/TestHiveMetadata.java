@@ -15,11 +15,14 @@ package io.trino.plugin.hive;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.metastore.HivePartition;
+import io.trino.metastore.HiveType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.ValueSet;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.Optional;
 import java.util.stream.IntStream;
@@ -30,8 +33,7 @@ import static io.trino.plugin.hive.HiveColumnHandle.createBaseColumn;
 import static io.trino.plugin.hive.HiveMetadata.createPredicate;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHiveMetadata
 {
@@ -51,7 +53,8 @@ public class TestHiveMetadata
             HiveColumnHandle.ColumnType.PARTITION_KEY,
             Optional.empty());
 
-    @Test(timeOut = 10_000)
+    @Test
+    @Timeout(10)
     public void testCreatePredicate()
     {
         ImmutableList.Builder<HivePartition> partitions = ImmutableList.builder();
@@ -65,7 +68,7 @@ public class TestHiveMetadata
 
         Domain domain = createPredicate(ImmutableList.of(TEST_COLUMN_HANDLE), partitions.build())
                 .getDomains().orElseThrow().get(TEST_COLUMN_HANDLE);
-        assertEquals(domain, Domain.create(
+        assertThat(domain).isEqualTo(Domain.create(
                 ValueSet.copyOf(VARCHAR,
                         IntStream.range(0, 5_000)
                                 .mapToObj(i -> utf8Slice(Integer.toString(i)))
@@ -87,7 +90,7 @@ public class TestHiveMetadata
 
         Domain domain = createPredicate(ImmutableList.of(TEST_COLUMN_HANDLE), partitions.build())
                 .getDomains().orElseThrow().get(TEST_COLUMN_HANDLE);
-        assertEquals(domain, Domain.onlyNull(VARCHAR));
+        assertThat(domain).isEqualTo(Domain.onlyNull(VARCHAR));
     }
 
     @Test
@@ -108,7 +111,7 @@ public class TestHiveMetadata
 
         Domain domain = createPredicate(ImmutableList.of(columnHandle), partitions.build())
                 .getDomains().orElseThrow().get(columnHandle);
-        assertEquals(domain, Domain.notNull(DOUBLE));
+        assertThat(domain).isEqualTo(Domain.notNull(DOUBLE));
     }
 
     @Test
@@ -134,7 +137,7 @@ public class TestHiveMetadata
 
         Domain domain = createPredicate(ImmutableList.of(columnHandle), partitions.build())
                 .getDomains().orElseThrow().get(columnHandle);
-        assertNull(domain);
+        assertThat(domain).isNull();
     }
 
     @Test
@@ -156,6 +159,6 @@ public class TestHiveMetadata
 
         Domain domain = createPredicate(ImmutableList.of(TEST_COLUMN_HANDLE), partitions.build())
                 .getDomains().orElseThrow().get(TEST_COLUMN_HANDLE);
-        assertEquals(domain, Domain.create(ValueSet.of(VARCHAR, utf8Slice("0"), utf8Slice("1"), utf8Slice("2"), utf8Slice("3"), utf8Slice("4")), true));
+        assertThat(domain).isEqualTo(Domain.create(ValueSet.of(VARCHAR, utf8Slice("0"), utf8Slice("1"), utf8Slice("2"), utf8Slice("3"), utf8Slice("4")), true));
     }
 }

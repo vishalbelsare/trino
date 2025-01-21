@@ -15,23 +15,27 @@ package io.trino.operator;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import io.trino.connector.CatalogName;
+import io.trino.spi.Mergeable;
+import io.trino.spi.connector.CatalogHandle;
 
+import java.util.List;
+import java.util.Map;
+
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.util.Objects.requireNonNull;
 
 public class SplitOperatorInfo
-        implements OperatorInfo
+        implements OperatorInfo, Mergeable<SplitOperatorInfo>
 {
-    private final CatalogName catalogName;
-    // NOTE: this deserializes to a map instead of the expected type
-    private final Object splitInfo;
+    private final CatalogHandle catalogHandle;
+    private final Map<String, String> splitInfo;
 
     @JsonCreator
     public SplitOperatorInfo(
-            @JsonProperty("catalogName") CatalogName catalogName,
-            @JsonProperty("splitInfo") Object splitInfo)
+            @JsonProperty("catalogHandle") CatalogHandle catalogHandle,
+            @JsonProperty("splitInfo") Map<String, String> splitInfo)
     {
-        this.catalogName = requireNonNull(catalogName, "catalogName is null");
+        this.catalogHandle = requireNonNull(catalogHandle, "catalogHandle is null");
         this.splitInfo = splitInfo;
     }
 
@@ -42,14 +46,28 @@ public class SplitOperatorInfo
     }
 
     @JsonProperty
-    public Object getSplitInfo()
+    public Map<String, String> getSplitInfo()
     {
         return splitInfo;
     }
 
     @JsonProperty
-    public CatalogName getCatalogName()
+    public CatalogHandle getCatalogHandle()
     {
-        return catalogName;
+        return catalogHandle;
+    }
+
+    @Override
+    public SplitOperatorInfo mergeWith(SplitOperatorInfo other)
+    {
+        return mergeWith(List.of(other));
+    }
+
+    @Override
+    public SplitOperatorInfo mergeWith(List<SplitOperatorInfo> others)
+    {
+        return new SplitOperatorInfo(
+                catalogHandle,
+                splitInfo.entrySet().stream().collect(toImmutableMap(Map.Entry::getKey, e -> e.getValue() + " (" + others.size() + " more)")));
     }
 }

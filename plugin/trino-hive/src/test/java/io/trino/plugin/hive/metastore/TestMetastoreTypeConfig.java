@@ -14,7 +14,7 @@
 package io.trino.plugin.hive.metastore;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -34,9 +34,7 @@ public class TestMetastoreTypeConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("hive.metastore", "foo")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("hive.metastore", "foo");
 
         MetastoreTypeConfig expected = new MetastoreTypeConfig()
                 .setMetastoreType("foo");

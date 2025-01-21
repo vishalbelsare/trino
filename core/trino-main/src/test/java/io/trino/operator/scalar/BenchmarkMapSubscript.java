@@ -180,12 +180,12 @@ public class BenchmarkMapSubscript
             for (int i = 0; i < keyIds.length; i++) {
                 keyIds[i] = i % keys.size();
             }
-            return new DictionaryBlock(keyDictionaryBlock, keyIds);
+            return DictionaryBlock.create(keyIds.length, keyDictionaryBlock, keyIds);
         }
 
         private static Block createFixWidthValueBlock(int positionCount, int mapSize)
         {
-            BlockBuilder valueBlockBuilder = DOUBLE.createBlockBuilder(null, positionCount * mapSize);
+            BlockBuilder valueBlockBuilder = DOUBLE.createFixedSizeBlockBuilder(positionCount * mapSize);
             for (int i = 0; i < positionCount * mapSize; i++) {
                 DOUBLE.writeDouble(valueBlockBuilder, ThreadLocalRandom.current().nextDouble());
             }
@@ -219,7 +219,7 @@ public class BenchmarkMapSubscript
             for (int i = 0; i < keyIds.length; i++) {
                 keyIds[i] = ThreadLocalRandom.current().nextInt(0, dictionarySize);
             }
-            return new DictionaryBlock(dictionaryBlock, keyIds);
+            return DictionaryBlock.create(keyIds.length, dictionaryBlock, keyIds);
         }
 
         private static String randomString(int length)

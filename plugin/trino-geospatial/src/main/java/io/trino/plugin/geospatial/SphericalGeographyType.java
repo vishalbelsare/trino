@@ -16,8 +16,11 @@ package io.trino.plugin.geospatial;
 import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlock;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
+import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TypeSignature;
 
 import static io.trino.geospatial.serde.GeometrySerde.deserialize;
@@ -26,29 +29,18 @@ public class SphericalGeographyType
         extends AbstractVariableWidthType
 {
     public static final SphericalGeographyType SPHERICAL_GEOGRAPHY = new SphericalGeographyType();
-    public static final String SPHERICAL_GEOGRAPHY_TYPE_NAME = "SphericalGeography";
 
     private SphericalGeographyType()
     {
-        super(new TypeSignature(SPHERICAL_GEOGRAPHY_TYPE_NAME), Slice.class);
-    }
-
-    @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            block.writeBytesTo(position, 0, block.getSliceLength(position), blockBuilder);
-            blockBuilder.closeEntry();
-        }
+        super(new TypeSignature(StandardTypes.SPHERICAL_GEOGRAPHY), Slice.class);
     }
 
     @Override
     public Slice getSlice(Block block, int position)
     {
-        return block.getSlice(position, 0, block.getSliceLength(position));
+        VariableWidthBlock valueBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        int valuePosition = block.getUnderlyingValuePosition(position);
+        return valueBlock.getSlice(valuePosition);
     }
 
     @Override
@@ -60,7 +52,7 @@ public class SphericalGeographyType
     @Override
     public void writeSlice(BlockBuilder blockBuilder, Slice value, int offset, int length)
     {
-        blockBuilder.writeBytes(value, offset, length).closeEntry();
+        ((VariableWidthBlockBuilder) blockBuilder).writeEntry(value, offset, length);
     }
 
     @Override
@@ -69,7 +61,11 @@ public class SphericalGeographyType
         if (block.isNull(position)) {
             return null;
         }
-        Slice slice = block.getSlice(position, 0, block.getSliceLength(position));
-        return deserialize(slice).asText();
+        try {
+            return deserialize(getSlice(block, position)).asText();
+        }
+        catch (Exception e) {
+            return "<invalid geometry>";
+        }
     }
 }

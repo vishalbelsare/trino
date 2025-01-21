@@ -14,7 +14,7 @@
 package io.trino.plugin.sqlserver;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -28,17 +28,26 @@ public class TestSqlServerConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(SqlServerConfig.class)
-                .setSnapshotIsolationDisabled(false));
+                .setBulkCopyForWrite(false)
+                .setBulkCopyForWriteLockDestinationTable(false)
+                .setSnapshotIsolationDisabled(false)
+                .setStoredProcedureTableFunctionEnabled(false));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("sqlserver.bulk-copy-for-write.enabled", "true")
+                .put("sqlserver.bulk-copy-for-write.lock-destination-table", "true")
                 .put("sqlserver.snapshot-isolation.disabled", "true")
-                .build();
+                .put("sqlserver.stored-procedure-table-function-enabled", "true")
+                .buildOrThrow();
 
         SqlServerConfig expected = new SqlServerConfig()
+                .setBulkCopyForWrite(true)
+                .setBulkCopyForWriteLockDestinationTable(true)
+                .setStoredProcedureTableFunctionEnabled(true)
                 .setSnapshotIsolationDisabled(true);
 
         assertFullMapping(properties, expected);

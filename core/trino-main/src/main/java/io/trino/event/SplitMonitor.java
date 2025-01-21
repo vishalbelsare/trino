@@ -15,6 +15,7 @@ package io.trino.event;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.eventlistener.EventListenerManager;
 import io.trino.execution.TaskId;
@@ -24,9 +25,7 @@ import io.trino.operator.SplitOperatorInfo;
 import io.trino.spi.eventlistener.SplitCompletedEvent;
 import io.trino.spi.eventlistener.SplitFailureInfo;
 import io.trino.spi.eventlistener.SplitStatistics;
-
-import javax.annotation.Nullable;
-import javax.inject.Inject;
+import jakarta.annotation.Nullable;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -81,7 +80,7 @@ public class SplitMonitor
                 .map(OperatorStats::getInfo)
                 .filter(SplitOperatorInfo.class::isInstance)
                 .map(SplitOperatorInfo.class::cast)
-                .map(info -> info.getCatalogName().getCatalogName())
+                .map(info -> info.getCatalogHandle().getCatalogName().toString())
                 .findFirst();
 
         try {
@@ -89,7 +88,7 @@ public class SplitMonitor
                     new SplitCompletedEvent(
                             taskId.getQueryId().toString(),
                             taskId.getStageId().toString(),
-                            Integer.toString(taskId.getId()),
+                            taskId.toString(),
                             splitCatalog,
                             driverStats.getCreateTime().toDate().toInstant(),
                             Optional.ofNullable(driverStats.getStartTime()).map(startTime -> startTime.toDate().toInstant()),

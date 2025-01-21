@@ -13,63 +13,65 @@
  */
 package io.trino.plugin.iceberg;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import io.airlift.slice.Slice;
+import io.airlift.log.Logger;
 import io.trino.orc.OrcDataSink;
 import io.trino.orc.OrcDataSource;
-import io.trino.orc.OrcWriteValidation;
+import io.trino.orc.OrcWriteValidation.OrcWriteValidationMode;
+import io.trino.orc.OrcWriter;
 import io.trino.orc.OrcWriterOptions;
 import io.trino.orc.OrcWriterStats;
 import io.trino.orc.metadata.ColumnMetadata;
 import io.trino.orc.metadata.CompressionKind;
-import io.trino.orc.metadata.OrcColumnId;
 import io.trino.orc.metadata.OrcType;
-import io.trino.orc.metadata.statistics.BooleanStatistics;
-import io.trino.orc.metadata.statistics.ColumnStatistics;
-import io.trino.orc.metadata.statistics.DateStatistics;
-import io.trino.orc.metadata.statistics.DecimalStatistics;
-import io.trino.orc.metadata.statistics.DoubleStatistics;
-import io.trino.orc.metadata.statistics.IntegerStatistics;
-import io.trino.orc.metadata.statistics.StringStatistics;
-import io.trino.orc.metadata.statistics.TimestampStatistics;
-import io.trino.plugin.hive.WriterKind;
-import io.trino.plugin.hive.orc.OrcFileWriter;
+import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
+import io.trino.spi.block.Block;
+import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.Type;
-import org.apache.iceberg.Metrics;
+import org.apache.iceberg.MetricsConfig;
 import org.apache.iceberg.Schema;
-import org.apache.iceberg.types.Conversions;
-import org.apache.iceberg.types.Types;
 
-import java.math.BigDecimal;
-import java.nio.ByteBuffer;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
-import java.util.Set;
-import java.util.concurrent.Callable;
 import java.util.function.Supplier;
 
-import static com.google.common.base.Verify.verify;
-import static io.trino.orc.metadata.OrcColumnId.ROOT_COLUMN;
-import static io.trino.plugin.hive.acid.AcidTransaction.NO_ACID_TRANSACTION;
-import static io.trino.plugin.iceberg.TypeConverter.ORC_ICEBERG_ID_KEY;
-import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
-import static java.lang.Math.toIntExact;
+import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_WRITER_CLOSE_ERROR;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_WRITER_DATA_ERROR;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_WRITE_VALIDATION_FAILED;
+import static io.trino.plugin.iceberg.util.OrcMetrics.computeMetrics;
 import static java.util.Objects.requireNonNull;
 
-public class IcebergOrcFileWriter
-        extends OrcFileWriter
+public final class IcebergOrcFileWriter
         implements IcebergFileWriter
 {
+    private static final Logger log = Logger.get(IcebergOrcFileWriter.class);
+    private static final int INSTANCE_SIZE = instanceSize(IcebergOrcFileWriter.class);
+    private static final ThreadMXBean THREAD_MX_BEAN = ManagementFactory.getThreadMXBean();
+
+    private final OrcWriter orcWriter;
     private final Schema icebergSchema;
     private final ColumnMetadata<OrcType> orcColumns;
+    private final MetricsConfig metricsConfig;
+    private final Closeable rollbackAction;
+    private final int[] fileInputColumnIndexes;
+    private final List<Block> nullBlocks;
+    private final Optional<Supplier<OrcDataSource>> validationInputFactory;
+    private long validationCpuNanos;
 
     public IcebergOrcFileWriter(
+            MetricsConfig metricsConfig,
             Schema icebergSchema,
             OrcDataSink orcDataSink,
-            Callable<Void> rollbackAction,
+            Closeable rollbackAction,
             List<String> columnNames,
             List<Type> fileColumnTypes,
             ColumnMetadata<OrcType> fileColumnOrcTypes,
@@ -78,203 +80,134 @@ public class IcebergOrcFileWriter
             int[] fileInputColumnIndexes,
             Map<String, String> metadata,
             Optional<Supplier<OrcDataSource>> validationInputFactory,
-            OrcWriteValidation.OrcWriteValidationMode validationMode,
+            OrcWriteValidationMode validationMode,
             OrcWriterStats stats)
     {
-        super(orcDataSink, WriterKind.INSERT, NO_ACID_TRANSACTION, false, OptionalInt.empty(), rollbackAction, columnNames, fileColumnTypes, fileColumnOrcTypes, compression, options, fileInputColumnIndexes, metadata, validationInputFactory, validationMode, stats);
+        requireNonNull(orcDataSink, "orcDataSink is null");
+        this.rollbackAction = requireNonNull(rollbackAction, "rollbackAction is null");
+        this.fileInputColumnIndexes = requireNonNull(fileInputColumnIndexes, "fileInputColumnIndexes is null");
+
+        this.nullBlocks = fileColumnTypes.stream()
+                .map(Type::createNullBlock)
+                .collect(toImmutableList());
+
+        this.validationInputFactory = validationInputFactory;
+        this.orcWriter = new OrcWriter(
+                orcDataSink,
+                columnNames,
+                fileColumnTypes,
+                fileColumnOrcTypes,
+                compression,
+                options,
+                metadata,
+                validationInputFactory.isPresent(),
+                validationMode,
+                stats);
         this.icebergSchema = requireNonNull(icebergSchema, "icebergSchema is null");
+        this.metricsConfig = requireNonNull(metricsConfig, "metricsConfig is null");
         orcColumns = fileColumnOrcTypes;
     }
 
     @Override
-    public Metrics getMetrics()
+    public FileMetrics getFileMetrics()
     {
-        return computeMetrics(icebergSchema, orcColumns, orcWriter.getFileRowCount(), orcWriter.getFileStats());
+        return new FileMetrics(
+                computeMetrics(metricsConfig, icebergSchema, orcColumns, orcWriter.getFileRowCount(), orcWriter.getFileStats()),
+                Optional.of(orcWriter.getStripeOffsets()));
     }
 
-    private static Metrics computeMetrics(Schema icebergSchema, ColumnMetadata<OrcType> orcColumns, long fileRowCount, Optional<ColumnMetadata<ColumnStatistics>> columnStatistics)
+    @Override
+    public long getWrittenBytes()
     {
-        if (columnStatistics.isEmpty()) {
-            return new Metrics(fileRowCount, null, null, null, null, null);
-        }
-        // Columns that are descendants of LIST or MAP types are excluded because:
-        // 1. Their stats are not used by Apache Iceberg to filter out data files
-        // 2. Their record count can be larger than table-level row count. There's no good way to calculate nullCounts for them.
-        // See https://github.com/apache/iceberg/pull/199#discussion_r429443627
-        Set<OrcColumnId> excludedColumns = getExcludedColumns(orcColumns);
+        return orcWriter.getWrittenBytes() + orcWriter.getBufferedBytes();
+    }
 
-        ImmutableMap.Builder<Integer, Long> valueCountsBuilder = ImmutableMap.builder();
-        ImmutableMap.Builder<Integer, Long> nullCountsBuilder = ImmutableMap.builder();
-        ImmutableMap.Builder<Integer, ByteBuffer> lowerBoundsBuilder = ImmutableMap.builder();
-        ImmutableMap.Builder<Integer, ByteBuffer> upperBoundsBuilder = ImmutableMap.builder();
+    @Override
+    public long getMemoryUsage()
+    {
+        return INSTANCE_SIZE + orcWriter.getRetainedBytes();
+    }
 
-        // OrcColumnId(0) is the root column that represents file-level schema
-        for (int i = 1; i < orcColumns.size(); i++) {
-            OrcColumnId orcColumnId = new OrcColumnId(i);
-            if (excludedColumns.contains(orcColumnId)) {
-                continue;
+    @Override
+    public void appendRows(Page dataPage)
+    {
+        Block[] blocks = new Block[fileInputColumnIndexes.length];
+        for (int i = 0; i < fileInputColumnIndexes.length; i++) {
+            int inputColumnIndex = fileInputColumnIndexes[i];
+            if (inputColumnIndex < 0) {
+                blocks[i] = RunLengthEncodedBlock.create(nullBlocks.get(i), dataPage.getPositionCount());
             }
-            OrcType orcColumn = orcColumns.get(orcColumnId);
-            ColumnStatistics orcColumnStats = columnStatistics.get().get(orcColumnId);
-            int icebergId = getIcebergId(orcColumn);
-            Types.NestedField icebergField = icebergSchema.findField(icebergId);
-            verify(icebergField != null, "Cannot find Iceberg column with ID %s in schema %s", icebergId, icebergSchema);
-            valueCountsBuilder.put(icebergId, fileRowCount);
-            if (orcColumnStats.hasNumberOfValues()) {
-                nullCountsBuilder.put(icebergId, fileRowCount - orcColumnStats.getNumberOfValues());
+            else {
+                blocks[i] = dataPage.getBlock(inputColumnIndex);
             }
-            toIcebergMinMax(orcColumnStats, icebergField.type()).ifPresent(minMax -> {
-                lowerBoundsBuilder.put(icebergId, minMax.getMin());
-                upperBoundsBuilder.put(icebergId, minMax.getMax());
-            });
         }
-        Map<Integer, Long> valueCounts = valueCountsBuilder.build();
-        Map<Integer, Long> nullCounts = nullCountsBuilder.build();
-        Map<Integer, ByteBuffer> lowerBounds = lowerBoundsBuilder.build();
-        Map<Integer, ByteBuffer> upperBounds = upperBoundsBuilder.build();
-        return new Metrics(
-                fileRowCount,
-                null, // TODO: Add column size accounting to ORC column writers
-                valueCounts.isEmpty() ? null : valueCounts,
-                nullCounts.isEmpty() ? null : nullCounts,
-                lowerBounds.isEmpty() ? null : lowerBounds,
-                upperBounds.isEmpty() ? null : upperBounds);
+
+        Page page = new Page(dataPage.getPositionCount(), blocks);
+        try {
+            orcWriter.write(page);
+        }
+        catch (IOException | UncheckedIOException e) {
+            throw new TrinoException(ICEBERG_WRITER_DATA_ERROR, e);
+        }
     }
 
-    private static Set<OrcColumnId> getExcludedColumns(ColumnMetadata<OrcType> orcColumns)
+    @Override
+    public Closeable commit()
     {
-        ImmutableSet.Builder<OrcColumnId> excludedColumns = ImmutableSet.builder();
-        populateExcludedColumns(orcColumns, ROOT_COLUMN, false, excludedColumns);
-        return excludedColumns.build();
-    }
-
-    private static void populateExcludedColumns(ColumnMetadata<OrcType> orcColumns, OrcColumnId orcColumnId, boolean exclude, ImmutableSet.Builder<OrcColumnId> excludedColumns)
-    {
-        if (exclude) {
-            excludedColumns.add(orcColumnId);
+        try {
+            orcWriter.close();
         }
-        OrcType orcColumn = orcColumns.get(orcColumnId);
-        switch (orcColumn.getOrcTypeKind()) {
-            case LIST:
-            case MAP:
-                for (OrcColumnId child : orcColumn.getFieldTypeIndexes()) {
-                    populateExcludedColumns(orcColumns, child, true, excludedColumns);
+        catch (IOException | UncheckedIOException e) {
+            try {
+                rollbackAction.close();
+            }
+            catch (IOException | RuntimeException ex) {
+                if (!e.equals(ex)) {
+                    e.addSuppressed(ex);
                 }
-                return;
-            case STRUCT:
-                for (OrcColumnId child : orcColumn.getFieldTypeIndexes()) {
-                    populateExcludedColumns(orcColumns, child, exclude, excludedColumns);
+                log.error(ex, "Exception when committing file");
+            }
+            throw new TrinoException(ICEBERG_WRITER_CLOSE_ERROR, "Error committing write to ORC file", e);
+        }
+
+        if (validationInputFactory.isPresent()) {
+            try {
+                try (OrcDataSource input = validationInputFactory.get().get()) {
+                    long startThreadCpuTime = THREAD_MX_BEAN.getCurrentThreadCpuTime();
+                    orcWriter.validate(input);
+                    validationCpuNanos += THREAD_MX_BEAN.getCurrentThreadCpuTime() - startThreadCpuTime;
                 }
-                return;
-            default:
-                // unexpected, TODO throw
+            }
+            catch (IOException | UncheckedIOException e) {
+                throw new TrinoException(ICEBERG_WRITE_VALIDATION_FAILED, e);
+            }
+        }
+
+        return rollbackAction;
+    }
+
+    @Override
+    public void rollback()
+    {
+        try (rollbackAction) {
+            orcWriter.close();
+        }
+        catch (Exception e) {
+            throw new TrinoException(ICEBERG_WRITER_CLOSE_ERROR, "Error rolling back write to ORC file", e);
         }
     }
 
-    private static int getIcebergId(OrcType orcColumn)
+    @Override
+    public long getValidationCpuNanos()
     {
-        String icebergId = orcColumn.getAttributes().get(ORC_ICEBERG_ID_KEY);
-        verify(icebergId != null, "ORC column %s doesn't have an associated Iceberg ID", orcColumn);
-        return Integer.parseInt(icebergId);
+        return validationCpuNanos;
     }
 
-    private static Optional<IcebergMinMax> toIcebergMinMax(ColumnStatistics orcColumnStats, org.apache.iceberg.types.Type icebergType)
+    @Override
+    public String toString()
     {
-        BooleanStatistics booleanStatistics = orcColumnStats.getBooleanStatistics();
-        if (booleanStatistics != null) {
-            boolean hasTrueValues = booleanStatistics.getTrueValueCount() != 0;
-            boolean hasFalseValues = orcColumnStats.getNumberOfValues() != booleanStatistics.getTrueValueCount();
-            return Optional.of(new IcebergMinMax(icebergType, !hasFalseValues, hasTrueValues));
-        }
-
-        IntegerStatistics integerStatistics = orcColumnStats.getIntegerStatistics();
-        if (integerStatistics != null) {
-            Object min = integerStatistics.getMin();
-            Object max = integerStatistics.getMax();
-            if (min == null || max == null) {
-                return Optional.empty();
-            }
-            if (icebergType.typeId() == org.apache.iceberg.types.Type.TypeID.INTEGER) {
-                min = toIntExact((Long) min);
-                max = toIntExact((Long) max);
-            }
-            return Optional.of(new IcebergMinMax(icebergType, min, max));
-        }
-        DoubleStatistics doubleStatistics = orcColumnStats.getDoubleStatistics();
-        if (doubleStatistics != null) {
-            Object min = doubleStatistics.getMin();
-            Object max = doubleStatistics.getMax();
-            if (min == null || max == null) {
-                return Optional.empty();
-            }
-            if (icebergType.typeId() == org.apache.iceberg.types.Type.TypeID.FLOAT) {
-                min = ((Double) min).floatValue();
-                max = ((Double) max).floatValue();
-            }
-            return Optional.of(new IcebergMinMax(icebergType, min, max));
-        }
-        StringStatistics stringStatistics = orcColumnStats.getStringStatistics();
-        if (stringStatistics != null) {
-            Slice min = stringStatistics.getMin();
-            Slice max = stringStatistics.getMax();
-            if (min == null || max == null) {
-                return Optional.empty();
-            }
-            return Optional.of(new IcebergMinMax(icebergType, min.toStringUtf8(), max.toStringUtf8()));
-        }
-        DateStatistics dateStatistics = orcColumnStats.getDateStatistics();
-        if (dateStatistics != null) {
-            Integer min = dateStatistics.getMin();
-            Integer max = dateStatistics.getMax();
-            if (min == null || max == null) {
-                return Optional.empty();
-            }
-            return Optional.of(new IcebergMinMax(icebergType, min, max));
-        }
-        DecimalStatistics decimalStatistics = orcColumnStats.getDecimalStatistics();
-        if (decimalStatistics != null) {
-            BigDecimal min = decimalStatistics.getMin();
-            BigDecimal max = decimalStatistics.getMax();
-            if (min == null || max == null) {
-                return Optional.empty();
-            }
-            min = min.setScale(((Types.DecimalType) icebergType).scale());
-            max = max.setScale(((Types.DecimalType) icebergType).scale());
-            return Optional.of(new IcebergMinMax(icebergType, min, max));
-        }
-        TimestampStatistics timestampStatistics = orcColumnStats.getTimestampStatistics();
-        if (timestampStatistics != null) {
-            Long min = timestampStatistics.getMin();
-            Long max = timestampStatistics.getMax();
-            if (min == null || max == null) {
-                return Optional.empty();
-            }
-            // Since ORC timestamp statistics are truncated to millisecond precision, this can cause some column values to fall outside the stats range.
-            // We are appending 999 microseconds to account for the fact that Trino ORC writer truncates timestamps.
-            return Optional.of(new IcebergMinMax(icebergType, min * MICROSECONDS_PER_MILLISECOND, (max * MICROSECONDS_PER_MILLISECOND) + (MICROSECONDS_PER_MILLISECOND - 1)));
-        }
-        return Optional.empty();
-    }
-
-    private static class IcebergMinMax
-    {
-        private ByteBuffer min;
-        private ByteBuffer max;
-
-        private IcebergMinMax(org.apache.iceberg.types.Type type, Object min, Object max)
-        {
-            this.min = Conversions.toByteBuffer(type, min);
-            this.max = Conversions.toByteBuffer(type, max);
-        }
-
-        public ByteBuffer getMin()
-        {
-            return min;
-        }
-
-        public ByteBuffer getMax()
-        {
-            return max;
-        }
+        return toStringHelper(this)
+                .add("writer", orcWriter)
+                .toString();
     }
 }

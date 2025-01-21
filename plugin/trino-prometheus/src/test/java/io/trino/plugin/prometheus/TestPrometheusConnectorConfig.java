@@ -14,13 +14,13 @@
 package io.trino.plugin.prometheus;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.net.HttpHeaders;
 import com.google.inject.ConfigurationException;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
@@ -34,28 +34,37 @@ public class TestPrometheusConnectorConfig
 {
     @Test
     public void testDefaults()
-            throws URISyntaxException
     {
         assertRecordedDefaults(recordDefaults(PrometheusConnectorConfig.class)
-                .setPrometheusURI(new URI("http://localhost:9090"))
+                .setPrometheusURI(URI.create("http://localhost:9090"))
                 .setQueryChunkSizeDuration(new Duration(1, DAYS))
                 .setMaxQueryRangeDuration(new Duration(21, DAYS))
                 .setCacheDuration(new Duration(30, SECONDS))
                 .setBearerTokenFile(null)
-                .setReadTimeout(new Duration(10, SECONDS)));
+                .setHttpAuthHeaderName(HttpHeaders.AUTHORIZATION)
+                .setUser(null)
+                .setPassword(null)
+                .setReadTimeout(new Duration(10, SECONDS))
+                .setCaseInsensitiveNameMatching(false)
+                .setAdditionalHeaders(null));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("prometheus.uri", "file://test.json")
                 .put("prometheus.query.chunk.size.duration", "365d")
                 .put("prometheus.max.query.range.duration", "1095d")
                 .put("prometheus.cache.ttl", "60s")
+                .put("prometheus.auth.http.header.name", "X-team-auth")
                 .put("prometheus.bearer.token.file", "/tmp/bearer_token.txt")
+                .put("prometheus.auth.user", "admin")
+                .put("prometheus.auth.password", "password")
                 .put("prometheus.read-timeout", "30s")
-                .build();
+                .put("prometheus.case-insensitive-name-matching", "true")
+                .put("prometheus.http.additional-headers", "key\\:1:value\\,1, key\\,2:value\\:2")
+                .buildOrThrow();
 
         URI uri = URI.create("file://test.json");
         PrometheusConnectorConfig expected = new PrometheusConnectorConfig();
@@ -63,23 +72,52 @@ public class TestPrometheusConnectorConfig
         expected.setQueryChunkSizeDuration(new Duration(365, DAYS));
         expected.setMaxQueryRangeDuration(new Duration(1095, DAYS));
         expected.setCacheDuration(new Duration(60, SECONDS));
+        expected.setHttpAuthHeaderName("X-team-auth");
         expected.setBearerTokenFile(new File("/tmp/bearer_token.txt"));
+        expected.setUser("admin");
+        expected.setPassword("password");
         expected.setReadTimeout(new Duration(30, SECONDS));
+        expected.setCaseInsensitiveNameMatching(true);
+        expected.setAdditionalHeaders("key\\:1:value\\,1, key\\,2:value\\:2");
 
         assertFullMapping(properties, expected);
     }
 
     @Test
     public void testFailOnDurationLessThanQueryChunkConfig()
-            throws Exception
     {
         PrometheusConnectorConfig config = new PrometheusConnectorConfig();
-        config.setPrometheusURI(new URI("http://doesnotmatter.com"));
+        config.setPrometheusURI(URI.create("http://doesnotmatter.com"));
         config.setQueryChunkSizeDuration(new Duration(21, DAYS));
         config.setMaxQueryRangeDuration(new Duration(1, DAYS));
         config.setCacheDuration(new Duration(30, SECONDS));
         assertThatThrownBy(config::checkConfig)
                 .isInstanceOf(ConfigurationException.class)
                 .hasMessageContaining("prometheus.max.query.range.duration must be greater than prometheus.query.chunk.size.duration");
+    }
+
+    @Test
+    public void testInvalidAuth()
+    {
+        assertThatThrownBy(new PrometheusConnectorConfig().setBearerTokenFile(new File("/tmp/bearer_token.txt")).setUser("test")::checkConfig)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Either on of bearer token file or basic authentication should be used");
+
+        assertThatThrownBy(new PrometheusConnectorConfig().setBearerTokenFile(new File("/tmp/bearer_token.txt")).setPassword("test")::checkConfig)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Either on of bearer token file or basic authentication should be used");
+
+        assertThatThrownBy(new PrometheusConnectorConfig().setUser("test")::checkConfig)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Both username and password must be set when using basic authentication");
+
+        assertThatThrownBy(new PrometheusConnectorConfig().setPassword("test")::checkConfig)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Both username and password must be set when using basic authentication");
+
+        assertThatThrownBy(new PrometheusConnectorConfig().setAdditionalHeaders("Authorization: test").setHttpAuthHeaderName("Authorization")
+                ::checkConfig)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Additional headers can not include: Authorization");
     }
 }

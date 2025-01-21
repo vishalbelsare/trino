@@ -13,19 +13,17 @@
  */
 package io.trino.spi;
 
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
 
-import static io.airlift.testing.Assertions.assertGreaterThan;
-import static io.airlift.testing.Assertions.assertLessThan;
 import static io.trino.spi.StandardErrorCode.GENERIC_INSUFFICIENT_RESOURCES;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.StandardErrorCode.UNSUPPORTED_TABLE_TYPE;
 import static java.util.Arrays.asList;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestStandardErrorCode
 {
@@ -36,16 +34,18 @@ public class TestStandardErrorCode
     {
         Set<Integer> codes = new HashSet<>();
         for (StandardErrorCode code : StandardErrorCode.values()) {
-            assertTrue(codes.add(code(code)), "Code already exists: " + code);
+            assertThat(codes.add(code(code)))
+                    .describedAs("Code already exists: " + code)
+                    .isTrue();
         }
-        assertEquals(codes.size(), StandardErrorCode.values().length);
+        assertThat(codes).hasSize(StandardErrorCode.values().length);
     }
 
     @Test
     public void testReserved()
     {
         for (StandardErrorCode errorCode : StandardErrorCode.values()) {
-            assertLessThan(code(errorCode), EXTERNAL_ERROR_START);
+            assertThat(code(errorCode)).isLessThan(EXTERNAL_ERROR_START);
         }
     }
 
@@ -54,15 +54,17 @@ public class TestStandardErrorCode
     {
         Iterator<StandardErrorCode> iterator = asList(StandardErrorCode.values()).iterator();
 
-        assertTrue(iterator.hasNext());
+        assertThat(iterator.hasNext()).isTrue();
         int previous = code(iterator.next());
 
         while (iterator.hasNext()) {
             StandardErrorCode code = iterator.next();
             int current = code(code);
-            assertGreaterThan(current, previous, "Code is out of order: " + code);
-            if ((code != GENERIC_INTERNAL_ERROR) && (code != GENERIC_INSUFFICIENT_RESOURCES)) {
-                assertEquals(current, previous + 1, "Code is not sequential: " + code);
+            assertThat(current).as("Code is out of order: " + code).isGreaterThan(previous);
+            if (code != GENERIC_INTERNAL_ERROR && code != GENERIC_INSUFFICIENT_RESOURCES && code != UNSUPPORTED_TABLE_TYPE) {
+                assertThat(current)
+                        .describedAs("Code is not sequential: " + code)
+                        .isEqualTo(previous + 1);
             }
             previous = current;
         }

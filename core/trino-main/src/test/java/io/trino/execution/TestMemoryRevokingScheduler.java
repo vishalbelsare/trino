@@ -16,12 +16,19 @@ package io.trino.execution;
 
 import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import io.airlift.configuration.secrets.SecretsResolver;
 import io.airlift.stats.CounterStat;
 import io.airlift.stats.TestingGcMonitor;
+import io.airlift.tracing.Tracing;
 import io.airlift.units.DataSize;
+import io.opentelemetry.api.OpenTelemetry;
+import io.trino.exchange.ExchangeManagerRegistry;
+import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.execution.executor.TaskExecutor;
+import io.trino.execution.executor.timesharing.TimeSharingTaskExecutor;
 import io.trino.memory.MemoryPool;
 import io.trino.memory.QueryContext;
 import io.trino.memory.context.LocalMemoryContext;
@@ -30,13 +37,13 @@ import io.trino.operator.OperatorContext;
 import io.trino.operator.PipelineContext;
 import io.trino.operator.TaskContext;
 import io.trino.spi.QueryId;
-import io.trino.spi.memory.MemoryPoolId;
 import io.trino.spiller.SpillSpaceTracker;
 import io.trino.sql.planner.LocalExecutionPlanner;
 import io.trino.sql.planner.plan.PlanNodeId;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.net.URI;
 import java.util.Collection;
@@ -49,6 +56,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.airlift.concurrent.Threads.threadsNamed;
+import static io.airlift.tracing.Tracing.noopTracer;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.execution.SqlTask.createSqlTask;
@@ -56,36 +64,33 @@ import static io.trino.execution.TaskTestUtils.createTestSplitMonitor;
 import static io.trino.execution.TaskTestUtils.createTestingPlanner;
 import static io.trino.execution.TaskTestUtils.updateTask;
 import static io.trino.execution.TestSqlTask.OUT;
-import static io.trino.execution.buffer.OutputBuffers.BufferType.PARTITIONED;
-import static io.trino.execution.buffer.OutputBuffers.createInitialEmptyOutputBuffers;
-import static io.trino.memory.LocalMemoryManager.GENERAL_POOL;
-import static java.util.Arrays.asList;
+import static io.trino.execution.buffer.PipelinedOutputBuffers.BufferType.PARTITIONED;
 import static java.util.Collections.singletonList;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestMemoryRevokingScheduler
 {
-    private final AtomicInteger idGeneator = new AtomicInteger();
+    private final AtomicInteger idGenerator = new AtomicInteger();
     private final SpillSpaceTracker spillSpaceTracker = new SpillSpaceTracker(DataSize.of(10, GIGABYTE));
     private final Map<QueryId, QueryContext> queryContexts = new HashMap<>();
 
+    private MemoryPool memoryPool;
+    private TaskExecutor taskExecutor;
     private ScheduledExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
     private SqlTaskExecutionFactory sqlTaskExecutionFactory;
-    private MemoryPool memoryPool;
 
     private Set<OperatorContext> allOperatorContexts;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
-        memoryPool = new MemoryPool(GENERAL_POOL, DataSize.ofBytes(10));
+        memoryPool = new MemoryPool(DataSize.ofBytes(10));
 
-        TaskExecutor taskExecutor = new TaskExecutor(8, 16, 3, 4, Ticker.systemTicker());
+        taskExecutor = new TimeSharingTaskExecutor(8, 16, 3, 4, Ticker.systemTicker());
         taskExecutor.start();
 
         // Must be single threaded
@@ -99,18 +104,23 @@ public class TestMemoryRevokingScheduler
                 taskExecutor,
                 planner,
                 createTestSplitMonitor(),
+                noopTracer(),
                 new TaskManagerConfig());
 
         allOperatorContexts = null;
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         queryContexts.clear();
         memoryPool = null;
+        taskExecutor.stop();
+        taskExecutor = null;
         executor.shutdownNow();
         scheduledExecutor.shutdownNow();
+        sqlTaskExecutionFactory = null;
+        allOperatorContexts = null;
     }
 
     @Test
@@ -138,13 +148,13 @@ public class TestMemoryRevokingScheduler
         OperatorContext operatorContext5 = driverContext211.addOperatorContext(5, new PlanNodeId("na"), "na");
 
         Collection<SqlTask> tasks = ImmutableList.of(sqlTask1, sqlTask2);
-        MemoryRevokingScheduler scheduler = new MemoryRevokingScheduler(singletonList(memoryPool), () -> tasks, executor, 1.0, 1.0);
+        MemoryRevokingScheduler scheduler = new MemoryRevokingScheduler(memoryPool, () -> tasks, executor, 1.0, 1.0);
 
         allOperatorContexts = ImmutableSet.of(operatorContext1, operatorContext2, operatorContext3, operatorContext4, operatorContext5);
         assertMemoryRevokingNotRequested();
 
         requestMemoryRevoking(scheduler);
-        assertEquals(10, memoryPool.getFreeBytes());
+        assertThat(10).isEqualTo(memoryPool.getFreeBytes());
         assertMemoryRevokingNotRequested();
 
         LocalMemoryContext revocableMemory1 = operatorContext1.localRevocableMemoryContext();
@@ -154,13 +164,13 @@ public class TestMemoryRevokingScheduler
 
         revocableMemory1.setBytes(3);
         revocableMemory3.setBytes(6);
-        assertEquals(1, memoryPool.getFreeBytes());
+        assertThat(1).isEqualTo(memoryPool.getFreeBytes());
         requestMemoryRevoking(scheduler);
         // we are still good - no revoking needed
         assertMemoryRevokingNotRequested();
 
         revocableMemory4.setBytes(7);
-        assertEquals(-6, memoryPool.getFreeBytes());
+        assertThat(-6).isEqualTo(memoryPool.getFreeBytes());
         requestMemoryRevoking(scheduler);
         // we need to revoke 3 and 6
         assertMemoryRevokingRequestedFor(operatorContext1, operatorContext3);
@@ -174,57 +184,21 @@ public class TestMemoryRevokingScheduler
         operatorContext1.resetMemoryRevokingRequested();
         requestMemoryRevoking(scheduler);
         assertMemoryRevokingRequestedFor(operatorContext3);
-        assertEquals(-3, memoryPool.getFreeBytes());
+        assertThat(-3).isEqualTo(memoryPool.getFreeBytes());
 
         // and allocate some more
         revocableMemory5.setBytes(3);
-        assertEquals(-6, memoryPool.getFreeBytes());
+        assertThat(-6).isEqualTo(memoryPool.getFreeBytes());
         requestMemoryRevoking(scheduler);
         // we are still good with just OC3 in process of revoking
         assertMemoryRevokingRequestedFor(operatorContext3);
 
         // and allocate some more
         revocableMemory5.setBytes(4);
-        assertEquals(-7, memoryPool.getFreeBytes());
+        assertThat(-7).isEqualTo(memoryPool.getFreeBytes());
         requestMemoryRevoking(scheduler);
         // no we have to trigger revoking for OC4
         assertMemoryRevokingRequestedFor(operatorContext3, operatorContext4);
-    }
-
-    @Test
-    public void testCountAlreadyRevokedMemoryWithinAPool()
-            throws Exception
-    {
-        // Given
-        SqlTask sqlTask1 = newSqlTask(new QueryId("q1"));
-        MemoryPool anotherMemoryPool = new MemoryPool(new MemoryPoolId("test"), DataSize.ofBytes(10));
-        sqlTask1.getQueryContext().setMemoryPool(anotherMemoryPool);
-        OperatorContext operatorContext1 = createContexts(sqlTask1);
-
-        SqlTask sqlTask2 = newSqlTask(new QueryId("q2"));
-        OperatorContext operatorContext2 = createContexts(sqlTask2);
-
-        List<SqlTask> tasks = ImmutableList.of(sqlTask1, sqlTask2);
-        MemoryRevokingScheduler scheduler = new MemoryRevokingScheduler(asList(memoryPool, anotherMemoryPool), () -> tasks, executor, 1.0, 1.0);
-        allOperatorContexts = ImmutableSet.of(operatorContext1, operatorContext2);
-
-        /*
-         * sqlTask1 fills its pool
-         */
-        operatorContext1.localRevocableMemoryContext().setBytes(12);
-        requestMemoryRevoking(scheduler);
-        assertMemoryRevokingRequestedFor(operatorContext1);
-
-        /*
-         * When sqlTask2 fills its pool
-         */
-        operatorContext2.localRevocableMemoryContext().setBytes(12);
-        requestMemoryRevoking(scheduler);
-
-        /*
-         * Then sqlTask2 should be asked to revoke its memory too
-         */
-        assertMemoryRevokingRequestedFor(operatorContext1, operatorContext2);
     }
 
     /**
@@ -240,7 +214,7 @@ public class TestMemoryRevokingScheduler
 
         allOperatorContexts = ImmutableSet.of(operatorContext);
         List<SqlTask> tasks = ImmutableList.of(sqlTask);
-        MemoryRevokingScheduler scheduler = new MemoryRevokingScheduler(singletonList(memoryPool), () -> tasks, executor, 1.0, 1.0);
+        MemoryRevokingScheduler scheduler = new MemoryRevokingScheduler(memoryPool, () -> tasks, executor, 1.0, 1.0);
         scheduler.registerPoolListeners(); // no periodic check initiated
 
         // When
@@ -256,9 +230,8 @@ public class TestMemoryRevokingScheduler
         TaskContext taskContext = getOrCreateTaskContext(sqlTask);
         PipelineContext pipelineContext = taskContext.addPipelineContext(0, false, false, false);
         DriverContext driverContext = pipelineContext.addDriverContext();
-        OperatorContext operatorContext = driverContext.addOperatorContext(1, new PlanNodeId("na"), "na");
 
-        return operatorContext;
+        return driverContext.addOperatorContext(1, new PlanNodeId("na"), "na");
     }
 
     private void requestMemoryRevoking(MemoryRevokingScheduler scheduler)
@@ -279,9 +252,13 @@ public class TestMemoryRevokingScheduler
     {
         ImmutableSet<OperatorContext> operatorContextsSet = ImmutableSet.copyOf(operatorContexts);
         operatorContextsSet.forEach(
-                operatorContext -> assertTrue(operatorContext.isMemoryRevokingRequested(), "expected memory requested for operator " + operatorContext.getOperatorId()));
+                operatorContext -> assertThat(operatorContext.isMemoryRevokingRequested())
+                        .describedAs("expected memory requested for operator " + operatorContext.getOperatorId())
+                        .isTrue());
         Sets.difference(allOperatorContexts, operatorContextsSet).forEach(
-                operatorContext -> assertFalse(operatorContext.isMemoryRevokingRequested(), "expected memory  not requested for operator " + operatorContext.getOperatorId()));
+                operatorContext -> assertThat(operatorContext.isMemoryRevokingRequested())
+                        .describedAs("expected memory  not requested for operator " + operatorContext.getOperatorId())
+                        .isFalse());
     }
 
     private void assertMemoryRevokingNotRequested()
@@ -293,7 +270,7 @@ public class TestMemoryRevokingScheduler
     {
         QueryContext queryContext = getOrCreateQueryContext(queryId);
 
-        TaskId taskId = new TaskId(queryId.getId(), 0, idGeneator.incrementAndGet());
+        TaskId taskId = new TaskId(new StageId(queryId.getId(), 0), idGenerator.incrementAndGet(), 0);
         URI location = URI.create("fake://task/" + taskId);
 
         return createSqlTask(
@@ -301,11 +278,13 @@ public class TestMemoryRevokingScheduler
                 location,
                 "fake",
                 queryContext,
+                noopTracer(),
                 sqlTaskExecutionFactory,
                 executor,
                 sqlTask -> {},
                 DataSize.of(32, MEGABYTE),
                 DataSize.of(200, MEGABYTE),
+                new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of())),
                 new CounterStat());
     }
 
@@ -313,10 +292,10 @@ public class TestMemoryRevokingScheduler
     {
         return queryContexts.computeIfAbsent(queryId, id -> new QueryContext(id,
                 DataSize.of(1, MEGABYTE),
-                DataSize.of(2, MEGABYTE),
                 memoryPool,
                 new TestingGcMonitor(),
                 executor,
+                scheduledExecutor,
                 scheduledExecutor,
                 DataSize.of(1, GIGABYTE),
                 spillSpaceTracker));
@@ -326,7 +305,7 @@ public class TestMemoryRevokingScheduler
     {
         if (sqlTask.getTaskContext().isEmpty()) {
             // update task to update underlying taskHolderReference with taskExecution + create a new taskContext
-            updateTask(sqlTask, ImmutableList.of(), createInitialEmptyOutputBuffers(PARTITIONED).withBuffer(OUT, 0).withNoMoreBufferIds());
+            updateTask(sqlTask, ImmutableList.of(), PipelinedOutputBuffers.createInitial(PARTITIONED).withBuffer(OUT, 0).withNoMoreBufferIds());
         }
         return sqlTask.getTaskContext().orElseThrow(() -> new IllegalStateException("TaskContext not present"));
     }

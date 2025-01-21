@@ -14,7 +14,6 @@
 package io.trino.plugin.base.util;
 
 import com.fasterxml.jackson.core.JsonFactory;
-import com.fasterxml.jackson.core.JsonFactoryBuilder;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.json.ObjectMapperProvider;
@@ -23,20 +22,31 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
+import io.trino.spi.type.SqlDate;
+import io.trino.spi.type.SqlDecimal;
+import io.trino.spi.type.SqlTime;
+import io.trino.spi.type.SqlTimeWithTimeZone;
+import io.trino.spi.type.SqlTimestamp;
+import io.trino.spi.type.SqlTimestampWithTimeZone;
+import io.trino.spi.type.SqlVarbinary;
 
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.util.List;
+import java.util.StringJoiner;
 
 import static com.fasterxml.jackson.core.JsonFactory.Feature.CANONICALIZE_FIELD_NAMES;
 import static com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS;
+import static com.google.common.base.Preconditions.checkState;
+import static io.trino.plugin.base.util.JsonUtils.jsonFactoryBuilder;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 public final class JsonTypeUtil
 {
-    private static final JsonFactory JSON_FACTORY = new JsonFactoryBuilder().disable(CANONICALIZE_FIELD_NAMES).build();
+    private static final JsonFactory JSON_FACTORY = jsonFactoryBuilder().disable(CANONICALIZE_FIELD_NAMES).build();
     private static final ObjectMapper SORTED_MAPPER = new ObjectMapperProvider().get().configure(ORDER_MAP_ENTRIES_BY_KEYS, true);
 
     private JsonTypeUtil() {}
@@ -50,9 +60,11 @@ public final class JsonTypeUtil
         try (JsonParser parser = createJsonParser(JSON_FACTORY, slice)) {
             SliceOutput output = new DynamicSliceOutput(slice.length());
             SORTED_MAPPER.writeValue((OutputStream) output, SORTED_MAPPER.readValue(parser, Object.class));
-            // nextToken() returns null if the input is parsed correctly,
-            // but will throw an exception if there are trailing characters.
-            parser.nextToken();
+            // At this point, the end of input should be reached. nextToken() has three possible results:
+            // - null, if the end of the input was reached
+            // - token, if a correct JSON token is found (e.g. '{', 'null', '1')
+            // - exception, if there are characters which do not form a valid JSON token (e.g. 'abc')
+            checkState(parser.nextToken() == null, "Found characters after the expected end of input");
             return output.slice();
         }
         catch (IOException | RuntimeException e) {
@@ -60,10 +72,28 @@ public final class JsonTypeUtil
         }
     }
 
-    public static Slice toJsonValue(Object value)
+    public static Slice toJsonValue(List<?> values)
             throws IOException
     {
-        return Slices.wrappedBuffer(SORTED_MAPPER.writeValueAsBytes(value));
+        if (values == null) {
+            return Slices.utf8Slice("[]");
+        }
+
+        StringJoiner joiner = new StringJoiner(",", "[", "]");
+        for (Object value : values) {
+            joiner.add(switch (value) {
+                case null -> "null";
+                case SqlDate _,
+                     SqlTime _,
+                     SqlVarbinary _,
+                     SqlTimeWithTimeZone _,
+                     SqlDecimal _,
+                     SqlTimestamp _,
+                     SqlTimestampWithTimeZone _ -> SORTED_MAPPER.writeValueAsString(value.toString());
+                default -> SORTED_MAPPER.writeValueAsString(value);
+            });
+        }
+        return Slices.utf8Slice(joiner.toString());
     }
 
     private static JsonParser createJsonParser(JsonFactory factory, Slice json)

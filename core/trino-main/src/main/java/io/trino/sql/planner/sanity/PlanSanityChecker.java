@@ -16,12 +16,12 @@ package io.trino.sql.planner.sanity;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.Multimap;
 import io.trino.Session;
+import io.trino.cost.StatsAndCosts;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.planner.TypeAnalyzer;
-import io.trino.sql.planner.TypeProvider;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.plan.PlanNode;
+
+import static io.trino.sql.planner.planprinter.PlanPrinter.textLogicalPlan;
 
 /**
  * It is going to be executed to verify logical planner correctness
@@ -39,68 +39,104 @@ public final class PlanSanityChecker
                         Stage.INTERMEDIATE,
                         new ValidateDependenciesChecker(),
                         new NoDuplicatePlanNodeIdsChecker(),
-                        new AllFunctionsResolved(),
                         new TypeValidator(),
-                        new NoSubqueryExpressionLeftChecker(),
-                        new NoIdentifierLeftChecker(),
                         new VerifyOnlyOneOutputNode())
                 .putAll(
                         Stage.FINAL,
                         new ValidateDependenciesChecker(),
                         new NoDuplicatePlanNodeIdsChecker(),
-                        new SugarFreeChecker(),
-                        new AllFunctionsResolved(),
                         new TypeValidator(),
-                        new NoSubqueryExpressionLeftChecker(),
-                        new NoIdentifierLeftChecker(),
                         new VerifyOnlyOneOutputNode(),
                         new VerifyNoFilteredAggregations(),
                         new VerifyUseConnectorNodePartitioningSet(),
                         new ValidateAggregationsWithDefaultValues(forceSingleNode),
+                        new ValidateScaledWritersUsage(),
                         new ValidateStreamingAggregations(),
-                        new ValidateLimitWithPresortedInput(),
                         new DynamicFiltersChecker(),
                         new TableScanValidator(),
                         new TableExecuteStructureValidator())
-
+                .putAll(
+                        Stage.AFTER_ADAPTIVE_PLANNING,
+                        new ValidateDependenciesChecker(),
+                        new NoDuplicatePlanNodeIdsChecker(),
+                        new TypeValidator(),
+                        new VerifyOnlyOneOutputNode(),
+                        new VerifyNoFilteredAggregations(),
+                        new VerifyUseConnectorNodePartitioningSet(),
+                        new ValidateScaledWritersUsage(),
+                        new TableScanValidator(),
+                        new TableExecuteStructureValidator())
                 .build();
     }
 
-    public void validateFinalPlan(PlanNode planNode,
+    public void validateFinalPlan(
+            PlanNode planNode,
             Session session,
-            Metadata metadata,
-            TypeOperators typeOperators,
-            TypeAnalyzer typeAnalyzer,
-            TypeProvider types,
+            PlannerContext plannerContext,
             WarningCollector warningCollector)
     {
-        checkers.get(Stage.FINAL).forEach(checker -> checker.validate(planNode, session, metadata, typeOperators, typeAnalyzer, types, warningCollector));
+        validate(Stage.FINAL, planNode, session, plannerContext, warningCollector);
     }
 
-    public void validateIntermediatePlan(PlanNode planNode,
+    public void validateIntermediatePlan(
+            PlanNode planNode,
             Session session,
-            Metadata metadata,
-            TypeOperators typeOperators,
-            TypeAnalyzer typeAnalyzer,
-            TypeProvider types,
+            PlannerContext plannerContext,
             WarningCollector warningCollector)
     {
-        checkers.get(Stage.INTERMEDIATE).forEach(checker -> checker.validate(planNode, session, metadata, typeOperators, typeAnalyzer, types, warningCollector));
+        validate(Stage.INTERMEDIATE, planNode, session, plannerContext, warningCollector);
+    }
+
+    public void validateAdaptivePlan(
+            PlanNode planNode,
+            Session session,
+            PlannerContext plannerContext,
+            WarningCollector warningCollector)
+    {
+        validate(Stage.AFTER_ADAPTIVE_PLANNING, planNode, session, plannerContext, warningCollector);
+    }
+
+    private void validate(
+            Stage stage,
+            PlanNode planNode,
+            Session session,
+            PlannerContext plannerContext,
+            WarningCollector warningCollector)
+    {
+        try {
+            checkers.get(stage).forEach(checker -> checker.validate(planNode, session, plannerContext, warningCollector));
+        }
+        catch (RuntimeException e) {
+            try {
+                int nestLevel = 4; // so that it renders reasonably within exception stacktrace
+                String explain = textLogicalPlan(
+                        planNode,
+                        plannerContext.getMetadata(),
+                        plannerContext.getFunctionManager(),
+                        StatsAndCosts.empty(),
+                        session,
+                        nestLevel,
+                        false);
+                e.addSuppressed(new Exception("Current plan:\n" + explain));
+            }
+            catch (RuntimeException ignore) {
+                // ignored
+            }
+            throw e;
+        }
     }
 
     public interface Checker
     {
-        void validate(PlanNode planNode,
+        void validate(
+                PlanNode planNode,
                 Session session,
-                Metadata metadata,
-                TypeOperators typeOperators,
-                TypeAnalyzer typeAnalyzer,
-                TypeProvider types,
+                PlannerContext plannerContext,
                 WarningCollector warningCollector);
     }
 
     private enum Stage
     {
-        INTERMEDIATE, FINAL
+        INTERMEDIATE, FINAL, AFTER_ADAPTIVE_PLANNING
     }
 }

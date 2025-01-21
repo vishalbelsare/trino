@@ -30,8 +30,9 @@ import org.apache.iceberg.types.Types.BooleanType;
 import org.apache.iceberg.types.Types.DecimalType;
 import org.apache.iceberg.types.Types.DoubleType;
 import org.apache.iceberg.types.Types.FloatType;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
@@ -49,8 +50,6 @@ import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.plugin.iceberg.TypeConverter.toTrinoType;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DateType.DATE;
-import static io.trino.spi.type.Decimals.isLongDecimal;
-import static io.trino.spi.type.Decimals.isShortDecimal;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
@@ -71,9 +70,8 @@ import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.time.ZoneOffset.UTC;
 import static org.apache.iceberg.types.Type.TypeID.DECIMAL;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestIcebergBucketing
 {
@@ -190,18 +188,18 @@ public class TestIcebergBucketing
         assertBucketAndHashEquals("binary", ByteBuffer.wrap(new byte[] {0x00, 0x01, 0x02, 0x03}), -188683207 & Integer.MAX_VALUE);
     }
 
-    @Test(dataProvider = "unsupportedBucketingTypes")
+    @ParameterizedTest
+    @MethodSource("unsupportedBucketingTypes")
     public void testUnsupportedTypes(Type type)
     {
         assertThatThrownBy(() -> computeIcebergBucket(type, null, 1))
-                .hasMessage(format("Cannot bucket by type: %s", type));
+                .hasMessage("Cannot bucket by type: %s", type);
 
         assertThatThrownBy(() -> computeTrinoBucket(type, null, 1))
-                .hasMessage(format("Unsupported type for 'bucket': %s", toTrinoType(type, TYPE_MANAGER)));
+                .hasMessage("Unsupported type for 'bucket': %s", toTrinoType(type, TYPE_MANAGER));
     }
 
-    @DataProvider
-    public Object[][] unsupportedBucketingTypes()
+    public static Object[][] unsupportedBucketingTypes()
     {
         return new Object[][] {
                 {BooleanType.get()},
@@ -240,10 +238,9 @@ public class TestIcebergBucketing
         Integer icebergBucket = computeIcebergBucket(icebergType, icebergValue, bucketCount);
         Integer trinoBucket = computeTrinoBucket(icebergType, icebergValue, bucketCount);
 
-        assertEquals(
-                trinoBucket,
-                icebergBucket,
-                format("icebergType=%s, bucketCount=%s, icebergBucket=%d, trinoBucket=%d;", icebergType, bucketCount, icebergBucket, trinoBucket));
+        assertThat(trinoBucket)
+                .describedAs(format("icebergType=%s, bucketCount=%s, icebergBucket=%d, trinoBucket=%d;", icebergType, bucketCount, icebergBucket, trinoBucket))
+                .isEqualTo(icebergBucket);
     }
 
     private void assertHashEquals(Type icebergType, Object icebergValue, Integer expectedHash)
@@ -255,30 +252,27 @@ public class TestIcebergBucketing
         Integer trinoBucketHash = computeTrinoBucket(icebergType, icebergValue, Integer.MAX_VALUE);
 
         // Ensure hash is stable and does not change
-        assertEquals(
-                icebergBucketHash,
-                expectedHash,
-                format("expected Iceberg %s(%s) bucket with %sd buckets to be %d, got %d", icebergType, icebergValue, Integer.MAX_VALUE, expectedHash, icebergBucketHash));
+        assertThat(icebergBucketHash)
+                .describedAs(format("expected Iceberg %s(%s) bucket with %sd buckets to be %d, got %d", icebergType, icebergValue, Integer.MAX_VALUE, expectedHash, icebergBucketHash))
+                .isEqualTo(expectedHash);
 
         // Ensure hash is stable and does not change
-        assertEquals(
-                trinoBucketHash,
-                expectedHash,
-                format("expected Trino %s(%s) bucket with %sd buckets to be %d, got %d", icebergType, icebergValue, Integer.MAX_VALUE, expectedHash, trinoBucketHash));
+        assertThat(trinoBucketHash)
+                .describedAs(format("expected Trino %s(%s) bucket with %sd buckets to be %d, got %d", icebergType, icebergValue, Integer.MAX_VALUE, expectedHash, trinoBucketHash))
+                .isEqualTo(expectedHash);
     }
 
     private Integer computeIcebergBucket(Type type, Object icebergValue, int bucketCount)
     {
-        Transform<Object, Integer> bucketTransform = Transforms.bucket(type, bucketCount);
-        assertTrue(bucketTransform.canTransform(type), format("bucket function %s is not able to transform type %s", bucketTransform, type));
-        return bucketTransform.apply(icebergValue);
+        Transform<Object, Integer> bucketTransform = Transforms.bucket(bucketCount);
+        return bucketTransform.bind(type).apply(icebergValue);
     }
 
     private Integer computeTrinoBucket(Type icebergType, Object icebergValue, int bucketCount)
     {
         io.trino.spi.type.Type trinoType = toTrinoType(icebergType, TYPE_MANAGER);
         ColumnTransform transform = PartitionTransforms.bucket(trinoType, bucketCount);
-        Function<Block, Block> blockTransform = transform.getBlockTransform();
+        Function<Block, Block> blockTransform = transform.blockTransform();
 
         BlockBuilder blockBuilder = trinoType.createBlockBuilder(null, 1);
 
@@ -289,11 +283,11 @@ public class TestIcebergBucketing
 
         Block bucketBlock = blockTransform.apply(block);
         verify(bucketBlock.getPositionCount() == 1);
-        Integer trinoBucketWithBlock = bucketBlock.isNull(0) ? null : bucketBlock.getInt(0, 0);
+        Integer trinoBucketWithBlock = bucketBlock.isNull(0) ? null : INTEGER.getInt(bucketBlock, 0);
 
-        Long trinoBucketWithValue = (Long) transform.getValueTransform().apply(block, 0);
+        Long trinoBucketWithValue = (Long) transform.valueTransform().apply(block, 0);
         Integer trinoBucketWithValueAsInteger = trinoBucketWithValue == null ? null : toIntExact(trinoBucketWithValue);
-        assertEquals(trinoBucketWithValueAsInteger, trinoBucketWithBlock);
+        assertThat(trinoBucketWithValueAsInteger).isEqualTo(trinoBucketWithBlock);
 
         return trinoBucketWithBlock;
     }
@@ -315,12 +309,11 @@ public class TestIcebergBucketing
             return (long) icebergValue;
         }
 
-        if (isShortDecimal(trinoType)) {
-            return Decimals.encodeShortScaledValue((BigDecimal) icebergValue, ((io.trino.spi.type.DecimalType) trinoType).getScale());
-        }
-
-        if (isLongDecimal(trinoType)) {
-            return Decimals.encodeScaledValue((BigDecimal) icebergValue, ((io.trino.spi.type.DecimalType) trinoType).getScale());
+        if (trinoType instanceof io.trino.spi.type.DecimalType trinoDecimalType) {
+            if (trinoDecimalType.isShort()) {
+                return Decimals.encodeShortScaledValue((BigDecimal) icebergValue, trinoDecimalType.getScale());
+            }
+            return Decimals.encodeScaledValue((BigDecimal) icebergValue, trinoDecimalType.getScale());
         }
 
         if (trinoType == VARCHAR) {

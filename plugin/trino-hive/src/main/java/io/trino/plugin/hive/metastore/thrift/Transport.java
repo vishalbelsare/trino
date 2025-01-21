@@ -14,7 +14,6 @@
 package io.trino.plugin.hive.metastore.thrift;
 
 import com.google.common.net.HostAndPort;
-import io.trino.plugin.hive.authentication.HiveMetastoreAuthentication;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
 import org.apache.thrift.transport.TTransportException;
@@ -37,14 +36,15 @@ public final class Transport
             HostAndPort address,
             Optional<SSLContext> sslContext,
             Optional<HostAndPort> socksProxy,
-            int timeoutMillis,
+            int connectTimeoutMillis,
+            int readTimeoutMillis,
             HiveMetastoreAuthentication authentication,
             Optional<String> delegationToken)
             throws TTransportException
     {
         requireNonNull(address, "address is null");
         try {
-            TTransport rawTransport = createRaw(address, sslContext, socksProxy, timeoutMillis);
+            TTransport rawTransport = createRaw(address, sslContext, socksProxy, connectTimeoutMillis, readTimeoutMillis);
             TTransport authenticatedTransport = authentication.authenticate(rawTransport, address.getHost(), delegationToken);
             if (!authenticatedTransport.isOpen()) {
                 authenticatedTransport.open();
@@ -58,7 +58,12 @@ public final class Transport
 
     private Transport() {}
 
-    private static TTransport createRaw(HostAndPort address, Optional<SSLContext> sslContext, Optional<HostAndPort> socksProxy, int timeoutMillis)
+    private static TTransport createRaw(
+            HostAndPort address,
+            Optional<SSLContext> sslContext,
+            Optional<HostAndPort> socksProxy,
+            int connectTimeoutMillis,
+            int readTimeoutMillis)
             throws TTransportException
     {
         Proxy proxy = socksProxy
@@ -67,8 +72,8 @@ public final class Transport
 
         Socket socket = new Socket(proxy);
         try {
-            socket.connect(new InetSocketAddress(address.getHost(), address.getPort()), timeoutMillis);
-            socket.setSoTimeout(timeoutMillis);
+            socket.connect(new InetSocketAddress(address.getHost(), address.getPort()), connectTimeoutMillis);
+            socket.setSoTimeout(readTimeoutMillis);
 
             if (sslContext.isPresent()) {
                 // SSL will connect to the SOCKS address when present
@@ -97,57 +102,14 @@ public final class Transport
     }
 
     private static class TTransportWrapper
-            extends TTransport
+            extends TFilterTransport
     {
-        private final TTransport transport;
         private final HostAndPort address;
 
-        TTransportWrapper(TTransport transport, HostAndPort address)
+        public TTransportWrapper(TTransport transport, HostAndPort address)
         {
-            this.transport = requireNonNull(transport, "transport is null");
+            super(transport);
             this.address = requireNonNull(address, "address is null");
-        }
-
-        @Override
-        public boolean isOpen()
-        {
-            return transport.isOpen();
-        }
-
-        @Override
-        public boolean peek()
-        {
-            return transport.peek();
-        }
-
-        @Override
-        public byte[] getBuffer()
-        {
-            return transport.getBuffer();
-        }
-
-        @Override
-        public int getBufferPosition()
-        {
-            return transport.getBufferPosition();
-        }
-
-        @Override
-        public int getBytesRemainingInBuffer()
-        {
-            return transport.getBytesRemainingInBuffer();
-        }
-
-        @Override
-        public void consumeBuffer(int len)
-        {
-            transport.consumeBuffer(len);
-        }
-
-        @Override
-        public void close()
-        {
-            transport.close();
         }
 
         @Override

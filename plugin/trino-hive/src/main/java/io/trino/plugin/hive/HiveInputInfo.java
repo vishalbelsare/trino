@@ -13,36 +13,21 @@
  */
 package io.trino.plugin.hive;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
 
 import java.util.List;
+import java.util.Optional;
 
-public class HiveInputInfo
+import static java.util.Objects.requireNonNull;
+
+public record HiveInputInfo(
+        List<String> partitionIds,
+        boolean partitioned,
+        Optional<String> tableDefaultFileFormat)
 {
-    private final List<String> partitionIds;
-    // Code that serialize HiveInputInfo into log would often need the ability to limit the length of log entries.
-    // This boolean field allows such code to mark the log entry as length limited.
-    private final boolean truncated;
-
-    @JsonCreator
-    public HiveInputInfo(
-            @JsonProperty("partitionIds") List<String> partitionIds,
-            @JsonProperty("truncated") boolean truncated)
+    public HiveInputInfo
     {
-        this.partitionIds = partitionIds;
-        this.truncated = truncated;
-    }
-
-    @JsonProperty
-    public List<String> getPartitionIds()
-    {
-        return partitionIds;
-    }
-
-    @JsonProperty
-    public boolean isTruncated()
-    {
-        return truncated;
+        partitionIds = ImmutableList.copyOf(requireNonNull(partitionIds, "partitionIds is null"));
+        requireNonNull(tableDefaultFileFormat, "tableDefaultFileFormat is null");
     }
 }

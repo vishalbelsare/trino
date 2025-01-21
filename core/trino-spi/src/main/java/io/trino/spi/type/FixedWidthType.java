@@ -13,7 +13,9 @@
  */
 package io.trino.spi.type;
 
+import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BlockBuilderStatus;
 
 /**
  * FixedWidthType is a type that has a fixed size for every value.
@@ -27,9 +29,33 @@ public interface FixedWidthType
      */
     int getFixedSize();
 
+    @Override
+    default BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    {
+        return createBlockBuilder(blockBuilderStatus, expectedEntries);
+    }
+
     /**
      * Creates a block builder for this type sized to hold the specified number
      * of positions.
      */
     BlockBuilder createFixedSizeBlockBuilder(int positionCount);
+
+    @Override
+    default boolean isFlatVariableWidth()
+    {
+        return false;
+    }
+
+    @Override
+    default int getFlatVariableWidthSize(Block block, int position)
+    {
+        return 0;
+    }
+
+    @Override
+    default int relocateFlatVariableWidthOffsets(byte[] fixedSizeSlice, int fixedSizeOffset, byte[] variableSizeSlice, int variableSizeOffset)
+    {
+        return 0;
+    }
 }

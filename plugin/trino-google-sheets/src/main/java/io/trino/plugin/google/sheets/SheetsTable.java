@@ -13,47 +13,26 @@
  */
 package io.trino.plugin.google.sheets;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import io.trino.spi.connector.ColumnMetadata;
 
 import java.util.List;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
-public class SheetsTable
+public record SheetsTable(List<SheetsColumnHandle> columns, List<List<String>> values)
 {
-    private final List<ColumnMetadata> columnsMetadata;
-    private final List<List<Object>> values;
-
-    @JsonCreator
-    public SheetsTable(
-            @JsonProperty("name") String name,
-            @JsonProperty("columns") List<SheetsColumn> columns,
-            @JsonProperty("values") List<List<Object>> values)
+    public SheetsTable
     {
-        checkArgument(!isNullOrEmpty(name), "name is null or is empty");
-        requireNonNull(columns, "columns is null");
-
-        ImmutableList.Builder<ColumnMetadata> columnsMetadata = ImmutableList.builder();
-        for (SheetsColumn column : columns) {
-            columnsMetadata.add(new ColumnMetadata(column.getName(), column.getType()));
-        }
-        this.columnsMetadata = columnsMetadata.build();
-        this.values = values;
+        columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
+        values = ImmutableList.copyOf(requireNonNull(values, "values is null"));
     }
 
-    @JsonProperty
-    public List<List<Object>> getValues()
+    List<ColumnMetadata> columnsMetadata()
     {
-        return values;
-    }
-
-    public List<ColumnMetadata> getColumnsMetadata()
-    {
-        return columnsMetadata;
+        return columns.stream()
+                .map(SheetsColumnHandle::columnMetadata)
+                .collect(toImmutableList());
     }
 }

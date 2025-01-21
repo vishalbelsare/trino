@@ -18,8 +18,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.decoder.DecoderColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.type.Type;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.util.Objects;
 
@@ -144,14 +143,14 @@ public class KinesisColumnHandle
         }
 
         KinesisColumnHandle other = (KinesisColumnHandle) obj;
-        return Objects.equals(this.ordinalPosition, other.ordinalPosition) &&
+        return this.ordinalPosition == other.ordinalPosition &&
                 Objects.equals(this.name, other.name) &&
                 Objects.equals(this.type, other.type) &&
                 Objects.equals(this.mapping, other.mapping) &&
                 Objects.equals(this.dataFormat, other.dataFormat) &&
                 Objects.equals(this.formatHint, other.formatHint) &&
-                Objects.equals(this.hidden, other.hidden) &&
-                Objects.equals(this.internal, other.internal);
+                this.hidden == other.hidden &&
+                this.internal == other.internal;
     }
 
     @Override

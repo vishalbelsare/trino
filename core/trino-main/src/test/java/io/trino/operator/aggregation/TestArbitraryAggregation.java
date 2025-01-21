@@ -14,13 +14,16 @@
 package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.FeaturesConfig;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.metadata.TypeRegistry;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
-import io.trino.sql.tree.QualifiedName;
-import org.testng.annotations.Test;
+import io.trino.spi.type.TypeOperators;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Collection;
 
 import static io.trino.block.BlockAssertions.createArrayBigintBlock;
 import static io.trino.block.BlockAssertions.createBooleansBlock;
@@ -35,7 +38,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
-import static org.testng.Assert.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestArbitraryAggregation
 {
@@ -44,8 +47,9 @@ public class TestArbitraryAggregation
     @Test
     public void testAllRegistered()
     {
-        for (Type valueType : FUNCTION_RESOLUTION.getMetadata().getTypes()) {
-            assertNotNull(FUNCTION_RESOLUTION.getAggregateFunction(QualifiedName.of("arbitrary"), fromTypes(valueType)));
+        Collection<Type> standardTypes = new TypeRegistry(new TypeOperators(), new FeaturesConfig()).getTypes();
+        for (Type valueType : standardTypes) {
+            assertThat(FUNCTION_RESOLUTION.getAggregateFunction("arbitrary", fromTypes(valueType))).isNotNull();
         }
     }
 
@@ -54,7 +58,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(BOOLEAN),
                 null,
                 createBooleansBlock((Boolean) null));
@@ -65,7 +69,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(BOOLEAN),
                 true,
                 createBooleansBlock(true, true));
@@ -76,7 +80,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(BIGINT),
                 null,
                 createLongsBlock(null, null));
@@ -87,7 +91,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(BIGINT),
                 1L,
                 createLongsBlock(1L, null));
@@ -98,7 +102,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(DOUBLE),
                 null,
                 createDoublesBlock(null, null));
@@ -109,7 +113,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(DOUBLE),
                 2.0,
                 createDoublesBlock(null, 2.0));
@@ -120,7 +124,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(VARCHAR),
                 null,
                 createStringsBlock(null, null));
@@ -131,7 +135,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(VARCHAR),
                 "a",
                 createStringsBlock("a", "a"));
@@ -142,7 +146,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(new ArrayType(BIGINT)),
                 null,
                 createArrayBigintBlock(Arrays.asList(null, null, null, null)));
@@ -153,7 +157,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(new ArrayType(BIGINT)),
                 ImmutableList.of(23L, 45L),
                 createArrayBigintBlock(ImmutableList.of(ImmutableList.of(23L, 45L), ImmutableList.of(23L, 45L), ImmutableList.of(23L, 45L), ImmutableList.of(23L, 45L))));
@@ -164,7 +168,7 @@ public class TestArbitraryAggregation
     {
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("arbitrary"),
+                "arbitrary",
                 fromTypes(INTEGER),
                 3,
                 createIntsBlock(3, 3, null));

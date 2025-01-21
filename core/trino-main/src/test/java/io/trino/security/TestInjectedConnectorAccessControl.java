@@ -14,7 +14,7 @@
 package io.trino.security;
 
 import io.trino.spi.connector.ConnectorAccessControl;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.spi.testing.InterfaceTestUtils.assertAllMethodsOverridden;
 
@@ -22,6 +22,7 @@ public class TestInjectedConnectorAccessControl
 {
     @Test
     public void testEverythingImplemented()
+            throws NoSuchMethodException
     {
         assertAllMethodsOverridden(ConnectorAccessControl.class, InjectedConnectorAccessControl.class);
     }

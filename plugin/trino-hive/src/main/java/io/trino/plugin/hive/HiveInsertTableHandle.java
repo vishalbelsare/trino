@@ -33,10 +33,11 @@ public class HiveInsertTableHandle
             @JsonProperty("inputColumns") List<HiveColumnHandle> inputColumns,
             @JsonProperty("pageSinkMetadata") HivePageSinkMetadata pageSinkMetadata,
             @JsonProperty("locationHandle") LocationHandle locationHandle,
-            @JsonProperty("bucketProperty") Optional<HiveBucketProperty> bucketProperty,
+            @JsonProperty("bucketInfo") Optional<BucketInfo> bucketInfo,
             @JsonProperty("tableStorageFormat") HiveStorageFormat tableStorageFormat,
             @JsonProperty("partitionStorageFormat") HiveStorageFormat partitionStorageFormat,
-            @JsonProperty("transaction") AcidTransaction transaction)
+            @JsonProperty("transaction") AcidTransaction transaction,
+            @JsonProperty("retriesEnabled") boolean retriesEnabled)
     {
         super(
                 schemaName,
@@ -44,9 +45,10 @@ public class HiveInsertTableHandle
                 inputColumns,
                 pageSinkMetadata,
                 locationHandle,
-                bucketProperty,
+                bucketInfo,
                 tableStorageFormat,
                 partitionStorageFormat,
-                transaction);
+                transaction,
+                retriesEnabled);
     }
 }

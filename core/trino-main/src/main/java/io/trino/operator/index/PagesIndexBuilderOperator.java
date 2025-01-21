@@ -13,14 +13,13 @@
  */
 package io.trino.operator.index;
 
+import com.google.errorprone.annotations.ThreadSafe;
 import io.trino.operator.DriverContext;
 import io.trino.operator.Operator;
 import io.trino.operator.OperatorContext;
 import io.trino.operator.OperatorFactory;
 import io.trino.spi.Page;
 import io.trino.sql.planner.plan.PlanNodeId;
-
-import javax.annotation.concurrent.ThreadSafe;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
@@ -35,13 +34,15 @@ public class PagesIndexBuilderOperator
         private final int operatorId;
         private final PlanNodeId planNodeId;
         private final IndexSnapshotBuilder indexSnapshotBuilder;
+        private final String operatorType;
         private boolean closed;
 
-        public PagesIndexBuilderOperatorFactory(int operatorId, PlanNodeId planNodeId, IndexSnapshotBuilder indexSnapshotBuilder)
+        public PagesIndexBuilderOperatorFactory(int operatorId, PlanNodeId planNodeId, IndexSnapshotBuilder indexSnapshotBuilder, String operatorType)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
             this.indexSnapshotBuilder = requireNonNull(indexSnapshotBuilder, "indexSnapshotBuilder is null");
+            this.operatorType = requireNonNull(operatorType, "operatorType is null");
         }
 
         @Override
@@ -49,7 +50,7 @@ public class PagesIndexBuilderOperator
         {
             checkState(!closed, "Factory is already closed");
 
-            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, planNodeId, PagesIndexBuilderOperator.class.getSimpleName());
+            OperatorContext operatorContext = driverContext.addOperatorContext(operatorId, planNodeId, operatorType);
             return new PagesIndexBuilderOperator(operatorContext, indexSnapshotBuilder);
         }
 
@@ -62,7 +63,7 @@ public class PagesIndexBuilderOperator
         @Override
         public OperatorFactory duplicate()
         {
-            return new PagesIndexBuilderOperatorFactory(operatorId, planNodeId, indexSnapshotBuilder);
+            return new PagesIndexBuilderOperatorFactory(operatorId, planNodeId, indexSnapshotBuilder, operatorType);
         }
     }
 

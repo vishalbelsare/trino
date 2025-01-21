@@ -13,33 +13,32 @@
  */
 package io.trino.operator.scalar;
 
-import com.google.common.collect.ImmutableList;
 import io.airlift.joni.Matcher;
-import io.airlift.joni.Option;
 import io.airlift.joni.Region;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
-import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BufferedArrayValueBuilder;
 import io.trino.spi.function.Description;
 import io.trino.spi.function.LiteralParameters;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
+import io.trino.spi.type.ArrayType;
 import io.trino.sql.gen.lambda.UnaryFunctionInterface;
 import io.trino.type.JoniRegexp;
 import io.trino.type.JoniRegexpType;
 
 import static io.airlift.slice.SliceUtf8.lengthOfCodePointFromStartByte;
+import static io.trino.operator.scalar.JoniRegexpFunctions.getSearchingOffset;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 
 @ScalarFunction("regexp_replace")
 @Description("Replaces substrings matching a regular expression using a lambda function")
 public final class JoniRegexpReplaceLambdaFunction
 {
-    private final PageBuilder pageBuilder = new PageBuilder(ImmutableList.of(VARCHAR));
+    private final BufferedArrayValueBuilder arrayValueBuilder = BufferedArrayValueBuilder.createBuffered(new ArrayType(VARCHAR));
 
     @LiteralParameters("x")
     @SqlType("varchar")
@@ -51,18 +50,11 @@ public final class JoniRegexpReplaceLambdaFunction
     {
         // If there is no match we can simply return the original source without doing copy.
         Matcher matcher = pattern.matcher(source.getBytes());
-        if (matcher.search(0, source.length(), Option.DEFAULT) == -1) {
+        if (getSearchingOffset(matcher, 0, source.length()) == -1) {
             return source;
         }
 
         SliceOutput output = new DynamicSliceOutput(source.length());
-
-        // Prepare a BlockBuilder that will be used to create the target block
-        // that will be passed to the lambda function.
-        if (pageBuilder.isFull()) {
-            pageBuilder.reset();
-        }
-        BlockBuilder blockBuilder = pageBuilder.getBlockBuilder(0);
 
         int groupCount = pattern.regex().numberOfCaptures();
         int appendPosition = 0;
@@ -90,17 +82,17 @@ public final class JoniRegexpReplaceLambdaFunction
 
             // Append the capturing groups to the target block that will be passed to lambda
             Region matchedRegion = matcher.getEagerRegion();
-            for (int i = 1; i <= groupCount; i++) {
-                // Add to the block builder if the matched region is not null. In Joni null is represented as [-1, -1]
-                if (matchedRegion.beg[i] >= 0 && matchedRegion.end[i] >= 0) {
-                    VARCHAR.writeSlice(blockBuilder, source, matchedRegion.beg[i], matchedRegion.end[i] - matchedRegion.beg[i]);
+            Block target = arrayValueBuilder.build(groupCount, elementBuilder -> {
+                for (int i = 1; i <= groupCount; i++) {
+                    // Add to the block builder if the matched region is not null. In Joni null is represented as [-1, -1]
+                    if (matchedRegion.beg[i] >= 0 && matchedRegion.end[i] >= 0) {
+                        VARCHAR.writeSlice(elementBuilder, source, matchedRegion.beg[i], matchedRegion.end[i] - matchedRegion.beg[i]);
+                    }
+                    else {
+                        elementBuilder.appendNull();
+                    }
                 }
-                else {
-                    blockBuilder.appendNull();
-                }
-            }
-            pageBuilder.declarePositions(groupCount);
-            Block target = blockBuilder.getRegion(blockBuilder.getPositionCount() - groupCount, groupCount);
+            });
 
             // Call the lambda function to replace the block, and append the result to output
             Slice replaced = (Slice) replaceFunction.apply(target);
@@ -110,8 +102,7 @@ public final class JoniRegexpReplaceLambdaFunction
             }
             output.appendBytes(replaced);
         }
-        while (matcher.search(nextStart, source.length(), Option.DEFAULT) != -1);
-
+        while (getSearchingOffset(matcher, nextStart, source.length()) != -1);
         // Append the last un-matched part
         output.writeBytes(source, appendPosition, source.length() - appendPosition);
         return output.slice();

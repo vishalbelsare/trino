@@ -13,8 +13,6 @@
  */
 package io.trino.verifier;
 
-import com.google.common.base.Splitter;
-import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.configuration.Config;
@@ -23,11 +21,10 @@ import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.Duration;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.QualifiedName;
+import jakarta.annotation.Nullable;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import org.joda.time.DateTime;
-
-import javax.annotation.Nullable;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
 
 import java.util.Arrays;
 import java.util.List;
@@ -38,8 +35,6 @@ import java.util.stream.Collectors;
 import static io.trino.verifier.QueryType.CREATE;
 import static io.trino.verifier.QueryType.MODIFY;
 import static io.trino.verifier.QueryType.READ;
-import static java.util.Locale.ENGLISH;
-import static java.util.Objects.requireNonNull;
 
 public class VerifierConfig
 {
@@ -47,7 +42,7 @@ public class VerifierConfig
     private String controlUsernameOverride;
     private String testPasswordOverride;
     private String controlPasswordOverride;
-    private List<String> suites;
+    private List<String> suites = ImmutableList.of();
     private Set<QueryType> controlQueryTypes = ImmutableSet.of(READ, CREATE, MODIFY);
     private Set<QueryType> testQueryTypes = ImmutableSet.of(READ, CREATE, MODIFY);
     private String source;
@@ -69,6 +64,7 @@ public class VerifierConfig
     private int queryRepetitions = 1;
     private String skipCorrectnessRegex = "^$";
     private boolean checkCorrectness = true;
+    private boolean checkDeterminism = true;
     private String skipCpuCheckRegex = "(?i)(?s).*LIMIT.*";
     private boolean checkCpu = true;
     private boolean explainOnly;
@@ -88,6 +84,9 @@ public class VerifierConfig
     private String shadowTestTablePrefix = "tmp_verifier_";
     private String shadowControlTablePrefix = "tmp_verifier_";
     private boolean runTearDownOnResultMismatch;
+    private boolean skipControl;
+    private boolean simplifiedControlQueriesGenerationEnabled;
+    private String simplifiedControlQueriesOutputDirectory = "/tmp/verifier/generated-control-queries";
 
     private Duration regressionMinCpuTime = new Duration(5, TimeUnit.MINUTES);
 
@@ -160,7 +159,7 @@ public class VerifierConfig
 
     public String getSuite()
     {
-        return suites == null ? null : suites.get(0);
+        return suites.isEmpty() ? null : suites.get(0);
     }
 
     @ConfigDescription("The suites of queries in the query database to run")
@@ -181,19 +180,9 @@ public class VerifierConfig
 
     @ConfigDescription("The types of control queries allowed to run [CREATE, READ, MODIFY]")
     @Config("control.query-types")
-    public VerifierConfig setControlQueryTypes(String types)
+    public VerifierConfig setControlQueryTypes(Set<QueryType> controlQueryTypes)
     {
-        if (Strings.isNullOrEmpty(types)) {
-            this.controlQueryTypes = ImmutableSet.of();
-            return this;
-        }
-
-        ImmutableSet.Builder<QueryType> builder = ImmutableSet.builder();
-        for (String value : Splitter.on(',').trimResults().omitEmptyStrings().split(types)) {
-            builder.add(QueryType.valueOf(value.toUpperCase(ENGLISH)));
-        }
-
-        this.controlQueryTypes = builder.build();
+        this.controlQueryTypes = ImmutableSet.copyOf(controlQueryTypes);
         return this;
     }
 
@@ -204,19 +193,9 @@ public class VerifierConfig
 
     @ConfigDescription("The types of control queries allowed to run [CREATE, READ, MODIFY]")
     @Config("test.query-types")
-    public VerifierConfig setTestQueryTypes(String types)
+    public VerifierConfig setTestQueryTypes(Set<QueryType> testQueryTypes)
     {
-        if (Strings.isNullOrEmpty(types)) {
-            this.testQueryTypes = ImmutableSet.of();
-            return this;
-        }
-
-        ImmutableSet.Builder<QueryType> builder = ImmutableSet.builder();
-        for (String value : Splitter.on(',').trimResults().omitEmptyStrings().split(types)) {
-            builder.add(QueryType.valueOf(value.toUpperCase(ENGLISH)));
-        }
-
-        this.testQueryTypes = builder.build();
+        this.testQueryTypes = ImmutableSet.copyOf(testQueryTypes);
         return this;
     }
 
@@ -228,18 +207,9 @@ public class VerifierConfig
 
     @ConfigDescription("The suites of queries in the query database to run")
     @Config("suites")
-    public VerifierConfig setSuites(String suites)
+    public VerifierConfig setSuites(List<String> suites)
     {
-        if (Strings.isNullOrEmpty(suites)) {
-            return this;
-        }
-
-        ImmutableList.Builder<String> builder = ImmutableList.builder();
-        for (String value : Splitter.on(',').trimResults().omitEmptyStrings().split(suites)) {
-            builder.add(value);
-        }
-
-        this.suites = builder.build();
+        this.suites = ImmutableList.copyOf(suites);
         return this;
     }
 
@@ -280,14 +250,9 @@ public class VerifierConfig
     @ConfigDescription("Names of queries which are banned")
     @Config("banned-queries")
     @LegacyConfig("blacklist")
-    public VerifierConfig setBannedQueries(String bannedQueries)
+    public VerifierConfig setBannedQueries(Set<String> bannedQueries)
     {
-        ImmutableSet.Builder<String> bannedBuilder = ImmutableSet.builder();
-        for (String value : Splitter.on(',').trimResults().omitEmptyStrings().split(bannedQueries)) {
-            bannedBuilder.add(value);
-        }
-
-        this.bannedQueries = bannedBuilder.build();
+        this.bannedQueries = ImmutableSet.copyOf(bannedQueries);
         return this;
     }
 
@@ -300,14 +265,9 @@ public class VerifierConfig
     @ConfigDescription("Names of queries which are allowed. If non-empty, only allowed queries are used.")
     @Config("allowed-queries")
     @LegacyConfig("whitelist")
-    public VerifierConfig setAllowedQueries(String allowedQueries)
+    public VerifierConfig setAllowedQueries(Set<String> allowedQueries)
     {
-        ImmutableSet.Builder<String> allowedBuilder = ImmutableSet.builder();
-        for (String value : Splitter.on(',').trimResults().omitEmptyStrings().split(allowedQueries)) {
-            allowedBuilder.add(value);
-        }
-
-        this.allowedQueries = allowedBuilder.build();
+        this.allowedQueries = ImmutableSet.copyOf(allowedQueries);
         return this;
     }
 
@@ -364,6 +324,18 @@ public class VerifierConfig
         return this;
     }
 
+    public boolean isCheckDeterminismEnabled()
+    {
+        return checkDeterminism;
+    }
+
+    @Config("check-determinism")
+    public VerifierConfig setCheckDeterminismEnabled(boolean checkDeterminism)
+    {
+        this.checkDeterminism = checkDeterminism;
+        return this;
+    }
+
     public boolean isCheckCpuEnabled()
     {
         return checkCpu;
@@ -411,15 +383,9 @@ public class VerifierConfig
 
     @ConfigDescription("The event client(s) to log the results to")
     @Config("event-client")
-    public VerifierConfig setEventClients(String eventClients)
+    public VerifierConfig setEventClients(Set<String> eventClients)
     {
-        requireNonNull(eventClients, "eventClients is null");
-        ImmutableSet.Builder<String> builder = ImmutableSet.builder();
-        for (String value : Splitter.on(',').trimResults().omitEmptyStrings().split(eventClients)) {
-            builder.add(value);
-        }
-
-        this.eventClients = builder.build();
+        this.eventClients = ImmutableSet.copyOf(eventClients);
         return this;
     }
 
@@ -778,6 +744,43 @@ public class VerifierConfig
     public VerifierConfig setRunTearDownOnResultMismatch(boolean runTearDownOnResultMismatch)
     {
         this.runTearDownOnResultMismatch = runTearDownOnResultMismatch;
+        return this;
+    }
+
+    public boolean isSkipControl()
+    {
+        return skipControl;
+    }
+
+    @Config("skip-control")
+    public VerifierConfig setSkipControl(boolean skipControl)
+    {
+        this.skipControl = skipControl;
+        return this;
+    }
+
+    public boolean isSimplifiedControlQueriesGenerationEnabled()
+    {
+        return simplifiedControlQueriesGenerationEnabled;
+    }
+
+    @Config("simplified-control-queries-generation-enabled")
+    public VerifierConfig setSimplifiedControlQueriesGenerationEnabled(boolean simplifiedControlQueriesGenerationEnabled)
+    {
+        this.simplifiedControlQueriesGenerationEnabled = simplifiedControlQueriesGenerationEnabled;
+        return this;
+    }
+
+    @NotNull
+    public String getSimplifiedControlQueriesOutputDirectory()
+    {
+        return simplifiedControlQueriesOutputDirectory;
+    }
+
+    @Config("simplified-control-queries-output-directory")
+    public VerifierConfig setSimplifiedControlQueriesOutputDirectory(String simplifiedControlQueriesOutputDirectory)
+    {
+        this.simplifiedControlQueriesOutputDirectory = simplifiedControlQueriesOutputDirectory;
         return this;
     }
 }

@@ -14,23 +14,40 @@
 package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.BoundSignature;
-import io.trino.operator.aggregation.TestAccumulatorCompiler.LongTimestampAggregation.State;
+import io.airlift.bytecode.DynamicClassLoader;
+import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.trino.operator.aggregation.state.StateCompiler;
+import io.trino.operator.window.InternalWindowIndex;
+import io.trino.server.PluginManager;
+import io.trino.spi.Page;
+import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.Fixed12Block;
+import io.trino.spi.block.LongArrayBlockBuilder;
 import io.trino.spi.function.AccumulatorState;
 import io.trino.spi.function.AccumulatorStateFactory;
 import io.trino.spi.function.AccumulatorStateSerializer;
+import io.trino.spi.function.AggregationImplementation;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionNullability;
+import io.trino.spi.function.WindowAccumulator;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.TimestampType;
-import org.testng.annotations.Test;
+import io.trino.sql.gen.IsolatedClass;
+import org.junit.jupiter.api.Test;
 
 import java.lang.invoke.MethodHandle;
 import java.util.Optional;
 
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.INPUT_CHANNEL;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.STATE;
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
+import static io.trino.operator.aggregation.AccumulatorCompiler.generateAccumulatorFactory;
+import static io.trino.operator.aggregation.AggregationFunctionAdapter.AggregationParameterKind.INPUT_CHANNEL;
+import static io.trino.operator.aggregation.AggregationFunctionAdapter.AggregationParameterKind.STATE;
+import static io.trino.operator.aggregation.AggregationFunctionAdapter.normalizeInputMethod;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_PICOS;
 import static io.trino.util.Reflection.methodHandle;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -39,45 +56,170 @@ public class TestAccumulatorCompiler
     @Test
     public void testAccumulatorCompilerForTypeSpecificObjectParameter()
     {
+        testAccumulatorCompilerForTypeSpecificObjectParameter(true);
+        testAccumulatorCompilerForTypeSpecificObjectParameter(false);
+    }
+
+    private void testAccumulatorCompilerForTypeSpecificObjectParameter(boolean specializedLoops)
+    {
+        TimestampType parameterType = TimestampType.TIMESTAMP_NANOS;
+        assertThat(parameterType.getJavaType()).isEqualTo(LongTimestamp.class);
+        assertGenerateAccumulator(LongTimestampAggregation.class, LongTimestampAggregationState.class, specializedLoops);
+    }
+
+    @Test
+    public void testAccumulatorCompilerForTypeSpecificObjectParameterSeparateClassLoader()
+            throws Exception
+    {
+        testAccumulatorCompilerForTypeSpecificObjectParameterSeparateClassLoader(true);
+        testAccumulatorCompilerForTypeSpecificObjectParameterSeparateClassLoader(false);
+    }
+
+    private void testAccumulatorCompilerForTypeSpecificObjectParameterSeparateClassLoader(boolean specializedLoops)
+            throws Exception
+    {
         TimestampType parameterType = TimestampType.TIMESTAMP_NANOS;
         assertThat(parameterType.getJavaType()).isEqualTo(LongTimestamp.class);
 
-        Class<State> stateInterface = State.class;
-        AccumulatorStateSerializer<State> stateSerializer = StateCompiler.generateStateSerializer(stateInterface);
-        AccumulatorStateFactory<State> stateFactory = StateCompiler.generateStateFactory(stateInterface);
+        ClassLoader pluginClassLoader = PluginManager.createClassLoader("test", ImmutableList.of());
+        DynamicClassLoader classLoader = new DynamicClassLoader(pluginClassLoader);
+        Class<? extends AccumulatorState> stateInterface = IsolatedClass.isolateClass(
+                classLoader,
+                AccumulatorState.class,
+                LongTimestampAggregationState.class,
+                LongTimestampAggregation.class);
+        assertThat(stateInterface.getCanonicalName()).isEqualTo(LongTimestampAggregationState.class.getCanonicalName());
+        assertThat(stateInterface).isNotSameAs(LongTimestampAggregationState.class);
+        Class<?> aggregation = classLoader.loadClass(LongTimestampAggregation.class.getCanonicalName());
+        assertThat(aggregation.getCanonicalName()).isEqualTo(LongTimestampAggregation.class.getCanonicalName());
+        assertThat(aggregation).isNotSameAs(LongTimestampAggregation.class);
 
-        MethodHandle inputFunction = methodHandle(LongTimestampAggregation.class, "input", State.class, LongTimestamp.class);
-        MethodHandle combineFunction = methodHandle(LongTimestampAggregation.class, "combine", State.class, State.class);
-        MethodHandle outputFunction = methodHandle(LongTimestampAggregation.class, "output", State.class, BlockBuilder.class);
-        AggregationMetadata metadata = new AggregationMetadata(
-                ImmutableList.of(STATE, INPUT_CHANNEL),
-                inputFunction,
-                Optional.empty(),
-                combineFunction,
-                outputFunction,
-                ImmutableList.of(new AggregationMetadata.AccumulatorStateDescriptor<>(
-                        stateInterface,
-                        stateSerializer,
-                        stateFactory)));
-        BoundSignature signature = new BoundSignature("longTimestampAggregation", RealType.REAL, ImmutableList.of(TimestampType.TIMESTAMP_PICOS));
-
-        // test if we can compile aggregation
-        assertThat(AccumulatorCompiler.generateAccumulatorFactoryBinder(signature, metadata)).isNotNull();
-
-        // TODO test if aggregation actually works...
+        assertGenerateAccumulator(aggregation, stateInterface, specializedLoops);
     }
 
-    public static final class LongTimestampAggregation
+    private static <S extends AccumulatorState, A> void assertGenerateAccumulator(Class<A> aggregation, Class<S> stateInterface, boolean specializedLoops)
     {
-        private LongTimestampAggregation() {}
+        AccumulatorStateSerializer<S> stateSerializer = StateCompiler.generateStateSerializer(stateInterface);
+        AccumulatorStateFactory<S> stateFactory = StateCompiler.generateStateFactory(stateInterface);
 
-        public interface State
-                extends AccumulatorState {}
+        BoundSignature signature = new BoundSignature(
+                builtinFunctionName("longTimestampAggregation"),
+                RealType.REAL,
+                ImmutableList.of(TIMESTAMP_PICOS));
+        MethodHandle inputFunction = methodHandle(aggregation, "input", stateInterface, LongTimestamp.class);
+        inputFunction = normalizeInputMethod(inputFunction, signature, STATE, INPUT_CHANNEL);
+        MethodHandle combineFunction = methodHandle(aggregation, "combine", stateInterface, stateInterface);
+        MethodHandle outputFunction = methodHandle(aggregation, "output", stateInterface, BlockBuilder.class);
+        AggregationImplementation implementation = AggregationImplementation.builder()
+                .inputFunction(inputFunction)
+                .combineFunction(combineFunction)
+                .outputFunction(outputFunction)
+                .accumulatorStateDescriptor(stateInterface, stateSerializer, stateFactory)
+                .build();
+        FunctionNullability functionNullability = new FunctionNullability(false, ImmutableList.of(false));
 
-        public static void input(State state, LongTimestamp value) {}
+        // test if we can compile aggregation
+        AccumulatorFactory accumulatorFactory = generateAccumulatorFactory(signature, implementation, functionNullability, specializedLoops);
+        assertThat(accumulatorFactory).isNotNull();
 
-        public static void combine(State stateA, State stateB) {}
+        // compile window aggregation
+        var actual = AccumulatorCompiler.generateWindowAccumulatorClass(signature, implementation, functionNullability);
+        assertThat(actual).isNotNull();
+        WindowAccumulator windowAccumulator = actual.apply(ImmutableList.of());
+        // call the functions to ensure that the code does not reference the wrong state
+        windowAccumulator.addInput(new TestWindowIndex(), 0, 5);
+        windowAccumulator.output(new LongArrayBlockBuilder(null, 1));
 
-        public static void output(State state, BlockBuilder blockBuilder) {}
+        TestingAggregationFunction aggregationFunction = new TestingAggregationFunction(
+                ImmutableList.of(TIMESTAMP_PICOS),
+                ImmutableList.of(BIGINT),
+                BIGINT,
+                accumulatorFactory);
+        assertThat(AggregationTestUtils.aggregation(aggregationFunction, createPage(1234))).isEqualTo(1234L);
+    }
+
+    private static Page createPage(int count)
+    {
+        Block timestampSequenceBlock = createTimestampSequenceBlock(count);
+        return new Page(timestampSequenceBlock.getPositionCount(), timestampSequenceBlock);
+    }
+
+    private static Block createTimestampSequenceBlock(int count)
+    {
+        BlockBuilder builder = TIMESTAMP_PICOS.createFixedSizeBlockBuilder(count);
+        for (int i = 0; i < count; i++) {
+            TIMESTAMP_PICOS.writeObject(builder, new LongTimestamp(i, i));
+        }
+        return builder.build();
+    }
+
+    private static class TestWindowIndex
+            implements InternalWindowIndex
+    {
+        @Override
+        public int size()
+        {
+            return 10;
+        }
+
+        @Override
+        public boolean isNull(int channel, int position)
+        {
+            return false;
+        }
+
+        @Override
+        public boolean getBoolean(int channel, int position)
+        {
+            return false;
+        }
+
+        @Override
+        public long getLong(int channel, int position)
+        {
+            return 0;
+        }
+
+        @Override
+        public double getDouble(int channel, int position)
+        {
+            return 0;
+        }
+
+        @Override
+        public Slice getSlice(int channel, int position)
+        {
+            return Slices.EMPTY_SLICE;
+        }
+
+        @Override
+        public Block getSingleValueBlock(int channel, int position)
+        {
+            return null;
+        }
+
+        @Override
+        public Object getObject(int channel, int position)
+        {
+            return null;
+        }
+
+        @Override
+        public void appendTo(int channel, int position, BlockBuilder output)
+        {
+            output.appendNull();
+        }
+
+        @Override
+        public Block getRawBlock(int channel, int position)
+        {
+            return new Fixed12Block(1, Optional.empty(), new int[] {0, 0, 0});
+        }
+
+        @Override
+        public int getRawBlockPosition(int position)
+        {
+            return 0;
+        }
     }
 }

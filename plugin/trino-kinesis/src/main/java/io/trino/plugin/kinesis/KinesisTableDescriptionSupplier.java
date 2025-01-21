@@ -21,10 +21,10 @@ import io.airlift.log.Logger;
 import io.trino.plugin.kinesis.s3config.S3TableConfigClient;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.SchemaTableName;
-
-import javax.annotation.PreDestroy;
+import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.DirectoryIteratorException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -36,6 +36,7 @@ import java.util.function.Supplier;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Throwables.throwIfUnchecked;
+import static java.nio.file.Files.newInputStream;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -47,7 +48,8 @@ public class KinesisTableDescriptionSupplier
 {
     private static final Logger log = Logger.get(KinesisTableDescriptionSupplier.class);
 
-    private final KinesisConfig kinesisConfig;
+    private final String tableDescriptionLocation;
+    private final String defaultSchema;
     private final JsonCodec<KinesisStreamDescription> streamDescriptionCodec;
     private final S3TableConfigClient s3TableConfigClient;
 
@@ -57,7 +59,9 @@ public class KinesisTableDescriptionSupplier
             JsonCodec<KinesisStreamDescription> streamDescriptionCodec,
             S3TableConfigClient s3TableConfigClient)
     {
-        this.kinesisConfig = requireNonNull(kinesisConfig, "kinesisConfig is null");
+        requireNonNull(kinesisConfig, "kinesisConfig is null");
+        this.tableDescriptionLocation = kinesisConfig.getTableDescriptionLocation();
+        this.defaultSchema = kinesisConfig.getDefaultSchema();
         this.streamDescriptionCodec = requireNonNull(streamDescriptionCodec, "streamDescriptionCodec is null");
         this.s3TableConfigClient = requireNonNull(s3TableConfigClient, "s3TableConfigClient is null");
     }
@@ -76,16 +80,18 @@ public class KinesisTableDescriptionSupplier
     {
         ImmutableMap.Builder<SchemaTableName, KinesisStreamDescription> builder = ImmutableMap.builder();
         try {
-            for (Path file : listFiles(Paths.get(kinesisConfig.getTableDescriptionLocation()))) {
+            for (Path file : listFiles(Paths.get(tableDescriptionLocation))) {
                 if (Files.isRegularFile(file) && file.getFileName().toString().endsWith("json")) {
-                    KinesisStreamDescription table = streamDescriptionCodec.fromJson(Files.readAllBytes(file));
-                    String schemaName = firstNonNull(table.getSchemaName(), kinesisConfig.getDefaultSchema());
-                    log.debug("Kinesis table %s %s %s", schemaName, table.getTableName(), table);
-                    builder.put(new SchemaTableName(schemaName, table.getTableName()), table);
+                    try (InputStream stream = newInputStream(file)) {
+                        KinesisStreamDescription table = streamDescriptionCodec.fromJson(stream);
+                        String schemaName = firstNonNull(table.schemaName(), defaultSchema);
+                        log.debug("Kinesis table %s %s %s", schemaName, table.tableName(), table);
+                        builder.put(new SchemaTableName(schemaName, table.tableName()), table);
+                    }
                 }
             }
 
-            Map<SchemaTableName, KinesisStreamDescription> tableDefinitions = builder.build();
+            Map<SchemaTableName, KinesisStreamDescription> tableDefinitions = builder.buildOrThrow();
             log.debug("Loaded table definitions: %s", tableDefinitions.keySet());
 
             return tableDefinitions;

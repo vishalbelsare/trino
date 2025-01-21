@@ -17,13 +17,14 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.trino.decoder.dummy.DummyRowDecoder;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorTableProperties;
+import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableNotFoundException;
@@ -35,6 +36,8 @@ import java.util.Set;
 import java.util.function.Supplier;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.plugin.kinesis.KinesisCompressionCodec.UNCOMPRESSED;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 
 public class KinesisMetadata
@@ -50,7 +53,6 @@ public class KinesisMetadata
             Supplier<Map<SchemaTableName, KinesisStreamDescription>> tableDescriptionSupplier,
             Set<KinesisInternalFieldDescription> internalFieldDescriptions)
     {
-        requireNonNull(kinesisConfig, "kinesisConfig is null");
         isHideInternalColumns = kinesisConfig.isHideInternalColumns();
         this.tableDescriptionSupplier = requireNonNull(tableDescriptionSupplier, "tableDescriptionSupplier is null");
         this.internalFieldDescriptions = requireNonNull(internalFieldDescriptions, "internalFieldDescriptions is null");
@@ -65,8 +67,12 @@ public class KinesisMetadata
     }
 
     @Override
-    public KinesisTableHandle getTableHandle(ConnectorSession session, SchemaTableName schemaTableName)
+    public KinesisTableHandle getTableHandle(ConnectorSession session, SchemaTableName schemaTableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+        }
+
         KinesisStreamDescription table = tableDescriptionSupplier.get().get(schemaTableName);
         if (table == null) {
             throw new TableNotFoundException(schemaTableName);
@@ -75,27 +81,15 @@ public class KinesisMetadata
         return new KinesisTableHandle(
                 schemaTableName.getSchemaName(),
                 schemaTableName.getTableName(),
-                table.getStreamName(),
-                getDataFormat(table.getMessage()),
-                table.getMessage().getCompressionCodec());
+                table.streamName(),
+                getDataFormat(table.message()),
+                table.message().compressionCodec().orElse(UNCOMPRESSED));
     }
 
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession connectorSession, ConnectorTableHandle tableHandle)
     {
-        return getTableMetadata(((KinesisTableHandle) tableHandle).toSchemaTableName());
-    }
-
-    @Override
-    public boolean usesLegacyTableLayouts()
-    {
-        return false;
-    }
-
-    @Override
-    public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
-    {
-        return new ConnectorTableProperties();
+        return getTableMetadata(((KinesisTableHandle) tableHandle).schemaTableName());
     }
 
     @Override
@@ -103,7 +97,7 @@ public class KinesisMetadata
     {
         ImmutableList.Builder<SchemaTableName> builder = ImmutableList.builder();
         for (SchemaTableName tableName : tableDescriptionSupplier.get().keySet()) {
-            if ((schemaName.isEmpty()) || tableName.getSchemaName().equals(schemaName.get())) {
+            if (schemaName.isEmpty() || tableName.getSchemaName().equals(schemaName.get())) {
                 builder.add(tableName);
             }
         }
@@ -116,21 +110,21 @@ public class KinesisMetadata
     {
         KinesisTableHandle kinesisTableHandle = (KinesisTableHandle) tableHandle;
 
-        KinesisStreamDescription kinesisStreamDescription = tableDescriptionSupplier.get().get(kinesisTableHandle.toSchemaTableName());
+        KinesisStreamDescription kinesisStreamDescription = tableDescriptionSupplier.get().get(kinesisTableHandle.schemaTableName());
         if (kinesisStreamDescription == null) {
-            throw new TableNotFoundException(kinesisTableHandle.toSchemaTableName());
+            throw new TableNotFoundException(kinesisTableHandle.schemaTableName());
         }
 
         ImmutableMap.Builder<String, ColumnHandle> columnHandles = ImmutableMap.builder();
 
         int index = 0;
         // Note: partition key and related fields are handled by internalFieldDescriptions below
-        KinesisStreamFieldGroup message = kinesisStreamDescription.getMessage();
+        KinesisStreamFieldGroup message = kinesisStreamDescription.message();
         if (message != null) {
-            List<KinesisStreamFieldDescription> fields = message.getFields();
+            List<KinesisStreamFieldDescription> fields = message.fields();
             if (fields != null) {
                 for (KinesisStreamFieldDescription kinesisStreamFieldDescription : fields) {
-                    columnHandles.put(kinesisStreamFieldDescription.getName(), kinesisStreamFieldDescription.getColumnHandle(index++));
+                    columnHandles.put(kinesisStreamFieldDescription.name(), kinesisStreamFieldDescription.columnHandle(index++));
                 }
             }
         }
@@ -139,7 +133,7 @@ public class KinesisMetadata
             columnHandles.put(kinesisInternalFieldDescription.getColumnName(), kinesisInternalFieldDescription.getColumnHandle(index++, isHideInternalColumns));
         }
 
-        return columnHandles.build();
+        return columnHandles.buildOrThrow();
     }
 
     @Override
@@ -170,12 +164,12 @@ public class KinesisMetadata
                 columns.put(tableName, tableMetadata.getColumns());
             }
         }
-        return columns.build();
+        return columns.buildOrThrow();
     }
 
     private static String getDataFormat(KinesisStreamFieldGroup fieldGroup)
     {
-        return (fieldGroup == null) ? DummyRowDecoder.NAME : fieldGroup.getDataFormat();
+        return (fieldGroup == null) ? DummyRowDecoder.NAME : fieldGroup.dataFormat();
     }
 
     private ConnectorTableMetadata getTableMetadata(SchemaTableName schemaTableName)
@@ -187,12 +181,12 @@ public class KinesisMetadata
 
         ImmutableList.Builder<ColumnMetadata> builder = ImmutableList.builder();
 
-        KinesisStreamFieldGroup message = kinesisStreamDescription.getMessage();
+        KinesisStreamFieldGroup message = kinesisStreamDescription.message();
         if (message != null) {
-            List<KinesisStreamFieldDescription> fields = message.getFields();
+            List<KinesisStreamFieldDescription> fields = message.fields();
             if (fields != null) {
                 for (KinesisStreamFieldDescription fieldDescription : fields) {
-                    builder.add(fieldDescription.getColumnMetadata());
+                    builder.add(fieldDescription.columnMetadata());
                 }
             }
         }

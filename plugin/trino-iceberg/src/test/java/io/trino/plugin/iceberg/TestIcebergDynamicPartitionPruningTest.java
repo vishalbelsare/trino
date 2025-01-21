@@ -13,11 +13,13 @@
  */
 package io.trino.plugin.iceberg;
 
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableList;
 import io.trino.testing.BaseDynamicPartitionPruningTest;
 import io.trino.testing.QueryRunner;
+import org.intellij.lang.annotations.Language;
 
 import java.util.List;
+import java.util.Map;
 
 import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
@@ -29,20 +31,47 @@ public class TestIcebergDynamicPartitionPruningTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return IcebergQueryRunner.createIcebergQueryRunner(
-                EXTRA_PROPERTIES,
-                ImmutableMap.of("iceberg.dynamic-filtering.wait-timeout", "1h"),
-                REQUIRED_TABLES);
+        return IcebergQueryRunner.builder()
+                .setExtraProperties(EXTRA_PROPERTIES)
+                .setIcebergProperties(Map.of("iceberg.dynamic-filtering.wait-timeout", "1h"))
+                .setInitialTables(REQUIRED_TABLES)
+                .build();
     }
 
     @Override
     protected void createLineitemTable(String tableName, List<String> columns, List<String> partitionColumns)
     {
-        String sql = format(
+        @Language("SQL") String sql = format(
                 "CREATE TABLE %s WITH (partitioning=array[%s]) AS SELECT %s FROM tpch.tiny.lineitem",
                 tableName,
                 partitionColumns.stream().map(column -> "'" + column + "'").collect(joining(",")),
                 String.join(",", columns));
+        getQueryRunner().execute(sql);
+    }
+
+    @Override
+    protected void createPartitionedTable(String tableName, List<String> columns, List<String> partitionColumns)
+    {
+        @Language("SQL") String sql = format(
+                "CREATE TABLE %s (%s) WITH (partitioning=array[%s])",
+                tableName,
+                String.join(",", columns),
+                partitionColumns.stream().map(column -> "'" + column + "'").collect(joining(",")));
+        getQueryRunner().execute(sql);
+    }
+
+    @Override
+    protected void createPartitionedAndBucketedTable(String tableName, List<String> columns, List<String> partitionColumns, List<String> bucketColumns)
+    {
+        ImmutableList.Builder<String> partitioning = ImmutableList.builder();
+        partitionColumns.forEach(partitioning::add);
+        bucketColumns.forEach(column -> partitioning.add("bucket(%s,10)".formatted(column)));
+
+        String sql = format(
+                "CREATE TABLE %s (%s) WITH (partitioning=ARRAY[%s])",
+                tableName,
+                String.join(",", columns),
+                String.join(",", partitioning.build().stream().map("'%s'"::formatted).toList()));
         getQueryRunner().execute(sql);
     }
 }

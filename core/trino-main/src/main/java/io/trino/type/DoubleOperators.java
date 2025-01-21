@@ -25,6 +25,9 @@ import io.trino.spi.function.ScalarOperator;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
 
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
+
 import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
@@ -37,12 +40,13 @@ import static io.trino.spi.function.OperatorType.MULTIPLY;
 import static io.trino.spi.function.OperatorType.NEGATION;
 import static io.trino.spi.function.OperatorType.SATURATED_FLOOR_CAST;
 import static io.trino.spi.function.OperatorType.SUBTRACT;
-import static java.lang.Float.floatToIntBits;
+import static io.trino.type.Reals.toReal;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.math.RoundingMode.FLOOR;
 import static java.math.RoundingMode.HALF_UP;
+import static java.util.Locale.ENGLISH;
 
 public final class DoubleOperators
 {
@@ -53,9 +57,9 @@ public final class DoubleOperators
     private static final double MIN_BYTE_AS_DOUBLE = -0x1p7;
     private static final double MAX_BYTE_PLUS_ONE_AS_DOUBLE = 0x1p7;
 
-    private DoubleOperators()
-    {
-    }
+    private static final ThreadLocal<DecimalFormat> FORMAT = ThreadLocal.withInitial(() -> new DecimalFormat("0.0###################E0", new DecimalFormatSymbols(ENGLISH)));
+
+    private DoubleOperators() {}
 
     @ScalarOperator(ADD)
     @SqlType(StandardTypes.DOUBLE)
@@ -175,21 +179,43 @@ public final class DoubleOperators
     @SqlType("varchar(x)")
     public static Slice castToVarchar(@LiteralParameter("x") long x, @SqlType(StandardTypes.DOUBLE) double value)
     {
-        String stringValue = String.valueOf(value);
+        String stringValue;
+
+        // handle positive and negative 0
+        if (value == 0e0) {
+            if (1e0 / value > 0) {
+                stringValue = "0E0";
+            }
+            else {
+                stringValue = "-0E0";
+            }
+        }
+        else if (Double.isInfinite(value)) {
+            if (value > 0) {
+                stringValue = "Infinity";
+            }
+            else {
+                stringValue = "-Infinity";
+            }
+        }
+        else {
+            stringValue = FORMAT.get().format(value);
+        }
+
         // String is all-ASCII, so String.length() here returns actual code points count
         if (stringValue.length() <= x) {
             return utf8Slice(stringValue);
         }
 
-        throw new TrinoException(INVALID_CAST_ARGUMENT, format("Value %s cannot be represented as varchar(%s)", value, x));
+        throw new TrinoException(INVALID_CAST_ARGUMENT, format("Value %s (%s) cannot be represented as varchar(%s)", value, stringValue, x));
     }
 
     @ScalarOperator(SATURATED_FLOOR_CAST)
     @SqlType(StandardTypes.REAL)
-    public static strictfp long saturatedFloorCastToFloat(@SqlType(StandardTypes.DOUBLE) double value)
+    public static long saturatedFloorCastToFloat(@SqlType(StandardTypes.DOUBLE) double value)
     {
         if (Double.isNaN(value)) {
-            return floatToIntBits(Float.NaN);
+            return toReal(Float.NaN);
         }
         float result;
         float minFloat = -1.0f * Float.MAX_VALUE;

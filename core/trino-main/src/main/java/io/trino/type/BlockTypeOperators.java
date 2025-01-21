@@ -13,9 +13,11 @@
  */
 package io.trino.type;
 
-import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.util.concurrent.UncheckedExecutionException;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.google.inject.Inject;
+import io.trino.cache.NonKeyEvictableCache;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.function.InvocationConvention;
@@ -23,20 +25,18 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import org.weakref.jmx.Managed;
 
-import javax.annotation.concurrent.GuardedBy;
-import javax.inject.Inject;
-
 import java.lang.invoke.MethodHandle;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static com.google.common.base.Throwables.throwIfUnchecked;
+import static io.trino.cache.CacheUtils.uncheckedCacheGet;
+import static io.trino.cache.SafeCaches.buildNonEvictableCacheWithWeakInvalidateAll;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.DEFAULT_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
-import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_FIRST;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
@@ -46,15 +46,15 @@ import static java.util.Objects.requireNonNull;
 
 public final class BlockTypeOperators
 {
-    private static final InvocationConvention BLOCK_EQUAL_CONVENTION = simpleConvention(NULLABLE_RETURN, BLOCK_POSITION, BLOCK_POSITION);
+    private static final InvocationConvention BLOCK_EQUAL_CONVENTION = simpleConvention(DEFAULT_ON_NULL, BLOCK_POSITION, BLOCK_POSITION);
     private static final InvocationConvention HASH_CODE_CONVENTION = simpleConvention(FAIL_ON_NULL, BLOCK_POSITION);
     private static final InvocationConvention XX_HASH_64_CONVENTION = simpleConvention(FAIL_ON_NULL, BLOCK_POSITION);
-    private static final InvocationConvention IS_DISTINCT_FROM_CONVENTION = simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION);
+    private static final InvocationConvention IDENTICAL_CONVENTION = simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION);
     private static final InvocationConvention COMPARISON_CONVENTION = simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION);
     private static final InvocationConvention ORDERING_CONVENTION = simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION);
     private static final InvocationConvention LESS_THAN_CONVENTION = simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION);
 
-    private final Cache<GeneratedBlockOperatorKey<?>, GeneratedBlockOperator<?>> generatedBlockOperatorCache;
+    private final NonKeyEvictableCache<GeneratedBlockOperatorKey<?>, GeneratedBlockOperator<?>> generatedBlockOperatorCache;
     private final TypeOperators typeOperators;
 
     public BlockTypeOperators()
@@ -66,10 +66,10 @@ public final class BlockTypeOperators
     public BlockTypeOperators(TypeOperators typeOperators)
     {
         this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
-        this.generatedBlockOperatorCache = CacheBuilder.newBuilder()
-                .maximumSize(10_000)
-                .expireAfterWrite(2, TimeUnit.HOURS)
-                .build();
+        this.generatedBlockOperatorCache = buildNonEvictableCacheWithWeakInvalidateAll(
+                CacheBuilder.newBuilder()
+                        .maximumSize(10_000)
+                        .expireAfterWrite(2, TimeUnit.HOURS));
     }
 
     public BlockPositionEqual getEqualOperator(Type type)
@@ -79,7 +79,7 @@ public final class BlockTypeOperators
 
     public interface BlockPositionEqual
     {
-        Boolean equal(Block left, int leftPosition, Block right, int rightPosition);
+        boolean equal(Block left, int leftPosition, Block right, int rightPosition);
 
         default boolean equalNullSafe(Block leftBlock, int leftPosition, Block rightBlock, int rightPosition)
         {
@@ -120,14 +120,14 @@ public final class BlockTypeOperators
         long xxHash64(Block block, int position);
     }
 
-    public BlockPositionIsDistinctFrom getDistinctFromOperator(Type type)
+    public BlockPositionIsIdentical getIdenticalOperator(Type type)
     {
-        return getBlockOperator(type, BlockPositionIsDistinctFrom.class, () -> typeOperators.getDistinctFromOperator(type, IS_DISTINCT_FROM_CONVENTION));
+        return getBlockOperator(type, BlockPositionIsIdentical.class, () -> typeOperators.getIdenticalOperator(type, IDENTICAL_CONVENTION));
     }
 
-    public interface BlockPositionIsDistinctFrom
+    public interface BlockPositionIsIdentical
     {
-        boolean isDistinctFrom(Block left, int leftPosition, Block right, int rightPosition);
+        boolean isIdentical(Block left, int leftPosition, Block right, int rightPosition);
     }
 
     public BlockPositionComparison getComparisonUnorderedLastOperator(Type type)
@@ -174,12 +174,13 @@ public final class BlockTypeOperators
     {
         try {
             @SuppressWarnings("unchecked")
-            GeneratedBlockOperator<T> generatedBlockOperator = (GeneratedBlockOperator<T>) generatedBlockOperatorCache.get(
+            GeneratedBlockOperator<T> generatedBlockOperator = (GeneratedBlockOperator<T>) uncheckedCacheGet(
+                    generatedBlockOperatorCache,
                     new GeneratedBlockOperatorKey<>(type, operatorInterface, additionalKey),
                     () -> new GeneratedBlockOperator<>(type, operatorInterface, methodHandleSupplier.get()));
             return generatedBlockOperator.get();
         }
-        catch (ExecutionException | UncheckedExecutionException e) {
+        catch (UncheckedExecutionException e) {
             throwIfUnchecked(e.getCause());
             throw new RuntimeException(e.getCause());
         }
@@ -284,6 +285,8 @@ public final class BlockTypeOperators
     @Managed
     public void cacheReset()
     {
+        // Note: this may not invalidate ongoing loads (https://github.com/trinodb/trino/issues/10512, https://github.com/google/guava/issues/1881)
+        // This is acceptable, since this operation is invoked manually, and not relied upon for correctness.
         generatedBlockOperatorCache.invalidateAll();
     }
 }

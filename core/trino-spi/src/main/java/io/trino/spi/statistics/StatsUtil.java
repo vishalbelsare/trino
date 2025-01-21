@@ -13,8 +13,8 @@
  */
 package io.trino.spi.statistics;
 
-import io.airlift.slice.Slice;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimestampType;
@@ -60,24 +60,23 @@ public final class StatsUtil
         if (type == DOUBLE) {
             return OptionalDouble.of((double) value);
         }
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
+        if (type instanceof DecimalType decimalType) {
             if (decimalType.isShort()) {
                 return OptionalDouble.of(shortDecimalToDouble((long) value, longTenToNth(decimalType.getScale())));
             }
-            return OptionalDouble.of(longDecimalToDouble((Slice) value, decimalType.getScale()));
+            return OptionalDouble.of(longDecimalToDouble((Int128) value, decimalType.getScale()));
         }
         if (type == DATE) {
             return OptionalDouble.of((long) value);
         }
-        if (type instanceof TimestampType) {
-            if (((TimestampType) type).isShort()) {
+        if (type instanceof TimestampType timestampType) {
+            if (timestampType.isShort()) {
                 return OptionalDouble.of((long) value);
             }
             return OptionalDouble.of(((LongTimestamp) value).getEpochMicros());
         }
-        if (type instanceof TimestampWithTimeZoneType) {
-            if (((TimestampWithTimeZoneType) type).isShort()) {
+        if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            if (timestampWithTimeZoneType.isShort()) {
                 return OptionalDouble.of(unpackMillisUtc((long) value));
             }
             return OptionalDouble.of(((LongTimestampWithTimeZone) value).getEpochMillis());

@@ -13,85 +13,98 @@
  */
 package io.trino.operator;
 
-import io.airlift.units.DataSize;
-import io.trino.execution.buffer.OutputBuffer;
 import io.trino.operator.join.JoinBridgeManager;
+import io.trino.operator.join.JoinProbe.JoinProbeFactory;
+import io.trino.operator.join.LookupJoinOperatorFactory;
 import io.trino.operator.join.LookupSourceFactory;
-import io.trino.spi.predicate.NullableValue;
+import io.trino.operator.join.unspilled.JoinProbe;
+import io.trino.operator.join.unspilled.PartitionedLookupSourceFactory;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spiller.PartitioningSpillerFactory;
 import io.trino.sql.planner.plan.PlanNodeId;
-import io.trino.type.BlockTypeOperators;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.stream.IntStream;
 
-public interface OperatorFactories
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.operator.WorkProcessorOperatorAdapter.createAdapterOperatorFactory;
+
+public class OperatorFactories
 {
-    OperatorFactory innerJoin(
+    private OperatorFactories() {}
+
+    public static OperatorFactory join(
+            JoinOperatorType joinType,
             int operatorId,
             PlanNodeId planNodeId,
-            JoinBridgeManager<? extends LookupSourceFactory> lookupSourceFactory,
-            boolean outputSingleMatch,
-            boolean waitForBuild,
+            JoinBridgeManager<? extends PartitionedLookupSourceFactory> lookupSourceFactory,
             boolean hasFilter,
             List<Type> probeTypes,
             List<Integer> probeJoinChannel,
             OptionalInt probeHashChannel,
-            Optional<List<Integer>> probeOutputChannels,
-            OptionalInt totalOperatorsCount,
-            PartitioningSpillerFactory partitioningSpillerFactory,
-            BlockTypeOperators blockTypeOperators);
+            Optional<List<Integer>> probeOutputChannelsOptional,
+            TypeOperators typeOperators)
+    {
+        List<Integer> probeOutputChannels = probeOutputChannelsOptional.orElseGet(() -> rangeList(probeTypes.size()));
+        List<Type> probeOutputChannelTypes = probeOutputChannels.stream()
+                .map(probeTypes::get)
+                .collect(toImmutableList());
 
-    OperatorFactory probeOuterJoin(
+        return createAdapterOperatorFactory(new io.trino.operator.join.unspilled.LookupJoinOperatorFactory(
+                operatorId,
+                planNodeId,
+                lookupSourceFactory,
+                probeTypes,
+                probeOutputChannelTypes,
+                lookupSourceFactory.getBuildOutputTypes(),
+                joinType,
+                new JoinProbe.JoinProbeFactory(probeOutputChannels, probeJoinChannel, probeHashChannel, hasFilter),
+                typeOperators,
+                probeJoinChannel,
+                probeHashChannel));
+    }
+
+    public static OperatorFactory spillingJoin(
+            JoinOperatorType joinType,
             int operatorId,
             PlanNodeId planNodeId,
             JoinBridgeManager<? extends LookupSourceFactory> lookupSourceFactory,
-            boolean outputSingleMatch,
-            boolean hasFilter,
             List<Type> probeTypes,
             List<Integer> probeJoinChannel,
             OptionalInt probeHashChannel,
-            Optional<List<Integer>> probeOutputChannels,
+            Optional<List<Integer>> probeOutputChannelsOptional,
             OptionalInt totalOperatorsCount,
             PartitioningSpillerFactory partitioningSpillerFactory,
-            BlockTypeOperators blockTypeOperators);
+            TypeOperators typeOperators)
+    {
+        List<Integer> probeOutputChannels = probeOutputChannelsOptional.orElseGet(() -> rangeList(probeTypes.size()));
+        List<Type> probeOutputChannelTypes = probeOutputChannels.stream()
+                .map(probeTypes::get)
+                .collect(toImmutableList());
 
-    OperatorFactory lookupOuterJoin(
-            int operatorId,
-            PlanNodeId planNodeId,
-            JoinBridgeManager<? extends LookupSourceFactory> lookupSourceFactory,
-            boolean waitForBuild,
-            boolean hasFilter,
-            List<Type> probeTypes,
-            List<Integer> probeJoinChannel,
-            OptionalInt probeHashChannel,
-            Optional<List<Integer>> probeOutputChannels,
-            OptionalInt totalOperatorsCount,
-            PartitioningSpillerFactory partitioningSpillerFactory,
-            BlockTypeOperators blockTypeOperators);
+        return createAdapterOperatorFactory(new LookupJoinOperatorFactory(
+                operatorId,
+                planNodeId,
+                lookupSourceFactory,
+                probeTypes,
+                probeOutputChannelTypes,
+                lookupSourceFactory.getBuildOutputTypes(),
+                joinType,
+                new JoinProbeFactory(probeOutputChannels.stream().mapToInt(i -> i).toArray(), probeJoinChannel, probeHashChannel),
+                typeOperators,
+                totalOperatorsCount,
+                probeJoinChannel,
+                probeHashChannel,
+                partitioningSpillerFactory));
+    }
 
-    OperatorFactory fullOuterJoin(
-            int operatorId,
-            PlanNodeId planNodeId,
-            JoinBridgeManager<? extends LookupSourceFactory> lookupSourceFactory,
-            boolean hasFilter,
-            List<Type> probeTypes,
-            List<Integer> probeJoinChannel,
-            OptionalInt probeHashChannel,
-            Optional<List<Integer>> probeOutputChannels,
-            OptionalInt totalOperatorsCount,
-            PartitioningSpillerFactory partitioningSpillerFactory,
-            BlockTypeOperators blockTypeOperators);
-
-    OutputFactory partitionedOutput(
-            TaskContext taskContext,
-            PartitionFunction partitionFunction,
-            List<Integer> partitionChannels,
-            List<Optional<NullableValue>> partitionConstants,
-            boolean replicateNullsAndAny,
-            OptionalInt nullChannel,
-            OutputBuffer outputBuffer,
-            DataSize maxPagePartitioningBufferSize);
+    private static List<Integer> rangeList(int endExclusive)
+    {
+        return IntStream.range(0, endExclusive)
+                .boxed()
+                .collect(toImmutableList());
+    }
 }

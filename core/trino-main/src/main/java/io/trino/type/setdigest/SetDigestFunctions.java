@@ -15,36 +15,33 @@
 package io.trino.type.setdigest;
 
 import io.airlift.slice.Slice;
-import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.SqlMap;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.Type;
 
-import java.util.Map;
-
+import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.type.setdigest.SetDigest.exactIntersectionCardinality;
 
 public final class SetDigestFunctions
 {
-    private SetDigestFunctions()
-    {
-    }
+    private SetDigestFunctions() {}
 
     @ScalarFunction
     @SqlType(StandardTypes.BIGINT)
-    public static long cardinality(@SqlType(SetDigestType.NAME) Slice digest)
+    public static long cardinality(@SqlType(StandardTypes.SET_DIGEST) Slice digest)
     {
         return SetDigest.newInstance(digest).cardinality();
     }
 
     @ScalarFunction
     @SqlType(StandardTypes.BIGINT)
-    public static long intersectionCardinality(@SqlType(SetDigestType.NAME) Slice slice1, @SqlType(SetDigestType.NAME) Slice slice2)
+    public static long intersectionCardinality(@SqlType(StandardTypes.SET_DIGEST) Slice slice1, @SqlType(StandardTypes.SET_DIGEST) Slice slice2)
     {
         SetDigest digest1 = SetDigest.newInstance(slice1);
         SetDigest digest2 = SetDigest.newInstance(slice2);
@@ -68,7 +65,7 @@ public final class SetDigestFunctions
 
     @ScalarFunction
     @SqlType(StandardTypes.DOUBLE)
-    public static double jaccardIndex(@SqlType(SetDigestType.NAME) Slice slice1, @SqlType(SetDigestType.NAME) Slice slice2)
+    public static double jaccardIndex(@SqlType(StandardTypes.SET_DIGEST) Slice slice1, @SqlType(StandardTypes.SET_DIGEST) Slice slice2)
     {
         SetDigest digest1 = SetDigest.newInstance(slice1);
         SetDigest digest2 = SetDigest.newInstance(slice2);
@@ -78,19 +75,17 @@ public final class SetDigestFunctions
 
     @ScalarFunction
     @SqlType("map(bigint,smallint)")
-    public static Block hashCounts(@TypeParameter("map(bigint,smallint)") Type mapType, @SqlType(SetDigestType.NAME) Slice slice)
+    public static SqlMap hashCounts(@TypeParameter("map(bigint,smallint)") Type mapType, @SqlType(StandardTypes.SET_DIGEST) Slice slice)
     {
         SetDigest digest = SetDigest.newInstance(slice);
-
-        // Maybe use static BlockBuilderStatus in order avoid `new`?
-        BlockBuilder blockBuilder = mapType.createBlockBuilder(null, 1);
-        BlockBuilder singleMapBlockBuilder = blockBuilder.beginBlockEntry();
-        for (Map.Entry<Long, Short> entry : digest.getHashCounts().entrySet()) {
-            BIGINT.writeLong(singleMapBlockBuilder, entry.getKey());
-            SMALLINT.writeLong(singleMapBlockBuilder, entry.getValue());
-        }
-        blockBuilder.closeEntry();
-
-        return (Block) mapType.getObject(blockBuilder, 0);
+        return buildMapValue(
+                ((MapType) mapType),
+                digest.getHashCounts().size(),
+                (keyBuilder, valueBuilder) -> {
+                    digest.getHashCounts().forEach((key, value) -> {
+                        BIGINT.writeLong(keyBuilder, key);
+                        SMALLINT.writeLong(valueBuilder, value);
+                    });
+                });
     }
 }

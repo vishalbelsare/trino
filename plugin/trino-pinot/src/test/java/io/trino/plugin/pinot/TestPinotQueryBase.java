@@ -13,8 +13,10 @@
  */
 package io.trino.plugin.pinot;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.pinot.client.PinotClient;
+import io.trino.spi.type.TestingTypeManager;
 import org.apache.pinot.spi.data.FieldSpec.DataType;
 import org.apache.pinot.spi.data.Schema;
 import org.apache.pinot.spi.data.Schema.SchemaBuilder;
@@ -24,24 +26,29 @@ import java.util.Map;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.threadsNamed;
+import static io.trino.plugin.pinot.TestPinotTableHandle.newTableHandle;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 
 public class TestPinotQueryBase
 {
-    protected static PinotTableHandle realtimeOnlyTable = new PinotTableHandle("schema", "realtimeOnly");
-    protected static PinotTableHandle hybridTable = new PinotTableHandle("schema", "hybrid");
+    protected static final PinotTypeConverter TESTING_TYPE_CONVERTER = new PinotTypeConverter(new TestingTypeManager());
 
-    protected final PinotConfig pinotConfig = new PinotConfig().setControllerUrls("localhost:9000");
+    protected static PinotTableHandle realtimeOnlyTable = newTableHandle("schema", "realtimeOnly");
+    protected static PinotTableHandle hybridTable = newTableHandle("schema", "hybrid");
+
+    protected final PinotConfig pinotConfig = new PinotConfig().setControllerUrls(ImmutableList.of("localhost:9000"));
 
     protected final PinotClient mockClusterInfoFetcher = new MockPinotClient(pinotConfig, getTestingMetadata());
     protected final PinotMetadata pinotMetadata = new PinotMetadata(
             mockClusterInfoFetcher,
             pinotConfig,
-            newCachedThreadPool(threadsNamed("mock-pinot-metadata-fetcher")));
+            newCachedThreadPool(threadsNamed("mock-pinot-metadata-fetcher")),
+            TESTING_TYPE_CONVERTER);
 
     protected List<String> getColumnNames(String table)
     {
-        return pinotMetadata.getPinotColumns(table).stream()
+        return pinotMetadata.getPinotColumnHandles(table).values().stream()
+                .map(PinotColumnHandle.class::cast)
                 .map(PinotColumnHandle::getColumnName)
                 .collect(toImmutableList());
     }
@@ -108,6 +115,6 @@ public class TestPinotQueryBase
                         .addSingleValueDimension("non_quoted", DataType.STRING)
                         .addSingleValueDimension("qu\"ot\"ed", DataType.STRING)
                         .build())
-                .build();
+                .buildOrThrow();
     }
 }

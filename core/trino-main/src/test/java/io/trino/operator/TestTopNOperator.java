@@ -22,9 +22,10 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.MaterializedResult;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -43,12 +44,11 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestTopNOperator
 {
     private ExecutorService executor;
@@ -56,7 +56,7 @@ public class TestTopNOperator
     private DriverContext driverContext;
     private final TypeOperators typeOperators = new TypeOperators();
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
@@ -66,7 +66,7 @@ public class TestTopNOperator
                 .addDriverContext();
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         executor.shutdownNow();
@@ -174,16 +174,15 @@ public class TestTopNOperator
                 ImmutableList.of(DESC_NULLS_LAST));
 
         try (Operator operator = factory.createOperator(driverContext)) {
-            assertNull(operator.getOutput());
-            assertTrue(operator.isFinished());
-            assertFalse(operator.needsInput());
-            assertNull(operator.getOutput());
+            assertThat(operator.getOutput()).isNull();
+            assertThat(operator.isFinished()).isTrue();
+            assertThat(operator.needsInput()).isFalse();
+            assertThat(operator.getOutput()).isNull();
         }
     }
 
     @Test
     public void testExceedMemoryLimit()
-            throws Exception
     {
         List<Page> input = rowPagesBuilder(BIGINT)
                 .row(1L)
@@ -199,9 +198,10 @@ public class TestTopNOperator
                 ImmutableList.of(0),
                 ImmutableList.of(ASC_NULLS_LAST));
         Operator operator = operatorFactory.createOperator(smallDiverContext);
-        assertThatThrownBy(() -> operator.addInput(input.get(0)))
+        operator.addInput(input.get(0));
+        assertThatThrownBy(operator::getOutput)
                 .isInstanceOf(ExceededMemoryLimitException.class)
-                .hasMessageStartingWith("Query exceeded per-node user memory limit of ");
+                .hasMessageStartingWith("Query exceeded per-node memory limit of ");
     }
 
     private OperatorFactory topNOperatorFactory(

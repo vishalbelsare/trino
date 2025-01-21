@@ -16,7 +16,7 @@ package io.trino.cost;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.sql.planner.Symbol;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.Collections.emptyList;
@@ -37,32 +37,32 @@ public class TestExchangeStatsRule
                 .exchange(exchangeBuilder -> exchangeBuilder
                         .addInputsSet(pb.symbol("i11", BIGINT), pb.symbol("i12", BIGINT), pb.symbol("i13", BIGINT), pb.symbol("i14", BIGINT))
                         .addInputsSet(pb.symbol("i21", BIGINT), pb.symbol("i22", BIGINT), pb.symbol("i23", BIGINT), pb.symbol("i24", BIGINT))
-                        .fixedHashDistributionParitioningScheme(
+                        .fixedHashDistributionPartitioningScheme(
                                 ImmutableList.of(pb.symbol("o1", BIGINT), pb.symbol("o2", BIGINT), pb.symbol("o3", BIGINT), pb.symbol("o4", BIGINT)),
                                 emptyList())
                         .addSource(pb.values(pb.symbol("i11", BIGINT), pb.symbol("i12", BIGINT), pb.symbol("i13", BIGINT), pb.symbol("i14", BIGINT)))
                         .addSource(pb.values(pb.symbol("i21", BIGINT), pb.symbol("i22", BIGINT), pb.symbol("i23", BIGINT), pb.symbol("i24", BIGINT)))))
                 .withSourceStats(0, PlanNodeStatsEstimate.builder()
                         .setOutputRowCount(10)
-                        .addSymbolStatistics(new Symbol("i11"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i11"), SymbolStatsEstimate.builder()
                                 .setLowValue(1)
                                 .setHighValue(10)
                                 .setDistinctValuesCount(5)
                                 .setNullsFraction(0.3)
                                 .build())
-                        .addSymbolStatistics(new Symbol("i12"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i12"), SymbolStatsEstimate.builder()
                                 .setLowValue(0)
                                 .setHighValue(3)
                                 .setDistinctValuesCount(4)
                                 .setNullsFraction(0)
                                 .build())
-                        .addSymbolStatistics(new Symbol("i13"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i13"), SymbolStatsEstimate.builder()
                                 .setLowValue(10)
                                 .setHighValue(15)
                                 .setDistinctValuesCount(4)
                                 .setNullsFraction(0.1)
                                 .build())
-                        .addSymbolStatistics(new Symbol("i14"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i14"), SymbolStatsEstimate.builder()
                                 .setLowValue(10)
                                 .setHighValue(15)
                                 .setDistinctValuesCount(4)
@@ -71,21 +71,21 @@ public class TestExchangeStatsRule
                         .build())
                 .withSourceStats(1, PlanNodeStatsEstimate.builder()
                         .setOutputRowCount(20)
-                        .addSymbolStatistics(new Symbol("i21"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i21"), SymbolStatsEstimate.builder()
                                 .setLowValue(11)
                                 .setHighValue(20)
                                 .setNullsFraction(0.4)
                                 .build())
-                        .addSymbolStatistics(new Symbol("i22"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i22"), SymbolStatsEstimate.builder()
                                 .setLowValue(2)
                                 .setHighValue(7)
                                 .setDistinctValuesCount(3)
                                 .build())
-                        .addSymbolStatistics(new Symbol("i23"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i23"), SymbolStatsEstimate.builder()
                                 .setDistinctValuesCount(6)
                                 .setNullsFraction(0.2)
                                 .build())
-                        .addSymbolStatistics(new Symbol("i24"), SymbolStatsEstimate.builder()
+                        .addSymbolStatistics(new Symbol(BIGINT, "i24"), SymbolStatsEstimate.builder()
                                 .setLowValue(10)
                                 .setHighValue(15)
                                 .setDistinctValuesCount(4)
@@ -94,22 +94,22 @@ public class TestExchangeStatsRule
                         .build())
                 .check(check -> check
                         .outputRowsCount(30)
-                        .symbolStats("o1", assertion -> assertion
+                        .symbolStats("o1", BIGINT, assertion -> assertion
                                 .lowValue(1)
                                 .highValue(20)
                                 .distinctValuesCountUnknown()
                                 .nullsFraction(0.3666666))
-                        .symbolStats("o2", assertion -> assertion
+                        .symbolStats("o2", BIGINT, assertion -> assertion
                                 .lowValue(0)
                                 .highValue(7)
                                 .distinctValuesCount(4)
                                 .nullsFractionUnknown())
-                        .symbolStats("o3", assertion -> assertion
+                        .symbolStats("o3", BIGINT, assertion -> assertion
                                 .lowValueUnknown()
                                 .highValueUnknown()
                                 .distinctValuesCount(6)
                                 .nullsFraction(0.1666667))
-                        .symbolStats("o4", assertion -> assertion
+                        .symbolStats("o4", BIGINT, assertion -> assertion
                                 .lowValue(10)
                                 .highValue(15)
                                 .distinctValuesCount(4)

@@ -20,14 +20,16 @@ import io.trino.spi.type.Type;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 @JsonTypeInfo(
         use = JsonTypeInfo.Id.NAME,
         property = "@type")
 @JsonSubTypes({
+        @JsonSubTypes.Type(value = AllOrNoneValueSet.class, name = "allOrNone"),
         @JsonSubTypes.Type(value = EquatableValueSet.class, name = "equatable"),
         @JsonSubTypes.Type(value = SortedRangeSet.class, name = "sortable"),
-        @JsonSubTypes.Type(value = AllOrNoneValueSet.class, name = "allOrNone")})
+})
 public interface ValueSet
 {
     static ValueSet none(Type type)
@@ -159,4 +161,13 @@ public interface ValueSet
     String toString(ConnectorSession session);
 
     String toString(ConnectorSession session, int limit);
+
+    long getRetainedSizeInBytes();
+
+    /**
+     * Try to expand {@code valueSet} into a discrete set of (at most {@code limit}) objects.
+     * For example: [1, 5] can be expanded into {1, 2, 3, 4, 5}.
+     * If the data type is not supported or the expansion results in too many values, {@code Optional.empty()} is returned.
+     */
+    Optional<Collection<Object>> tryExpandRanges(int valuesLimit);
 }

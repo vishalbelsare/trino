@@ -14,14 +14,15 @@
 package io.trino.tests.product.launcher.env;
 
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import dev.failsafe.Failsafe;
+import dev.failsafe.FailsafeExecutor;
+import dev.failsafe.Timeout;
 import io.airlift.log.Logger;
 import io.trino.tests.product.launcher.util.ConsoleTable;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.FailsafeExecutor;
-import net.jodah.failsafe.Timeout;
 
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -29,6 +30,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.tests.product.launcher.env.StatisticsFetcher.Stats.HEADER;
@@ -38,40 +40,19 @@ import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public interface EnvironmentListener
+        extends ContainerListener
 {
     Logger log = Logger.get(EnvironmentListener.class);
 
-    default void environmentStarting(Environment environment)
-    {
-    }
+    EnvironmentListener NOOP = new EnvironmentListener() {};
 
-    default void environmentStarted(Environment environment)
-    {
-    }
+    default void environmentStarting(Environment environment) {}
 
-    default void environmentStopped(Environment environment)
-    {
-    }
+    default void environmentStarted(Environment environment) {}
 
-    default void environmentStopping(Environment environment)
-    {
-    }
+    default void environmentStopped(Environment environment) {}
 
-    default void containerStarting(DockerContainer container, InspectContainerResponse response)
-    {
-    }
-
-    default void containerStarted(DockerContainer container, InspectContainerResponse containerInfo)
-    {
-    }
-
-    default void containerStopping(DockerContainer container, InspectContainerResponse response)
-    {
-    }
-
-    default void containerStopped(DockerContainer container, InspectContainerResponse response)
-    {
-    }
+    default void environmentStopping(Environment environment) {}
 
     static void tryInvokeListener(FailsafeExecutor<?> executor, Consumer<EnvironmentListener> call, EnvironmentListener... listeners)
     {
@@ -93,8 +74,8 @@ public interface EnvironmentListener
     {
         return new EnvironmentListener()
         {
-            private FailsafeExecutor<?> executor = Failsafe
-                    .with(Timeout.of(ofMinutes(5)).withCancel(true))
+            private final FailsafeExecutor<?> executor = Failsafe
+                    .with(Timeout.builder(ofMinutes(5)).withInterrupt().build())
                     .with(newCachedThreadPool(daemonThreadsNamed("environment-listener-%d")));
 
             @Override
@@ -240,10 +221,7 @@ public interface EnvironmentListener
             public void environmentStarted(Environment environment)
             {
                 // Print stats for all containers every 30s after environment is started
-                executorService.scheduleWithFixedDelay(() ->
-                {
-                    printContainerStats();
-                }, 5 * 1000L, 30 * 1000L, MILLISECONDS);
+                executorService.scheduleWithFixedDelay(this::printContainerStats, 5 * 1000L, 30 * 1000L, MILLISECONDS);
             }
 
             @Override
@@ -260,7 +238,7 @@ public interface EnvironmentListener
             private void printContainerStats()
             {
                 ConsoleTable statistics = new ConsoleTable();
-                statistics.addHeader(HEADER);
+                statistics.addHeader(HEADER.toArray());
                 fetchers.entrySet().forEach(entry -> statistics.addRow(entry.getValue().get().toRow(entry.getKey())));
                 statistics.addSeparator();
 
@@ -268,8 +246,36 @@ public interface EnvironmentListener
                     log.info("Container stats:\n%s", statistics.render());
                 }
                 catch (Exception e) {
-                    e.printStackTrace();
+                    log.error(e, "Error printing container stats");
                 }
+            }
+        };
+    }
+
+    static EnvironmentListener printStartupLogs(List<Supplier<String>> lines)
+    {
+        return new EnvironmentListener()
+        {
+            @Override
+            public void environmentStarted(Environment environment)
+            {
+                if (lines.isEmpty()) {
+                    return;
+                }
+
+                String separator = "=".repeat(80);
+                StringBuilder startupInfo = new StringBuilder()
+                        .append("\n".repeat(3))
+                        .append(separator)
+                        .append("\n");
+
+                for (Supplier<String> line : lines) {
+                    startupInfo.append("\n").append(line.get());
+                }
+                startupInfo.append("\n".repeat(2))
+                        .append(separator)
+                        .append("\n".repeat(3));
+                log.info(startupInfo.toString());
             }
         };
     }

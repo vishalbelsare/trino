@@ -13,21 +13,25 @@
  */
 package io.trino.connector;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.plugin.base.security.AllowAllAccessControl;
+import io.trino.spi.connector.ColumnSchema;
 import io.trino.spi.connector.ConnectorSecurityContext;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
-import io.trino.spi.type.Type;
 
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.spi.security.AccessDeniedException.denyGrantSchemaPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyGrantTablePrivilege;
@@ -74,6 +78,12 @@ class MockConnectorAccessControl
     }
 
     @Override
+    public void checkCanDenySchemaPrivilege(ConnectorSecurityContext context, Privilege privilege, String schemaName, TrinoPrincipal grantee)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public void checkCanRevokeSchemaPrivilege(ConnectorSecurityContext context, Privilege privilege, String schemaName, TrinoPrincipal revokee, boolean grantOption)
     {
         if (!schemaGrants.canGrant(context.getIdentity().getUser(), schemaName, privilege)) {
@@ -99,6 +109,12 @@ class MockConnectorAccessControl
     }
 
     @Override
+    public void checkCanDenyTablePrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, TrinoPrincipal grantee)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public void checkCanRevokeTablePrivilege(ConnectorSecurityContext context, Privilege privilege, SchemaTableName tableName, TrinoPrincipal revokee, boolean grantOption)
     {
         String user = context.getIdentity().getUser();
@@ -108,15 +124,20 @@ class MockConnectorAccessControl
     }
 
     @Override
-    public Optional<ViewExpression> getRowFilter(ConnectorSecurityContext context, SchemaTableName tableName)
+    public List<ViewExpression> getRowFilters(ConnectorSecurityContext context, SchemaTableName tableName)
     {
-        return Optional.ofNullable(rowFilters.apply(tableName));
+        return Optional.ofNullable(rowFilters.apply(tableName))
+                .map(ImmutableList::of)
+                .orElseGet(ImmutableList::of);
     }
 
     @Override
-    public Optional<ViewExpression> getColumnMask(ConnectorSecurityContext context, SchemaTableName tableName, String columnName, Type type)
+    public Map<ColumnSchema, ViewExpression> getColumnMasks(ConnectorSecurityContext context, SchemaTableName tableName, List<ColumnSchema> columns)
     {
-        return Optional.ofNullable(columnMasks.apply(tableName, columnName));
+        return columns.stream()
+                .map(column -> Map.entry(column, Optional.ofNullable(columnMasks.apply(tableName, column.getName()))))
+                .filter(entry -> entry.getValue().isPresent())
+                .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().orElseThrow()));
     }
 
     public void grantSchemaPrivileges(String schemaName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption)

@@ -16,13 +16,13 @@ package io.trino.execution;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.trino.execution.buffer.OutputBufferStatus;
 
 import java.net.URI;
 import java.util.List;
-import java.util.Set;
+import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
@@ -52,16 +52,19 @@ public class TaskStatus
     private final TaskState state;
     private final URI self;
     private final String nodeId;
-    private final Set<Lifespan> completedDriverGroups;
+    private final boolean speculative;
 
     private final int queuedPartitionedDrivers;
     private final long queuedPartitionedSplitsWeight;
     private final int runningPartitionedDrivers;
     private final long runningPartitionedSplitsWeight;
-    private final boolean outputBufferOverutilized;
+    private final OutputBufferStatus outputBufferStatus;
+    private final DataSize writerInputDataSize;
+    private final DataSize outputDataSize;
     private final DataSize physicalWrittenDataSize;
+    private final Optional<Integer> maxWriterCount;
     private final DataSize memoryReservation;
-    private final DataSize systemMemoryReservation;
+    private final DataSize peakMemoryReservation;
     private final DataSize revocableMemoryReservation;
 
     private final long fullGcCount;
@@ -79,14 +82,17 @@ public class TaskStatus
             @JsonProperty("state") TaskState state,
             @JsonProperty("self") URI self,
             @JsonProperty("nodeId") String nodeId,
-            @JsonProperty("completedDriverGroups") Set<Lifespan> completedDriverGroups,
+            @JsonProperty("speculative") boolean speculative,
             @JsonProperty("failures") List<ExecutionFailureInfo> failures,
             @JsonProperty("queuedPartitionedDrivers") int queuedPartitionedDrivers,
             @JsonProperty("runningPartitionedDrivers") int runningPartitionedDrivers,
-            @JsonProperty("outputBufferOverutilized") boolean outputBufferOverutilized,
+            @JsonProperty("outputBufferStatus") OutputBufferStatus outputBufferStatus,
+            @JsonProperty("outputDataSize") DataSize outputDataSize,
+            @JsonProperty("writerInputDataSize") DataSize writerInputDataSize,
             @JsonProperty("physicalWrittenDataSize") DataSize physicalWrittenDataSize,
+            @JsonProperty("writerCount") Optional<Integer> maxWriterCount,
             @JsonProperty("memoryReservation") DataSize memoryReservation,
-            @JsonProperty("systemMemoryReservation") DataSize systemMemoryReservation,
+            @JsonProperty("peakMemoryReservation") DataSize peakMemoryReservation,
             @JsonProperty("revocableMemoryReservation") DataSize revocableMemoryReservation,
             @JsonProperty("fullGcCount") long fullGcCount,
             @JsonProperty("fullGcTime") Duration fullGcTime,
@@ -102,7 +108,7 @@ public class TaskStatus
         this.state = requireNonNull(state, "state is null");
         this.self = requireNonNull(self, "self is null");
         this.nodeId = requireNonNull(nodeId, "nodeId is null");
-        this.completedDriverGroups = requireNonNull(completedDriverGroups, "completedDriverGroups is null");
+        this.speculative = speculative;
 
         checkArgument(queuedPartitionedDrivers >= 0, "queuedPartitionedDrivers must be positive");
         this.queuedPartitionedDrivers = queuedPartitionedDrivers;
@@ -114,12 +120,15 @@ public class TaskStatus
         checkArgument(runningPartitionedSplitsWeight >= 0, "runningPartitionedSplitsWeight must be positive");
         this.runningPartitionedSplitsWeight = runningPartitionedSplitsWeight;
 
-        this.outputBufferOverutilized = outputBufferOverutilized;
+        this.outputBufferStatus = requireNonNull(outputBufferStatus, "outputBufferStatus is null");
+        this.outputDataSize = requireNonNull(outputDataSize, "outputDataSize is null");
 
+        this.writerInputDataSize = requireNonNull(writerInputDataSize, "writerInputDataSize is null");
         this.physicalWrittenDataSize = requireNonNull(physicalWrittenDataSize, "physicalWrittenDataSize is null");
+        this.maxWriterCount = requireNonNull(maxWriterCount, "maxWriterCount is null");
 
         this.memoryReservation = requireNonNull(memoryReservation, "memoryReservation is null");
-        this.systemMemoryReservation = requireNonNull(systemMemoryReservation, "systemMemoryReservation is null");
+        this.peakMemoryReservation = requireNonNull(peakMemoryReservation, "peakMemoryReservation is null");
         this.revocableMemoryReservation = requireNonNull(revocableMemoryReservation, "revocableMemoryReservation is null");
         this.failures = ImmutableList.copyOf(requireNonNull(failures, "failures is null"));
 
@@ -167,9 +176,9 @@ public class TaskStatus
     }
 
     @JsonProperty
-    public Set<Lifespan> getCompletedDriverGroups()
+    public boolean isSpeculative()
     {
-        return completedDriverGroups;
+        return speculative;
     }
 
     @JsonProperty
@@ -191,15 +200,33 @@ public class TaskStatus
     }
 
     @JsonProperty
+    public DataSize getWriterInputDataSize()
+    {
+        return writerInputDataSize;
+    }
+
+    @JsonProperty
     public DataSize getPhysicalWrittenDataSize()
     {
         return physicalWrittenDataSize;
     }
 
     @JsonProperty
-    public boolean isOutputBufferOverutilized()
+    public Optional<Integer> getMaxWriterCount()
     {
-        return outputBufferOverutilized;
+        return maxWriterCount;
+    }
+
+    @JsonProperty
+    public OutputBufferStatus getOutputBufferStatus()
+    {
+        return outputBufferStatus;
+    }
+
+    @JsonProperty
+    public DataSize getOutputDataSize()
+    {
+        return outputDataSize;
     }
 
     @JsonProperty
@@ -209,9 +236,9 @@ public class TaskStatus
     }
 
     @JsonProperty
-    public DataSize getSystemMemoryReservation()
+    public DataSize getPeakMemoryReservation()
     {
-        return systemMemoryReservation;
+        return peakMemoryReservation;
     }
 
     @JsonProperty
@@ -259,7 +286,7 @@ public class TaskStatus
                 .toString();
     }
 
-    public static TaskStatus initialTaskStatus(TaskId taskId, URI location, String nodeId)
+    public static TaskStatus initialTaskStatus(TaskId taskId, URI location, String nodeId, boolean speculative)
     {
         return new TaskStatus(
                 taskId,
@@ -268,12 +295,15 @@ public class TaskStatus
                 PLANNED,
                 location,
                 nodeId,
-                ImmutableSet.of(),
+                speculative,
                 ImmutableList.of(),
                 0,
                 0,
-                false,
+                OutputBufferStatus.initial(),
                 DataSize.ofBytes(0),
+                DataSize.ofBytes(0),
+                DataSize.ofBytes(0),
+                Optional.empty(),
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
@@ -293,14 +323,17 @@ public class TaskStatus
                 state,
                 taskStatus.getSelf(),
                 taskStatus.getNodeId(),
-                taskStatus.getCompletedDriverGroups(),
+                false,
                 exceptions,
                 taskStatus.getQueuedPartitionedDrivers(),
                 taskStatus.getRunningPartitionedDrivers(),
-                taskStatus.isOutputBufferOverutilized(),
+                taskStatus.getOutputBufferStatus(),
+                taskStatus.getOutputDataSize(),
+                taskStatus.getWriterInputDataSize(),
                 taskStatus.getPhysicalWrittenDataSize(),
+                taskStatus.getMaxWriterCount(),
                 taskStatus.getMemoryReservation(),
-                taskStatus.getSystemMemoryReservation(),
+                taskStatus.getPeakMemoryReservation(),
                 taskStatus.getRevocableMemoryReservation(),
                 taskStatus.getFullGcCount(),
                 taskStatus.getFullGcTime(),

@@ -17,7 +17,9 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.spi.security.Identity;
 import io.trino.sql.SqlPath;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.Optional;
 import java.util.Set;
@@ -26,7 +28,11 @@ import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestSessionFunctions
 {
     @Test
@@ -44,7 +50,7 @@ public class TestSessionFunctions
     public void testCurrentPath()
     {
         Session session = testSessionBuilder()
-                .setPath(new SqlPath(Optional.of("testPath")))
+                .setPath(SqlPath.buildPath("testPath", Optional.empty()))
                 .build();
 
         try (QueryAssertions queryAssertions = new QueryAssertions(session)) {
@@ -52,7 +58,7 @@ public class TestSessionFunctions
         }
 
         Session emptyPathSession = testSessionBuilder()
-                .setPath(new SqlPath(Optional.empty()))
+                .setPath(SqlPath.EMPTY_PATH)
                 .build();
 
         try (QueryAssertions queryAssertions = new QueryAssertions(emptyPathSession)) {

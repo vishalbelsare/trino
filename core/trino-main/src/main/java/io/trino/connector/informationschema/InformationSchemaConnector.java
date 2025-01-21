@@ -18,6 +18,7 @@ import io.trino.metadata.Metadata;
 import io.trino.security.AccessControl;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
@@ -33,12 +34,12 @@ public class InformationSchemaConnector
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProvider pageSourceProvider;
 
-    public InformationSchemaConnector(String catalogName, InternalNodeManager nodeManager, Metadata metadata, AccessControl accessControl)
+    public InformationSchemaConnector(String catalogName, InternalNodeManager nodeManager, Metadata metadata, AccessControl accessControl, int maxPrefetchedInformationSchemaPrefixes)
     {
         requireNonNull(catalogName, "catalogName is null");
         requireNonNull(metadata, "metadata is null");
 
-        this.metadata = new InformationSchemaMetadata(catalogName, metadata);
+        this.metadata = new InformationSchemaMetadata(catalogName, metadata, maxPrefetchedInformationSchemaPrefixes);
         this.splitManager = new InformationSchemaSplitManager(nodeManager);
         this.pageSourceProvider = new InformationSchemaPageSourceProvider(metadata, accessControl);
     }
@@ -50,7 +51,7 @@ public class InformationSchemaConnector
     }
 
     @Override
-    public ConnectorMetadata getMetadata(ConnectorTransactionHandle transactionHandle)
+    public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle)
     {
         return metadata;
     }

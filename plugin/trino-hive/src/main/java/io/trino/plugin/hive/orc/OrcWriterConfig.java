@@ -21,18 +21,15 @@ import io.airlift.units.DataSize;
 import io.trino.orc.OrcWriteValidation.OrcWriteValidationMode;
 import io.trino.orc.OrcWriterOptions;
 import io.trino.orc.OrcWriterOptions.WriterIdentification;
-
-import javax.validation.constraints.DecimalMax;
-import javax.validation.constraints.DecimalMin;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotNull;
 
 @DefunctConfig("hive.orc.optimized-writer.enabled")
-@SuppressWarnings("unused")
 public class OrcWriterConfig
 {
     private OrcWriterOptions options = new OrcWriterOptions();
 
-    private double defaultBloomFilterFpp = 0.05;
     private double validationPercentage;
     private OrcWriteValidationMode validationMode = OrcWriteValidationMode.BOTH;
 

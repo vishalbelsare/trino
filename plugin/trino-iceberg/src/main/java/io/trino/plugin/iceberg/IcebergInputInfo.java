@@ -13,25 +13,16 @@
  */
 package io.trino.plugin.iceberg;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-public class IcebergInputInfo
+public record IcebergInputInfo(Optional<Long> snapshotId, Optional<Boolean> partitioned, String tableDefaultFileFormat)
 {
-    private final Optional<Long> snapshotId;
-
-    public IcebergInputInfo(
-            @JsonProperty("snapshotId") Optional<Long> snapshotId)
+    public IcebergInputInfo
     {
-        this.snapshotId = requireNonNull(snapshotId, "snapshotId is null");
-    }
-
-    @JsonProperty
-    public Optional<Long> getSnapshotId()
-    {
-        return snapshotId;
+        requireNonNull(snapshotId, "snapshotId is null");
+        requireNonNull(partitioned, "partitioned is null");
+        requireNonNull(tableDefaultFileFormat, "tableDefaultFileFormat is null");
     }
 }

@@ -13,7 +13,6 @@
  */
 package io.trino.parquet;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
 import io.trino.plugin.base.type.DecodedTimestamp;
@@ -21,11 +20,9 @@ import io.trino.spi.TrinoException;
 import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 
-import static com.google.common.base.Verify.verify;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
 import static io.trino.spi.type.Timestamps.MILLISECONDS_PER_SECOND;
-import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_DAY;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_SECOND;
@@ -36,12 +33,10 @@ import static java.lang.StrictMath.toIntExact;
 
 /**
  * Utility class for decoding INT96 encoded parquet timestamp to timestamp millis in GMT.
- * <p>
  */
 public final class ParquetTimestampUtils
 {
-    @VisibleForTesting
-    static final int JULIAN_EPOCH_OFFSET_DAYS = 2_440_588;
+    public static final int JULIAN_EPOCH_OFFSET_DAYS = 2_440_588;
 
     private ParquetTimestampUtils() {}
 
@@ -59,33 +54,35 @@ public final class ParquetTimestampUtils
 
         // little endian encoding - need to invert byte order
         long timeOfDayNanos = Longs.fromBytes(bytes[7], bytes[6], bytes[5], bytes[4], bytes[3], bytes[2], bytes[1], bytes[0]);
-        verify(timeOfDayNanos >= 0 && timeOfDayNanos < NANOSECONDS_PER_DAY, "Invalid timeOfDayNanos: %s", timeOfDayNanos);
         int julianDay = Ints.fromBytes(bytes[11], bytes[10], bytes[9], bytes[8]);
 
-        long epochSeconds = (julianDay - JULIAN_EPOCH_OFFSET_DAYS) * SECONDS_PER_DAY + timeOfDayNanos / NANOSECONDS_PER_SECOND;
-        return new DecodedTimestamp(epochSeconds, (int) (timeOfDayNanos % NANOSECONDS_PER_SECOND));
+        return decodeInt96Timestamp(timeOfDayNanos, julianDay);
+    }
+
+    public static DecodedTimestamp decodeInt96Timestamp(long timeOfDayNanos, int julianDay)
+    {
+        long epochSeconds = (julianDay - JULIAN_EPOCH_OFFSET_DAYS) * SECONDS_PER_DAY + floorDiv(timeOfDayNanos, NANOSECONDS_PER_SECOND);
+        return new DecodedTimestamp(epochSeconds, (int) floorMod(timeOfDayNanos, NANOSECONDS_PER_SECOND));
     }
 
     public static DecodedTimestamp decodeInt64Timestamp(long timestamp, LogicalTypeAnnotation.TimeUnit precision)
     {
         long toSecondsConversion;
-        long toNanosConversion;
-        switch (precision) {
-            case MILLIS:
+        long toNanosConversion = switch (precision) {
+            case MILLIS -> {
                 toSecondsConversion = MILLISECONDS_PER_SECOND;
-                toNanosConversion = NANOSECONDS_PER_MILLISECOND;
-                break;
-            case MICROS:
+                yield NANOSECONDS_PER_MILLISECOND;
+            }
+            case MICROS -> {
                 toSecondsConversion = MICROSECONDS_PER_SECOND;
-                toNanosConversion = NANOSECONDS_PER_MICROSECOND;
-                break;
-            case NANOS:
+                yield NANOSECONDS_PER_MICROSECOND;
+            }
+            case NANOS -> {
                 toSecondsConversion = NANOSECONDS_PER_SECOND;
-                toNanosConversion = 1;
-                break;
-            default:
-                throw new TrinoException(NOT_SUPPORTED, "Unsupported Parquet timestamp time unit " + precision);
-        }
+                yield 1;
+            }
+            default -> throw new TrinoException(NOT_SUPPORTED, "Unsupported Parquet timestamp time unit " + precision);
+        };
         long epochSeconds = floorDiv(timestamp, toSecondsConversion);
         long fractionalSecond = floorMod(timestamp, toSecondsConversion);
         int nanosOfSecond = toIntExact(fractionalSecond * toNanosConversion);

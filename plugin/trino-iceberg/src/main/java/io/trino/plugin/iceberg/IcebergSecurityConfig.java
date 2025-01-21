@@ -14,8 +14,7 @@
 package io.trino.plugin.iceberg;
 
 import io.airlift.configuration.Config;
-
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotNull;
 
 public class IcebergSecurityConfig
 {
@@ -24,6 +23,7 @@ public class IcebergSecurityConfig
         ALLOW_ALL,
         READ_ONLY,
         SYSTEM,
+        FILE,
     }
 
     private IcebergSecurity securitySystem = IcebergSecurity.ALLOW_ALL;

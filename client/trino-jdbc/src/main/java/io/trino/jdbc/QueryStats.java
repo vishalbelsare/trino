@@ -18,7 +18,6 @@ import io.trino.client.StatementStats;
 import java.util.Optional;
 import java.util.OptionalDouble;
 
-import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 
 public final class QueryStats
@@ -27,18 +26,26 @@ public final class QueryStats
     private final String state;
     private final boolean queued;
     private final boolean scheduled;
+    private final OptionalDouble progressPercentage;
     private final int nodes;
     private final int totalSplits;
     private final int queuedSplits;
     private final int runningSplits;
     private final int completedSplits;
+    private final long planningTimeMillis;
+    private final long analysisTimeMillis;
     private final long cpuTimeMillis;
     private final long wallTimeMillis;
     private final long queuedTimeMillis;
     private final long elapsedTimeMillis;
+    private final long finishingTimeMillis;
+    private final long physicalInputTimeMillis;
     private final long processedRows;
     private final long processedBytes;
     private final long peakMemoryBytes;
+    private final long physicalInputBytes;
+    private final long physicalWrittenBytes;
+    private final long internalNetworkInputBytes;
     private final Optional<StageStats> rootStage;
 
     public QueryStats(
@@ -46,36 +53,52 @@ public final class QueryStats
             String state,
             boolean queued,
             boolean scheduled,
+            OptionalDouble progressPercentage,
             int nodes,
             int totalSplits,
             int queuedSplits,
             int runningSplits,
             int completedSplits,
+            long planningTimeMillis,
+            long analysisTimeMillis,
             long cpuTimeMillis,
             long wallTimeMillis,
             long queuedTimeMillis,
             long elapsedTimeMillis,
+            long finishingTimeMillis,
+            long physicalInputTimeMillis,
             long processedRows,
             long processedBytes,
             long peakMemoryBytes,
+            long physicalInputBytes,
+            long physicalWrittenBytes,
+            long internalNetworkInputBytes,
             Optional<StageStats> rootStage)
     {
         this.queryId = requireNonNull(queryId, "queryId is null");
         this.state = requireNonNull(state, "state is null");
         this.queued = queued;
         this.scheduled = scheduled;
+        this.progressPercentage = requireNonNull(progressPercentage, "progressPercentage is null");
         this.nodes = nodes;
         this.totalSplits = totalSplits;
         this.queuedSplits = queuedSplits;
         this.runningSplits = runningSplits;
         this.completedSplits = completedSplits;
+        this.planningTimeMillis = planningTimeMillis;
+        this.analysisTimeMillis = analysisTimeMillis;
         this.cpuTimeMillis = cpuTimeMillis;
         this.wallTimeMillis = wallTimeMillis;
         this.queuedTimeMillis = queuedTimeMillis;
         this.elapsedTimeMillis = elapsedTimeMillis;
+        this.finishingTimeMillis = finishingTimeMillis;
+        this.physicalInputTimeMillis = physicalInputTimeMillis;
         this.processedRows = processedRows;
         this.processedBytes = processedBytes;
         this.peakMemoryBytes = peakMemoryBytes;
+        this.physicalInputBytes = physicalInputBytes;
+        this.physicalWrittenBytes = physicalWrittenBytes;
+        this.internalNetworkInputBytes = internalNetworkInputBytes;
         this.rootStage = requireNonNull(rootStage, "rootStage is null");
     }
 
@@ -86,18 +109,26 @@ public final class QueryStats
                 stats.getState(),
                 stats.isQueued(),
                 stats.isScheduled(),
+                stats.getProgressPercentage(),
                 stats.getNodes(),
                 stats.getTotalSplits(),
                 stats.getQueuedSplits(),
                 stats.getRunningSplits(),
                 stats.getCompletedSplits(),
+                stats.getPlanningTimeMillis(),
+                stats.getAnalysisTimeMillis(),
                 stats.getCpuTimeMillis(),
                 stats.getWallTimeMillis(),
                 stats.getQueuedTimeMillis(),
                 stats.getElapsedTimeMillis(),
+                stats.getFinishingTimeMillis(),
+                stats.getPhysicalInputTimeMillis(),
                 stats.getProcessedRows(),
                 stats.getProcessedBytes(),
                 stats.getPeakMemoryBytes(),
+                stats.getPhysicalInputBytes(),
+                stats.getPhysicalWrittenBytes(),
+                stats.getInternalNetworkInputBytes(),
                 Optional.ofNullable(stats.getRootStage()).map(StageStats::create));
     }
 
@@ -119,6 +150,11 @@ public final class QueryStats
     public boolean isScheduled()
     {
         return scheduled;
+    }
+
+    public OptionalDouble getProgressPercentage()
+    {
+        return progressPercentage;
     }
 
     public int getNodes()
@@ -146,6 +182,16 @@ public final class QueryStats
         return completedSplits;
     }
 
+    public long getPlanningTimeMillis()
+    {
+        return planningTimeMillis;
+    }
+
+    public long getAnalysisTimeMillis()
+    {
+        return analysisTimeMillis;
+    }
+
     public long getCpuTimeMillis()
     {
         return cpuTimeMillis;
@@ -166,6 +212,16 @@ public final class QueryStats
         return elapsedTimeMillis;
     }
 
+    public long getFinishingTimeMillis()
+    {
+        return finishingTimeMillis;
+    }
+
+    public long getPhysicalInputTimeMillis()
+    {
+        return physicalInputTimeMillis;
+    }
+
     public long getProcessedRows()
     {
         return processedRows;
@@ -181,16 +237,23 @@ public final class QueryStats
         return peakMemoryBytes;
     }
 
+    public long getPhysicalInputBytes()
+    {
+        return physicalInputBytes;
+    }
+
+    public long getPhysicalWrittenBytes()
+    {
+        return physicalWrittenBytes;
+    }
+
+    public long getInternalNetworkInputBytes()
+    {
+        return internalNetworkInputBytes;
+    }
+
     public Optional<StageStats> getRootStage()
     {
         return rootStage;
-    }
-
-    public OptionalDouble getProgressPercentage()
-    {
-        if (!scheduled || totalSplits == 0) {
-            return OptionalDouble.empty();
-        }
-        return OptionalDouble.of(min(100, (completedSplits * 100.0) / totalSplits));
     }
 }

@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import io.trino.spi.TrinoException;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.type.Type;
 import org.apache.kudu.client.KeyEncoderAccessor;
@@ -28,29 +27,15 @@ import org.apache.kudu.client.KuduTable;
 import org.apache.kudu.client.PartialRow;
 import org.apache.kudu.client.RowResult;
 
-import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
 
 import static io.trino.plugin.kudu.KuduColumnHandle.ROW_ID_POSITION;
-import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
 
 public class KuduRecordCursor
         implements RecordCursor
 {
-    private static final Field ROW_DATA_FIELD;
-
-    static {
-        try {
-            ROW_DATA_FIELD = RowResult.class.getDeclaredField("rowData");
-            ROW_DATA_FIELD.setAccessible(true);
-        }
-        catch (NoSuchFieldException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     private final KuduScanner scanner;
     private final List<Type> columnTypes;
     private final KuduTable table;
@@ -59,6 +44,8 @@ public class KuduRecordCursor
     private RowResult currentRow;
 
     private long totalBytes;
+
+    private volatile boolean closed;
 
     public KuduRecordCursor(KuduScanner scanner, KuduTable table, List<Type> columnTypes, Map<Integer, Integer> fieldMapping)
     {
@@ -99,6 +86,7 @@ public class KuduRecordCursor
     public boolean advanceNextPosition()
     {
         if (!kuduScannerIterator.hasNext()) {
+            closed = scanner.isClosed();
             return false;
         }
 
@@ -107,26 +95,9 @@ public class KuduRecordCursor
         return true;
     }
 
-    private org.apache.kudu.util.Slice getCurrentRowRawData()
-    {
-        if (currentRow != null) {
-            try {
-                return (org.apache.kudu.util.Slice) ROW_DATA_FIELD.get(currentRow);
-            }
-            catch (IllegalAccessException e) {
-                throw new TrinoException(GENERIC_INTERNAL_ERROR, e);
-            }
-        }
-        return null;
-    }
-
     private int getRowLength()
     {
-        org.apache.kudu.util.Slice rawData = getCurrentRowRawData();
-        if (rawData != null) {
-            return rawData.length();
-        }
-        return columnTypes.size();
+        return currentRow.getSchema().getRowSize();
     }
 
     @Override
@@ -185,12 +156,17 @@ public class KuduRecordCursor
     @Override
     public void close()
     {
-        try {
-            scanner.close();
+        if (!closed) {
+            try {
+                scanner.close();
+            }
+            catch (KuduException e) {
+                throw new RuntimeException(e);
+            }
+            finally {
+                currentRow = null;
+                closed = true;
+            }
         }
-        catch (KuduException e) {
-            throw new RuntimeException(e);
-        }
-        currentRow = null;
     }
 }

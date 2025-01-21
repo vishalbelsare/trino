@@ -15,10 +15,9 @@ package io.trino.plugin.oracle;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
-
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import org.junit.jupiter.api.Test;
 
 import java.math.RoundingMode;
 import java.util.Map;
@@ -43,13 +42,14 @@ public class TestOracleConfig
                 .setConnectionPoolEnabled(true)
                 .setConnectionPoolMinSize(1)
                 .setConnectionPoolMaxSize(30)
-                .setInactiveConnectionTimeout(new Duration(20, MINUTES)));
+                .setInactiveConnectionTimeout(new Duration(20, MINUTES))
+                .setFetchSize(null));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("oracle.synonyms.enabled", "true")
                 .put("oracle.remarks-reporting.enabled", "true")
                 .put("oracle.number.default-scale", "2")
@@ -58,7 +58,8 @@ public class TestOracleConfig
                 .put("oracle.connection-pool.min-size", "10")
                 .put("oracle.connection-pool.max-size", "20")
                 .put("oracle.connection-pool.inactive-timeout", "30s")
-                .build();
+                .put("oracle.fetch-size", "2000")
+                .buildOrThrow();
 
         OracleConfig expected = new OracleConfig()
                 .setSynonymsEnabled(true)
@@ -68,7 +69,8 @@ public class TestOracleConfig
                 .setConnectionPoolEnabled(false)
                 .setConnectionPoolMinSize(10)
                 .setConnectionPoolMaxSize(20)
-                .setInactiveConnectionTimeout(new Duration(30, SECONDS));
+                .setInactiveConnectionTimeout(new Duration(30, SECONDS))
+                .setFetchSize(2000);
 
         assertFullMapping(properties, expected);
     }

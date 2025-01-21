@@ -13,24 +13,24 @@
  */
 package io.trino.sql.planner;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.ValuesNode;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.sql.ir.IrExpressions.not;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.equiJoinClause;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.join;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.semiJoin;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
+import static io.trino.sql.planner.plan.JoinType.INNER;
 
 public class TestQuantifiedComparison
         extends BasePlanTest
@@ -40,11 +40,10 @@ public class TestQuantifiedComparison
     {
         String query = "SELECT orderkey, custkey FROM orders WHERE orderkey = ANY (VALUES ROW(CAST(5 as BIGINT)), ROW(CAST(3 as BIGINT)))";
         assertPlan(query, anyTree(
-                join(
-                        INNER,
-                        ImmutableList.of(equiJoinClause("Y", "X")),
-                        anyTree(values(ImmutableMap.of("Y", 0))),
-                        anyTree(tableScan("orders", ImmutableMap.of("X", "orderkey"))))));
+                join(INNER, builder -> builder
+                        .equiCriteria("X", "Y")
+                        .left(anyTree(tableScan("orders", ImmutableMap.of("X", "orderkey"))))
+                        .right(anyTree(values(ImmutableMap.of("Y", 0)))))));
     }
 
     @Test
@@ -52,11 +51,11 @@ public class TestQuantifiedComparison
     {
         String query = "SELECT orderkey, custkey FROM orders WHERE orderkey <> ALL (VALUES ROW(CAST(5 as BIGINT)), ROW(CAST(3 as BIGINT)))";
         assertPlan(query, anyTree(
-                filter("NOT S",
-                        project(
-                                semiJoin("X", "Y", "S",
-                                        anyTree(tableScan("orders", ImmutableMap.of("X", "orderkey"))),
-                                        anyTree(values(ImmutableMap.of("Y", 0))))))));
+                filter(
+                        not(getPlanTester().getPlannerContext().getMetadata(), new Reference(BOOLEAN, "S")),
+                        semiJoin("X", "Y", "S",
+                                tableScan("orders", ImmutableMap.of("X", "orderkey")),
+                                values(ImmutableMap.of("Y", 0))))));
     }
 
     @Test

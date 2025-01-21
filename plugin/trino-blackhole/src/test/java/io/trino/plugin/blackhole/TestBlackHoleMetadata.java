@@ -20,20 +20,21 @@ import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.TrinoPrincipal;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
+import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static io.trino.spi.security.PrincipalType.USER;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestBlackHoleMetadata
+final class TestBlackHoleMetadata
 {
     private final BlackHoleMetadata metadata = new BlackHoleMetadata();
     private final Map<String, Object> tableProperties = ImmutableMap.of(
@@ -44,15 +45,15 @@ public class TestBlackHoleMetadata
             BlackHoleConnector.PAGE_PROCESSING_DELAY, new Duration(0, SECONDS));
 
     @Test
-    public void testCreateSchema()
+    void testCreateSchema()
     {
-        assertEquals(metadata.listSchemaNames(SESSION), ImmutableList.of("default"));
+        assertThat(metadata.listSchemaNames(SESSION)).isEqualTo(ImmutableList.of("default"));
         metadata.createSchema(SESSION, "test", ImmutableMap.of(), new TrinoPrincipal(USER, SESSION.getUser()));
-        assertEquals(metadata.listSchemaNames(SESSION), ImmutableList.of("default", "test"));
+        assertThat(metadata.listSchemaNames(SESSION)).isEqualTo(ImmutableList.of("default", "test"));
     }
 
     @Test
-    public void tableIsCreatedAfterCommits()
+    void tableIsCreatedAfterCommits()
     {
         assertThatNoTableIsCreated();
 
@@ -61,28 +62,30 @@ public class TestBlackHoleMetadata
         ConnectorOutputTableHandle table = metadata.beginCreateTable(
                 SESSION,
                 new ConnectorTableMetadata(schemaTableName, ImmutableList.of(), tableProperties),
-                Optional.empty());
+                Optional.empty(),
+                NO_RETRIES,
+                false);
 
         assertThatNoTableIsCreated();
 
         metadata.finishCreateTable(SESSION, table, ImmutableList.of(), ImmutableList.of());
 
         List<SchemaTableName> tables = metadata.listTables(SESSION, Optional.empty());
-        assertEquals(tables.size(), 1, "Expected only one table.");
-        assertEquals(tables.get(0).getTableName(), "temp_table", "Expected table with name 'temp_table'");
+        assertThat(tables).hasSize(1);
+        assertThat(tables.get(0).getTableName()).isEqualTo("temp_table");
     }
 
     @Test
-    public void testCreateTableInNotExistSchema()
+    void testCreateTableInNotExistSchema()
     {
         SchemaTableName schemaTableName = new SchemaTableName("schema1", "test_table");
-        assertTrinoExceptionThrownBy(() -> metadata.beginCreateTable(SESSION, new ConnectorTableMetadata(schemaTableName, ImmutableList.of(), tableProperties), Optional.empty()))
+        assertTrinoExceptionThrownBy(() -> metadata.beginCreateTable(SESSION, new ConnectorTableMetadata(schemaTableName, ImmutableList.of(), tableProperties), Optional.empty(), NO_RETRIES, false))
                 .hasErrorCode(NOT_FOUND)
                 .hasMessage("Schema schema1 not found");
     }
 
     private void assertThatNoTableIsCreated()
     {
-        assertEquals(metadata.listTables(SESSION, Optional.empty()), ImmutableList.of(), "No table was expected");
+        assertThat(metadata.listTables(SESSION, Optional.empty())).isEmpty();
     }
 }

@@ -14,7 +14,7 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableList;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
@@ -29,24 +29,22 @@ public class TestJdbcOutputTableHandle
     public void testJsonRoundTrip()
     {
         JdbcOutputTableHandle handleForCreate = new JdbcOutputTableHandle(
-                "catalog",
-                "schema",
-                "table",
+                new RemoteTableName(Optional.of("catalog"), Optional.of("schema"), "table"),
                 ImmutableList.of("abc", "xyz"),
                 ImmutableList.of(VARCHAR, VARCHAR),
                 Optional.empty(),
-                "tmp_table");
+                Optional.of("tmp_table"),
+                Optional.of("page_sink_id"));
 
         assertJsonRoundTrip(OUTPUT_TABLE_CODEC, handleForCreate);
 
         JdbcOutputTableHandle handleForInsert = new JdbcOutputTableHandle(
-                "catalog",
-                "schema",
-                "table",
+                new RemoteTableName(Optional.of("catalog"), Optional.of("schema"), "table"),
                 ImmutableList.of("abc", "xyz"),
                 ImmutableList.of(VARCHAR, VARCHAR),
                 Optional.of(ImmutableList.of(JDBC_VARCHAR, JDBC_VARCHAR)),
-                "tmp_table");
+                Optional.of("tmp_table"),
+                Optional.of("page_sink_id"));
 
         assertJsonRoundTrip(OUTPUT_TABLE_CODEC, handleForInsert);
     }

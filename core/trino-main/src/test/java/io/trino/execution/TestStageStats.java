@@ -18,14 +18,19 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.json.JsonCodec;
 import io.airlift.stats.Distribution;
 import io.airlift.stats.Distribution.DistributionSnapshot;
+import io.airlift.stats.TDigest;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.spi.eventlistener.StageGcStatistics;
+import io.trino.spi.metrics.Metrics;
 import org.joda.time.DateTime;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+
+import java.util.Optional;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestStageStats
 {
@@ -37,6 +42,7 @@ public class TestStageStats
             4,
             5,
             6,
+            1,
 
             7,
             8,
@@ -45,37 +51,59 @@ public class TestStageStats
             11,
 
             12.0,
-            10.0,
-            DataSize.ofBytes(13),
+            13.0,
             DataSize.ofBytes(14),
             DataSize.ofBytes(15),
             DataSize.ofBytes(16),
             DataSize.ofBytes(17),
+            DataSize.ofBytes(18),
 
-            new Duration(15, NANOSECONDS),
-            new Duration(16, NANOSECONDS),
-            new Duration(18, NANOSECONDS),
+            new Duration(19, NANOSECONDS),
+            new Duration(20, NANOSECONDS),
+            new Duration(21, NANOSECONDS),
+            new Duration(22, NANOSECONDS),
+            new Duration(23, NANOSECONDS),
             false,
             ImmutableSet.of(),
 
             DataSize.ofBytes(191),
-            201,
-            new Duration(15, NANOSECONDS),
-
             DataSize.ofBytes(192),
+            201,
             202,
+            new Duration(24, NANOSECONDS),
+            new Duration(25, NANOSECONDS),
 
-            DataSize.ofBytes(19),
-            20,
-
-            DataSize.ofBytes(21),
-            22,
-
-            DataSize.ofBytes(23),
-            DataSize.ofBytes(24),
-            25,
+            DataSize.ofBytes(193),
+            DataSize.ofBytes(194),
+            203,
+            204,
 
             DataSize.ofBytes(26),
+            DataSize.ofBytes(27),
+            28,
+            29,
+
+            DataSize.ofBytes(30),
+            DataSize.ofBytes(31),
+            32,
+            33,
+
+            new Duration(201, NANOSECONDS),
+            new Duration(202, NANOSECONDS),
+
+            DataSize.ofBytes(34),
+            Optional.of(new io.trino.execution.DistributionSnapshot(getTDigestHistogram(10))),
+            DataSize.ofBytes(35),
+            DataSize.ofBytes(36),
+            37,
+            38,
+            Metrics.EMPTY,
+
+            new Duration(203, NANOSECONDS),
+            new Duration(204, NANOSECONDS),
+
+            DataSize.ofBytes(39),
+            DataSize.ofBytes(40),
 
             new StageGcStatistics(
                     101,
@@ -101,58 +129,80 @@ public class TestStageStats
 
     private static void assertExpectedStageStats(StageStats actual)
     {
-        assertEquals(actual.getSchedulingComplete().getMillis(), 0);
+        assertThat(actual.getSchedulingComplete().getMillis()).isEqualTo(0);
 
-        assertEquals(actual.getGetSplitDistribution().getCount(), 1.0);
+        assertThat(actual.getGetSplitDistribution().getCount()).isEqualTo(1.0);
 
-        assertEquals(actual.getTotalTasks(), 4);
-        assertEquals(actual.getRunningTasks(), 5);
-        assertEquals(actual.getCompletedTasks(), 6);
+        assertThat(actual.getTotalTasks()).isEqualTo(4);
+        assertThat(actual.getRunningTasks()).isEqualTo(5);
+        assertThat(actual.getCompletedTasks()).isEqualTo(6);
+        assertThat(actual.getFailedTasks()).isEqualTo(1);
 
-        assertEquals(actual.getTotalDrivers(), 7);
-        assertEquals(actual.getQueuedDrivers(), 8);
-        assertEquals(actual.getRunningDrivers(), 10);
-        assertEquals(actual.getBlockedDrivers(), 26);
-        assertEquals(actual.getCompletedDrivers(), 11);
+        assertThat(actual.getTotalDrivers()).isEqualTo(7);
+        assertThat(actual.getQueuedDrivers()).isEqualTo(8);
+        assertThat(actual.getRunningDrivers()).isEqualTo(10);
+        assertThat(actual.getBlockedDrivers()).isEqualTo(26);
+        assertThat(actual.getCompletedDrivers()).isEqualTo(11);
 
-        assertEquals(actual.getCumulativeUserMemory(), 12.0);
-        assertEquals(actual.getCumulativeSystemMemory(), 10.0);
-        assertEquals(actual.getUserMemoryReservation(), DataSize.ofBytes(13));
-        assertEquals(actual.getRevocableMemoryReservation(), DataSize.ofBytes(14));
-        assertEquals(actual.getTotalMemoryReservation(), DataSize.ofBytes(15));
-        assertEquals(actual.getPeakUserMemoryReservation(), DataSize.ofBytes(16));
-        assertEquals(actual.getPeakRevocableMemoryReservation(), DataSize.ofBytes(17));
+        assertThat(actual.getCumulativeUserMemory()).isEqualTo(12.0);
+        assertThat(actual.getFailedCumulativeUserMemory()).isEqualTo(13.0);
+        assertThat(actual.getUserMemoryReservation()).isEqualTo(DataSize.ofBytes(14));
+        assertThat(actual.getRevocableMemoryReservation()).isEqualTo(DataSize.ofBytes(15));
+        assertThat(actual.getTotalMemoryReservation()).isEqualTo(DataSize.ofBytes(16));
+        assertThat(actual.getPeakUserMemoryReservation()).isEqualTo(DataSize.ofBytes(17));
+        assertThat(actual.getPeakRevocableMemoryReservation()).isEqualTo(DataSize.ofBytes(18));
 
-        assertEquals(actual.getTotalScheduledTime(), new Duration(15, NANOSECONDS));
-        assertEquals(actual.getTotalCpuTime(), new Duration(16, NANOSECONDS));
-        assertEquals(actual.getTotalBlockedTime(), new Duration(18, NANOSECONDS));
+        assertThat(actual.getTotalScheduledTime()).isEqualTo(new Duration(19, NANOSECONDS));
+        assertThat(actual.getFailedScheduledTime()).isEqualTo(new Duration(20, NANOSECONDS));
+        assertThat(actual.getTotalCpuTime()).isEqualTo(new Duration(21, NANOSECONDS));
+        assertThat(actual.getFailedCpuTime()).isEqualTo(new Duration(22, NANOSECONDS));
+        assertThat(actual.getTotalBlockedTime()).isEqualTo(new Duration(23, NANOSECONDS));
 
-        assertEquals(actual.getPhysicalInputDataSize(), DataSize.ofBytes(191));
-        assertEquals(actual.getPhysicalInputPositions(), 201);
-        assertEquals(actual.getPhysicalInputReadTime(), new Duration(15, NANOSECONDS));
+        assertThat(actual.getPhysicalInputDataSize()).isEqualTo(DataSize.ofBytes(191));
+        assertThat(actual.getFailedPhysicalInputDataSize()).isEqualTo(DataSize.ofBytes(192));
+        assertThat(actual.getPhysicalInputPositions()).isEqualTo(201);
+        assertThat(actual.getFailedPhysicalInputPositions()).isEqualTo(202);
+        assertThat(actual.getPhysicalInputReadTime()).isEqualTo(new Duration(24, NANOSECONDS));
+        assertThat(actual.getFailedPhysicalInputReadTime()).isEqualTo(new Duration(25, NANOSECONDS));
 
-        assertEquals(actual.getInternalNetworkInputDataSize(), DataSize.ofBytes(192));
-        assertEquals(actual.getInternalNetworkInputPositions(), 202);
+        assertThat(actual.getInternalNetworkInputDataSize()).isEqualTo(DataSize.ofBytes(193));
+        assertThat(actual.getFailedInternalNetworkInputDataSize()).isEqualTo(DataSize.ofBytes(194));
+        assertThat(actual.getInternalNetworkInputPositions()).isEqualTo(203);
+        assertThat(actual.getFailedInternalNetworkInputPositions()).isEqualTo(204);
 
-        assertEquals(actual.getRawInputDataSize(), DataSize.ofBytes(19));
-        assertEquals(actual.getRawInputPositions(), 20);
+        assertThat(actual.getRawInputDataSize()).isEqualTo(DataSize.ofBytes(26));
+        assertThat(actual.getFailedRawInputDataSize()).isEqualTo(DataSize.ofBytes(27));
+        assertThat(actual.getRawInputPositions()).isEqualTo(28);
+        assertThat(actual.getFailedRawInputPositions()).isEqualTo(29);
 
-        assertEquals(actual.getProcessedInputDataSize(), DataSize.ofBytes(21));
-        assertEquals(actual.getProcessedInputPositions(), 22);
+        assertThat(actual.getProcessedInputDataSize()).isEqualTo(DataSize.ofBytes(30));
+        assertThat(actual.getFailedProcessedInputDataSize()).isEqualTo(DataSize.ofBytes(31));
+        assertThat(actual.getProcessedInputPositions()).isEqualTo(32);
+        assertThat(actual.getFailedProcessedInputPositions()).isEqualTo(33);
 
-        assertEquals(actual.getBufferedDataSize(), DataSize.ofBytes(23));
-        assertEquals(actual.getOutputDataSize(), DataSize.ofBytes(24));
-        assertEquals(actual.getOutputPositions(), 25);
+        assertThat(actual.getInputBlockedTime()).isEqualTo(new Duration(201, NANOSECONDS));
+        assertThat(actual.getFailedInputBlockedTime()).isEqualTo(new Duration(202, NANOSECONDS));
 
-        assertEquals(actual.getPhysicalWrittenDataSize(), DataSize.ofBytes(26));
+        assertThat(actual.getBufferedDataSize()).isEqualTo(DataSize.ofBytes(34));
+        assertThat(actual.getOutputBufferUtilization().get().max()).isEqualTo(9.0);
+        assertThat(actual.getOutputDataSize()).isEqualTo(DataSize.ofBytes(35));
+        assertThat(actual.getFailedOutputDataSize()).isEqualTo(DataSize.ofBytes(36));
+        assertThat(actual.getOutputPositions()).isEqualTo(37);
+        assertThat(actual.getFailedOutputPositions()).isEqualTo(38);
 
-        assertEquals(actual.getGcInfo().getStageId(), 101);
-        assertEquals(actual.getGcInfo().getTasks(), 102);
-        assertEquals(actual.getGcInfo().getFullGcTasks(), 103);
-        assertEquals(actual.getGcInfo().getMinFullGcSec(), 104);
-        assertEquals(actual.getGcInfo().getMaxFullGcSec(), 105);
-        assertEquals(actual.getGcInfo().getTotalFullGcSec(), 106);
-        assertEquals(actual.getGcInfo().getAverageFullGcSec(), 107);
+        assertThat(actual.getOutputBlockedTime()).isEqualTo(new Duration(203, NANOSECONDS));
+        assertThat(actual.getFailedOutputBlockedTime()).isEqualTo(new Duration(204, NANOSECONDS));
+
+        assertThat(actual.getPhysicalWrittenDataSize()).isEqualTo(DataSize.ofBytes(39));
+        assertThat(actual.getFailedPhysicalWrittenDataSize()).isEqualTo(DataSize.ofBytes(40));
+
+        assertThat(actual.getGcInfo().getStageId()).isEqualTo(101);
+        assertThat(actual.getGcInfo().getTasks()).isEqualTo(102);
+        assertThat(actual.getGcInfo().getFullGcTasks()).isEqualTo(103);
+        assertThat(actual.getGcInfo().getMinFullGcSec()).isEqualTo(104);
+        assertThat(actual.getGcInfo().getMaxFullGcSec()).isEqualTo(105);
+        assertThat(actual.getGcInfo().getTotalFullGcSec()).isEqualTo(106);
+        assertThat(actual.getGcInfo().getAverageFullGcSec()).isEqualTo(107);
     }
 
     private static DistributionSnapshot getTestDistribution(int count)
@@ -162,5 +212,14 @@ public class TestStageStats
             distribution.add(i);
         }
         return distribution.snapshot();
+    }
+
+    private static TDigestHistogram getTDigestHistogram(int count)
+    {
+        TDigest digest = new TDigest();
+        for (int i = 0; i < count; i++) {
+            digest.add(i);
+        }
+        return new TDigestHistogram(digest);
     }
 }

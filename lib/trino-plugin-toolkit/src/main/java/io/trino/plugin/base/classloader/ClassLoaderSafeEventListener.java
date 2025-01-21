@@ -13,13 +13,12 @@
  */
 package io.trino.plugin.base.classloader;
 
+import com.google.inject.Inject;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.eventlistener.EventListener;
 import io.trino.spi.eventlistener.QueryCompletedEvent;
 import io.trino.spi.eventlistener.QueryCreatedEvent;
 import io.trino.spi.eventlistener.SplitCompletedEvent;
-
-import javax.inject.Inject;
 
 import static java.util.Objects.requireNonNull;
 
@@ -39,7 +38,7 @@ public class ClassLoaderSafeEventListener
     @Override
     public void queryCreated(QueryCreatedEvent queryCreatedEvent)
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.queryCreated(queryCreatedEvent);
         }
     }
@@ -47,7 +46,7 @@ public class ClassLoaderSafeEventListener
     @Override
     public void queryCompleted(QueryCompletedEvent queryCompletedEvent)
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.queryCompleted(queryCompletedEvent);
         }
     }
@@ -55,8 +54,24 @@ public class ClassLoaderSafeEventListener
     @Override
     public void splitCompleted(SplitCompletedEvent splitCompletedEvent)
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.splitCompleted(splitCompletedEvent);
+        }
+    }
+
+    @Override
+    public boolean requiresAnonymizedPlan()
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.requiresAnonymizedPlan();
+        }
+    }
+
+    @Override
+    public void shutdown()
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.shutdown();
         }
     }
 }

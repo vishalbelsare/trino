@@ -15,7 +15,7 @@ package io.trino.plugin.hive.metastore.thrift;
 
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.hive.metastore.thrift.ThriftMetastoreAuthenticationConfig.ThriftMetastoreAuthenticationType;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -35,9 +35,7 @@ public class TestThriftMetastoreAuthenticationConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("hive.metastore.authentication.type", "KERBEROS")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("hive.metastore.authentication.type", "KERBEROS");
 
         ThriftMetastoreAuthenticationConfig expected = new ThriftMetastoreAuthenticationConfig()
                 .setAuthenticationType(ThriftMetastoreAuthenticationType.KERBEROS);

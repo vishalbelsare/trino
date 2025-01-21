@@ -13,7 +13,8 @@
  */
 package io.trino.execution.buffer;
 
-import javax.annotation.concurrent.ThreadSafe;
+import com.google.errorprone.annotations.ThreadSafe;
+import io.airlift.slice.Slice;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
@@ -28,13 +29,15 @@ final class SerializedPageReference
 {
     private static final AtomicIntegerFieldUpdater<SerializedPageReference> REFERENCE_COUNT_UPDATER = AtomicIntegerFieldUpdater.newUpdater(SerializedPageReference.class, "referenceCount");
 
-    private final SerializedPage serializedPage;
+    private final Slice serializedPage;
+    private final int positionCount;
     private volatile int referenceCount;
 
-    public SerializedPageReference(SerializedPage serializedPage, int referenceCount)
+    public SerializedPageReference(Slice serializedPage, int positionCount, int referenceCount)
     {
         this.serializedPage = requireNonNull(serializedPage, "serializedPage is null");
         checkArgument(referenceCount > 0, "referenceCount must be at least 1");
+        this.positionCount = positionCount;
         this.referenceCount = referenceCount;
     }
 
@@ -44,19 +47,19 @@ final class SerializedPageReference
         checkState(oldReferences > 0, "Page has already been dereferenced");
     }
 
-    public SerializedPage getSerializedPage()
+    public Slice getSerializedPage()
     {
         return serializedPage;
     }
 
     public int getPositionCount()
     {
-        return serializedPage.getPositionCount();
+        return positionCount;
     }
 
     public long getRetainedSizeInBytes()
     {
-        return serializedPage.getRetainedSizeInBytes();
+        return serializedPage.getRetainedSize();
     }
 
     private boolean dereferencePage()

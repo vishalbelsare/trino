@@ -15,14 +15,10 @@ package io.trino.cost;
 
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ListMultimap;
-import io.trino.Session;
+import com.google.inject.Inject;
 import io.trino.matching.Pattern;
 import io.trino.matching.pattern.TypeOfPattern;
-import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.plan.PlanNode;
-
-import javax.inject.Inject;
 
 import java.lang.reflect.Modifier;
 import java.util.Iterator;
@@ -44,8 +40,10 @@ public class ComposableStatsCalculator
     {
         this.rulesByRootType = rules.stream()
                 .peek(rule -> {
-                    checkArgument(rule.getPattern() instanceof TypeOfPattern, "Rule pattern must be TypeOfPattern");
-                    Class<?> expectedClass = ((TypeOfPattern<?>) rule.getPattern()).expectedClass();
+                    if (!(rule.getPattern() instanceof TypeOfPattern pattern)) {
+                        throw new IllegalArgumentException("Rule pattern must be TypeOfPattern but was: " + rule.getPattern().getClass().getSimpleName());
+                    }
+                    Class<?> expectedClass = pattern.expectedClass();
                     checkArgument(!expectedClass.isInterface() && !Modifier.isAbstract(expectedClass.getModifiers()), "Rule must be registered on a concrete class");
                 })
                 .collect(toMultimap(
@@ -65,12 +63,12 @@ public class ComposableStatsCalculator
     }
 
     @Override
-    public PlanNodeStatsEstimate calculateStats(PlanNode node, StatsProvider sourceStats, Lookup lookup, Session session, TypeProvider types)
+    public PlanNodeStatsEstimate calculateStats(PlanNode node, Context context)
     {
         Iterator<Rule<?>> ruleIterator = getCandidates(node).iterator();
         while (ruleIterator.hasNext()) {
             Rule<?> rule = ruleIterator.next();
-            Optional<PlanNodeStatsEstimate> calculatedStats = calculateStats(rule, node, sourceStats, lookup, session, types);
+            Optional<PlanNodeStatsEstimate> calculatedStats = calculateStats(rule, node, context);
             if (calculatedStats.isPresent()) {
                 return calculatedStats.get();
             }
@@ -78,17 +76,17 @@ public class ComposableStatsCalculator
         return PlanNodeStatsEstimate.unknown();
     }
 
-    private static <T extends PlanNode> Optional<PlanNodeStatsEstimate> calculateStats(Rule<T> rule, PlanNode node, StatsProvider sourceStats, Lookup lookup, Session session, TypeProvider types)
+    private static <T extends PlanNode> Optional<PlanNodeStatsEstimate> calculateStats(Rule<T> rule, PlanNode node, Context context)
     {
         @SuppressWarnings("unchecked")
         T typedNode = (T) node;
-        return rule.calculate(typedNode, sourceStats, lookup, session, types);
+        return rule.calculate(typedNode, context);
     }
 
     public interface Rule<T extends PlanNode>
     {
         Pattern<T> getPattern();
 
-        Optional<PlanNodeStatsEstimate> calculate(T node, StatsProvider sourceStats, Lookup lookup, Session session, TypeProvider types);
+        Optional<PlanNodeStatsEstimate> calculate(T node, Context context);
     }
 }

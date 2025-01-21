@@ -15,7 +15,7 @@ package io.trino.server.ui;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -37,10 +37,10 @@ public class TestFormWebUiConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("web-ui.session-timeout", "33s")
                 .put("web-ui.shared-secret", "test-secret")
-                .build();
+                .buildOrThrow();
 
         FormWebUiConfig expected = new FormWebUiConfig()
                 .setSessionTimeout(new Duration(33, TimeUnit.SECONDS))

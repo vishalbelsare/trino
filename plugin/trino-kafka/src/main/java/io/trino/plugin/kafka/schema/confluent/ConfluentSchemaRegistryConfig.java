@@ -13,7 +13,6 @@
  */
 package io.trino.plugin.kafka.schema.confluent;
 
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
@@ -22,13 +21,11 @@ import io.airlift.units.MaxDuration;
 import io.airlift.units.MinDuration;
 import io.trino.plugin.kafka.schema.confluent.AvroSchemaConverter.EmptyFieldStrategy;
 import io.trino.spi.HostAddress;
-
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.Size;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Size;
 
 import java.util.Set;
-import java.util.stream.StreamSupport;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.kafka.schema.confluent.AvroSchemaConverter.EmptyFieldStrategy.IGNORE;
@@ -36,7 +33,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class ConfluentSchemaRegistryConfig
 {
-    private Set<HostAddress> confluentSchemaRegistryUrls;
+    private Set<HostAddress> confluentSchemaRegistryUrls = ImmutableSet.of();
     private int confluentSchemaRegistryClientCacheSize = 1000;
     private EmptyFieldStrategy emptyFieldStrategy = IGNORE;
     private Duration confluentSubjectsCacheRefreshInterval = new Duration(1, SECONDS);
@@ -49,9 +46,11 @@ public class ConfluentSchemaRegistryConfig
 
     @Config("kafka.confluent-schema-registry-url")
     @ConfigDescription("The url of the Confluent Schema Registry")
-    public ConfluentSchemaRegistryConfig setConfluentSchemaRegistryUrls(String confluentSchemaRegistryUrls)
+    public ConfluentSchemaRegistryConfig setConfluentSchemaRegistryUrls(Set<String> confluentSchemaRegistryUrls)
     {
-        this.confluentSchemaRegistryUrls = (confluentSchemaRegistryUrls == null) ? null : parseNodes(confluentSchemaRegistryUrls);
+        this.confluentSchemaRegistryUrls = confluentSchemaRegistryUrls.stream()
+                .map(ConfluentSchemaRegistryConfig::toHostAddress)
+                .collect(toImmutableSet());
         return this;
     }
 
@@ -76,7 +75,7 @@ public class ConfluentSchemaRegistryConfig
     }
 
     @Config("kafka.empty-field-strategy")
-    @ConfigDescription("How to handle struct types with no fields: ignore, add a boolean field named 'dummy' or fail the query")
+    @ConfigDescription("How to handle struct types with no fields: ignore, add a marker field named '$empty_field_marker' or fail the query")
     public ConfluentSchemaRegistryConfig setEmptyFieldStrategy(EmptyFieldStrategy emptyFieldStrategy)
     {
         this.emptyFieldStrategy = emptyFieldStrategy;
@@ -96,14 +95,6 @@ public class ConfluentSchemaRegistryConfig
     {
         this.confluentSubjectsCacheRefreshInterval = confluentSubjectsCacheRefreshInterval;
         return this;
-    }
-
-    private static ImmutableSet<HostAddress> parseNodes(String nodes)
-    {
-        Splitter splitter = Splitter.on(',').omitEmptyStrings().trimResults();
-        return StreamSupport.stream(splitter.split(nodes).spliterator(), false)
-                .map(ConfluentSchemaRegistryConfig::toHostAddress)
-                .collect(toImmutableSet());
     }
 
     private static HostAddress toHostAddress(String value)

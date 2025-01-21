@@ -13,64 +13,116 @@
  */
 package io.trino.plugin.iceberg;
 
+import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoOutputFile;
+import io.trino.parquet.ParquetDataSourceId;
+import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.writer.ParquetWriterOptions;
-import io.trino.plugin.hive.HdfsEnvironment;
-import io.trino.plugin.hive.HdfsEnvironment.HdfsContext;
 import io.trino.plugin.hive.parquet.ParquetFileWriter;
+import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.type.Type;
-import org.apache.hadoop.fs.Path;
-import org.apache.iceberg.Metrics;
 import org.apache.iceberg.MetricsConfig;
-import org.apache.iceberg.parquet.ParquetUtil;
-import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import org.apache.parquet.format.CompressionCodec;
 import org.apache.parquet.schema.MessageType;
 
-import java.io.OutputStream;
+import java.io.Closeable;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Callable;
+import java.util.Optional;
+import java.util.stream.Stream;
 
+import static io.trino.plugin.iceberg.util.ParquetUtil.footerMetrics;
+import static io.trino.plugin.iceberg.util.ParquetUtil.getSplitOffsets;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
-public class IcebergParquetFileWriter
-        extends ParquetFileWriter
+public final class IcebergParquetFileWriter
         implements IcebergFileWriter
 {
-    private final Path outputPath;
-    private final HdfsEnvironment hdfsEnvironment;
-    private final HdfsContext hdfsContext;
+    private final MetricsConfig metricsConfig;
+    private final ParquetFileWriter parquetFileWriter;
+    private final Location location;
 
     public IcebergParquetFileWriter(
-            OutputStream outputStream,
-            Callable<Void> rollbackAction,
+            MetricsConfig metricsConfig,
+            TrinoOutputFile outputFile,
+            Closeable rollbackAction,
             List<Type> fileColumnTypes,
+            List<String> fileColumnNames,
             MessageType messageType,
             Map<List<String>, Type> primitiveTypes,
             ParquetWriterOptions parquetWriterOptions,
             int[] fileInputColumnIndexes,
-            CompressionCodecName compressionCodecName,
-            String trinoVersion,
-            Path outputPath,
-            HdfsEnvironment hdfsEnvironment,
-            HdfsContext hdfsContext)
+            CompressionCodec compressionCodec,
+            String trinoVersion)
+            throws IOException
     {
-        super(outputStream,
+        this.parquetFileWriter = new ParquetFileWriter(
+                outputFile,
                 rollbackAction,
                 fileColumnTypes,
+                fileColumnNames,
                 messageType,
                 primitiveTypes,
                 parquetWriterOptions,
                 fileInputColumnIndexes,
-                compressionCodecName,
-                trinoVersion);
-        this.outputPath = requireNonNull(outputPath, "outputPath is null");
-        this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
-        this.hdfsContext = requireNonNull(hdfsContext, "hdfsContext is null");
+                compressionCodec,
+                trinoVersion,
+                Optional.empty(),
+                Optional.empty());
+        this.location = outputFile.location();
+        this.metricsConfig = requireNonNull(metricsConfig, "metricsConfig is null");
     }
 
     @Override
-    public Metrics getMetrics()
+    public FileMetrics getFileMetrics()
     {
-        return hdfsEnvironment.doAs(hdfsContext.getIdentity(), () -> ParquetUtil.fileMetrics(new HdfsInputFile(outputPath, hdfsEnvironment, hdfsContext), MetricsConfig.getDefault()));
+        ParquetMetadata parquetMetadata;
+        try {
+            parquetMetadata = new ParquetMetadata(parquetFileWriter.getFileMetadata(), new ParquetDataSourceId(location.toString()));
+            return new FileMetrics(footerMetrics(parquetMetadata, Stream.empty(), metricsConfig), Optional.of(getSplitOffsets(parquetMetadata)));
+        }
+        catch (IOException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Error creating metadata for Parquet file %s", location), e);
+        }
+    }
+
+    @Override
+    public long getWrittenBytes()
+    {
+        return parquetFileWriter.getWrittenBytes();
+    }
+
+    @Override
+    public long getMemoryUsage()
+    {
+        return parquetFileWriter.getMemoryUsage();
+    }
+
+    @Override
+    public void appendRows(Page dataPage)
+    {
+        parquetFileWriter.appendRows(dataPage);
+    }
+
+    @Override
+    public Closeable commit()
+    {
+        return parquetFileWriter.commit();
+    }
+
+    @Override
+    public void rollback()
+    {
+        parquetFileWriter.rollback();
+    }
+
+    @Override
+    public long getValidationCpuNanos()
+    {
+        return parquetFileWriter.getValidationCpuNanos();
     }
 }

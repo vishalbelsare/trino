@@ -14,44 +14,24 @@
 package io.trino.spi.type;
 
 import com.google.common.base.Throwables;
-import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.VariableWidthBlockBuilder;
-import org.testng.annotations.Test;
+import io.trino.spi.block.Int128ArrayBlockBuilder;
+import org.junit.jupiter.api.Test;
 
 import java.lang.invoke.MethodHandle;
 import java.math.BigDecimal;
 
-import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
-import static io.trino.spi.type.Decimals.encodeScaledValue;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.negate;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimal;
 import static java.lang.Math.signum;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestLongDecimalType
 {
     private static final LongDecimalType TYPE = (LongDecimalType) LongDecimalType.createDecimalType(20, 10);
-    private static final MethodHandle TYPE_COMPARISON = new TypeOperators().getComparisonUnorderedLastOperator(TYPE, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION));
-
-    @Test
-    public void testRejectNegativeZero()
-    {
-        Slice slice = unscaledDecimal(0);
-        negate(slice);
-
-        BlockBuilder blockBuilder = new VariableWidthBlockBuilder(null, 1, slice.length());
-        TYPE.writeSlice(blockBuilder, slice);
-        Block block = blockBuilder.build();
-
-        assertThatThrownBy(() -> new LongDecimalType(19, 0).getObjectValue(null, block, 0))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("negative zero");
-    }
+    private static final MethodHandle TYPE_COMPARISON = new TypeOperators().getComparisonUnorderedLastOperator(TYPE, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION_NOT_NULL, BLOCK_POSITION_NOT_NULL));
 
     @Test
     public void testCompareTo()
@@ -80,7 +60,9 @@ public class TestLongDecimalType
     {
         try {
             long actual = (long) TYPE_COMPARISON.invokeExact(decimalAsBlock(decimalA), 0, decimalAsBlock(decimalB), 0);
-            assertEquals((int) signum(actual), (int) signum(expected), "bad comparison result for " + decimalA + ", " + decimalB);
+            assertThat((int) signum(actual))
+                    .describedAs("bad comparison result for " + decimalA + ", " + decimalB)
+                    .isEqualTo((int) signum(expected));
         }
         catch (Throwable throwable) {
             Throwables.throwIfUnchecked(throwable);
@@ -90,9 +72,9 @@ public class TestLongDecimalType
 
     private Block decimalAsBlock(String value)
     {
-        Slice slice = encodeScaledValue(new BigDecimal(value));
-        BlockBuilder blockBuilder = new VariableWidthBlockBuilder(null, 1, slice.length());
-        TYPE.writeSlice(blockBuilder, slice);
+        Int128 decimal = Decimals.valueOf(new BigDecimal(value));
+        BlockBuilder blockBuilder = new Int128ArrayBlockBuilder(null, 1);
+        TYPE.writeObject(blockBuilder, decimal);
         return blockBuilder.build();
     }
 }

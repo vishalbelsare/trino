@@ -60,13 +60,13 @@ import static java.lang.Integer.parseInt;
 public class MockKinesisClient
         extends AmazonKinesisClient
 {
-    private List<InternalStream> streams = new ArrayList<>();
+    private final List<InternalStream> streams = new ArrayList<>();
 
     public static class InternalShard
             extends Shard
     {
-        private List<Record> recs = new ArrayList<>();
-        private int index;
+        private final List<Record> recs = new ArrayList<>();
+        private final int index;
 
         public InternalShard(String streamName, int index)
         {
@@ -111,8 +111,8 @@ public class MockKinesisClient
 
     public static class InternalStream
     {
-        private String streamName = "";
-        private String streamAmazonResourceName = "";
+        private final String streamName;
+        private final String streamAmazonResourceName;
         private String streamStatus = "CREATING";
         private List<InternalShard> shards = new ArrayList<>();
         private int sequenceNo = 100;
@@ -128,7 +128,7 @@ public class MockKinesisClient
 
             for (int i = 0; i < shardCount; i++) {
                 InternalShard newShard = new InternalShard(this.streamName, i);
-                newShard.setSequenceNumberRange((new SequenceNumberRange()).withStartingSequenceNumber("100").withEndingSequenceNumber("999"));
+                newShard.setSequenceNumberRange(new SequenceNumberRange().withStartingSequenceNumber("100").withEndingSequenceNumber("999"));
                 this.shards.add(newShard);
             }
         }
@@ -169,14 +169,7 @@ public class MockKinesisClient
 
                 return returnArray;
             }
-            else {
-                return new ArrayList<>();
-            }
-        }
-
-        public void activate()
-        {
-            this.streamStatus = "ACTIVE";
+            return new ArrayList<>();
         }
 
         public PutRecordResult putRecord(ByteBuffer data, String partitionKey)
@@ -203,19 +196,12 @@ public class MockKinesisClient
 
             return result;
         }
-
-        public void clearRecords()
-        {
-            for (InternalShard shard : this.shards) {
-                shard.clearRecords();
-            }
-        }
     }
 
     public static class ShardIterator
     {
-        public String streamId = "";
-        public int shardIndex;
+        public final String streamId;
+        public final int shardIndex;
         public int recordIndex;
 
         public ShardIterator(String streamId, int shardIndex, int recordIndex)
@@ -301,9 +287,7 @@ public class MockKinesisClient
         if (theStream != null) {
             return theStream.putRecord(putRecordRequest.getData(), putRecordRequest.getPartitionKey());
         }
-        else {
-            throw new AmazonClientException("This stream does not exist!");
-        }
+        throw new AmazonClientException("This stream does not exist!");
     }
 
     @Override
@@ -320,7 +304,7 @@ public class MockKinesisClient
     public CreateStreamResult createStream(String streamName, Integer integer)
             throws AmazonClientException
     {
-        return this.createStream((new CreateStreamRequest()).withStreamName(streamName).withShardCount(integer));
+        return this.createStream(new CreateStreamRequest().withStreamName(streamName).withShardCount(integer));
     }
 
     @Override
@@ -334,15 +318,13 @@ public class MockKinesisClient
             List<PutRecordsResultEntry> resultList = new ArrayList<>();
             for (PutRecordsRequestEntry entry : putRecordsRequest.getRecords()) {
                 PutRecordResult putResult = theStream.putRecord(entry.getData(), entry.getPartitionKey());
-                resultList.add((new PutRecordsResultEntry()).withShardId(putResult.getShardId()).withSequenceNumber(putResult.getSequenceNumber()));
+                resultList.add(new PutRecordsResultEntry().withShardId(putResult.getShardId()).withSequenceNumber(putResult.getSequenceNumber()));
             }
 
             result.setRecords(resultList);
             return result;
         }
-        else {
-            throw new AmazonClientException("This stream does not exist!");
-        }
+        throw new AmazonClientException("This stream does not exist!");
     }
 
     @Override
@@ -410,7 +392,6 @@ public class MockKinesisClient
         }
 
         // TODO: incorporate maximum batch size (getRecordsRequest.getLimit)
-        GetRecordsResult result = null;
         InternalStream stream = this.getStream(iterator.streamId);
         if (stream == null) {
             throw new AmazonClientException("Unknown stream or bad shard iterator.");
@@ -418,6 +399,7 @@ public class MockKinesisClient
 
         InternalShard shard = stream.getShards().get(iterator.shardIndex);
 
+        GetRecordsResult result;
         if (iterator.recordIndex == 100) {
             result = new GetRecordsResult();
             List<Record> recs = shard.getRecords();
@@ -438,11 +420,11 @@ public class MockKinesisClient
 
     protected ShardIterator getNextShardIterator(ShardIterator previousIter, List<Record> records)
     {
-        if (records.size() == 0) {
+        if (records.isEmpty()) {
             return previousIter;
         }
 
-        Record rec = records.get(records.size() - 1);
+        Record rec = records.getLast();
         int lastSeq = Integer.valueOf(rec.getSequenceNumber());
         return new ShardIterator(previousIter.streamId, previousIter.shardIndex, lastSeq + 1);
     }

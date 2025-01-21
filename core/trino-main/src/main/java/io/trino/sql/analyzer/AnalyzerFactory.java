@@ -13,18 +13,15 @@
  */
 package io.trino.sql.analyzer;
 
+import com.google.inject.Inject;
+import io.opentelemetry.api.trace.Tracer;
 import io.trino.Session;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
-import io.trino.security.AccessControl;
-import io.trino.spi.security.GroupProvider;
-import io.trino.sql.parser.SqlParser;
 import io.trino.sql.rewrite.StatementRewrite;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.NodeRef;
 import io.trino.sql.tree.Parameter;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
@@ -33,43 +30,34 @@ import static java.util.Objects.requireNonNull;
 
 public class AnalyzerFactory
 {
-    private final Metadata metadata;
-    private final SqlParser sqlParser;
-    private final AccessControl accessControl;
-    private final GroupProvider groupProvider;
+    private final StatementAnalyzerFactory statementAnalyzerFactory;
     private final StatementRewrite statementRewrite;
+    private final Tracer tracer;
 
     @Inject
-    public AnalyzerFactory(
-            Metadata metadata,
-            SqlParser sqlParser,
-            AccessControl accessControl,
-            GroupProvider groupProvider,
-            StatementRewrite statementRewrite)
+    public AnalyzerFactory(StatementAnalyzerFactory statementAnalyzerFactory, StatementRewrite statementRewrite, Tracer tracer)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
-        this.accessControl = requireNonNull(accessControl, "accessControl is null");
-        this.groupProvider = requireNonNull(groupProvider, "groupProvider is null");
+        this.statementAnalyzerFactory = requireNonNull(statementAnalyzerFactory, "statementAnalyzerFactory is null");
         this.statementRewrite = requireNonNull(statementRewrite, "statementRewrite is null");
+        this.tracer = requireNonNull(tracer, "tracer is null");
     }
 
     public Analyzer createAnalyzer(
             Session session,
             List<Expression> parameters,
             Map<NodeRef<Parameter>, Expression> parameterLookup,
-            WarningCollector warningCollector)
+            WarningCollector warningCollector,
+            PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
         return new Analyzer(
                 session,
-                metadata,
-                sqlParser,
                 this,
-                groupProvider,
-                accessControl,
+                statementAnalyzerFactory,
                 parameters,
                 parameterLookup,
                 warningCollector,
+                planOptimizersStatsCollector,
+                tracer,
                 statementRewrite);
     }
 }

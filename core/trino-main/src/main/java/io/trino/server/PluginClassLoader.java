@@ -21,22 +21,27 @@ import java.net.URLClassLoader;
 import java.util.Enumeration;
 import java.util.List;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static java.lang.System.identityHashCode;
 import static java.util.Objects.requireNonNull;
 
-class PluginClassLoader
+public class PluginClassLoader
         extends URLClassLoader
 {
+    private final String pluginName;
     private final ClassLoader spiClassLoader;
     private final List<String> spiPackages;
     private final List<String> spiResources;
 
     public PluginClassLoader(
+            String pluginName,
             List<URL> urls,
             ClassLoader spiClassLoader,
             List<String> spiPackages)
     {
-        this(urls,
+        this(pluginName,
+                urls,
                 spiClassLoader,
                 spiPackages,
                 spiPackages.stream()
@@ -45,6 +50,7 @@ class PluginClassLoader
     }
 
     private PluginClassLoader(
+            String pluginName,
             List<URL> urls,
             ClassLoader spiClassLoader,
             Iterable<String> spiPackages,
@@ -52,20 +58,31 @@ class PluginClassLoader
     {
         // plugins should not have access to the system (application) class loader
         super(urls.toArray(new URL[0]), getPlatformClassLoader());
+        this.pluginName = requireNonNull(pluginName, "pluginName is null");
         this.spiClassLoader = requireNonNull(spiClassLoader, "spiClassLoader is null");
         this.spiPackages = ImmutableList.copyOf(spiPackages);
         this.spiResources = ImmutableList.copyOf(spiResources);
     }
 
-    public PluginClassLoader duplicate()
-    {
-        return new PluginClassLoader(ImmutableList.copyOf(getURLs()), spiClassLoader, spiPackages, spiResources);
-    }
-
     public PluginClassLoader withUrl(URL url)
     {
         List<URL> urls = ImmutableList.<URL>builder().add(getURLs()).add(url).build();
-        return new PluginClassLoader(urls, spiClassLoader, spiPackages, spiResources);
+        return new PluginClassLoader(pluginName, urls, spiClassLoader, spiPackages, spiResources);
+    }
+
+    public String getId()
+    {
+        return pluginName;
+    }
+
+    @Override
+    public String toString()
+    {
+        return toStringHelper(this)
+                .omitNullValues()
+                .add("plugin", pluginName)
+                .add("identityHash", "@" + Integer.toHexString(identityHashCode(this)))
+                .toString();
     }
 
     @Override

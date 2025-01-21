@@ -14,25 +14,24 @@
 package io.trino.server.security.oauth2;
 
 import com.google.inject.Binder;
+import com.google.inject.Inject;
 import com.google.inject.Key;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
+import com.google.inject.Singleton;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
-import io.airlift.http.client.HttpClient;
-import io.jsonwebtoken.SigningKeyResolver;
-import io.trino.server.security.jwt.ForJwk;
-import io.trino.server.security.jwt.JwkService;
-import io.trino.server.security.jwt.JwkSigningKeyResolver;
+import io.airlift.units.DataSize;
 import io.trino.server.ui.OAuth2WebUiInstalled;
 
-import javax.inject.Singleton;
-
-import java.net.URI;
+import java.time.Duration;
 
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
+import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.http.client.HttpClientBinder.httpClientBinder;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
+import static io.trino.server.security.oauth2.TokenPairSerializer.ACCESS_TOKEN_ONLY_SERIALIZER;
 
 public class OAuth2ServiceModule
         extends AbstractConfigurationAwareModule
@@ -46,34 +45,49 @@ public class OAuth2ServiceModule
         configBinder(binder).bindConfig(OAuth2Config.class);
         binder.bind(OAuth2Service.class).in(Scopes.SINGLETON);
         binder.bind(OAuth2TokenHandler.class).to(OAuth2TokenExchange.class).in(Scopes.SINGLETON);
+        binder.bind(NimbusHttpClient.class).to(NimbusAirliftHttpClient.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, OAuth2Client.class)
                 .setDefault()
-                .to(ScribeJavaOAuth2Client.class)
+                .to(NimbusOAuth2Client.class)
                 .in(Scopes.SINGLETON);
+        install(conditionalModule(OAuth2Config.class, OAuth2Config::isEnableDiscovery, this::bindOidcDiscovery, this::bindStaticConfiguration));
+        install(conditionalModule(OAuth2Config.class, OAuth2Config::isEnableRefreshTokens, this::enableRefreshTokens, this::disableRefreshTokens));
         httpClientBinder(binder)
                 .bindHttpClient("oauth2-jwk", ForOAuth2.class)
-                // Reset to defaults to override InternalCommunicationModule changes to this client default configuration.
-                // Setting a keystore and/or a truststore for internal communication changes the default SSL configuration
-                // for all clients in this guice context. This does not make sense for this client which will very rarely
-                // use the same SSL configuration, so using the system default truststore makes more sense.
-                .withConfigDefaults(config -> config
-                        .setKeyStorePath(null)
-                        .setKeyStorePassword(null)
-                        .setTrustStorePath(null)
-                        .setTrustStorePassword(null)
-                        .setAutomaticHttpsSharedSecret(null));
-        // Used by JwkService
-        binder.bind(HttpClient.class).annotatedWith(ForJwk.class).to(Key.get(HttpClient.class, ForOAuth2.class));
-        binder.bind(JwkService.class).in(Scopes.SINGLETON);
-        binder.bind(SigningKeyResolver.class).annotatedWith(ForOAuth2.class).to(JwkSigningKeyResolver.class).in(Scopes.SINGLETON);
+                .withConfigDefaults(clientConfig -> clientConfig
+                        .setRequestBufferSize(DataSize.of(32, KILOBYTE))
+                        .setResponseBufferSize(DataSize.of(32, KILOBYTE)));
     }
 
-    @Provides
-    @Singleton
-    @ForJwk
-    public static URI createJwkAddress(OAuth2Config config)
+    private void enableRefreshTokens(Binder binder)
     {
-        return URI.create(config.getJwksUrl());
+        install(new JweTokenSerializerModule());
+    }
+
+    private void disableRefreshTokens(Binder binder)
+    {
+        binder.bind(TokenPairSerializer.class).toInstance(ACCESS_TOKEN_ONLY_SERIALIZER);
+        newOptionalBinder(binder, Key.get(Duration.class, ForRefreshTokens.class));
+    }
+
+    @Singleton
+    @Provides
+    @Inject
+    public TokenRefresher getTokenRefresher(TokenPairSerializer tokenAssembler, OAuth2TokenHandler tokenHandler, OAuth2Client oAuth2Client)
+    {
+        return new TokenRefresher(tokenAssembler, tokenHandler, oAuth2Client);
+    }
+
+    private void bindStaticConfiguration(Binder binder)
+    {
+        configBinder(binder).bindConfig(StaticOAuth2ServerConfig.class);
+        binder.bind(OAuth2ServerConfigProvider.class).to(StaticConfigurationProvider.class).in(Scopes.SINGLETON);
+    }
+
+    private void bindOidcDiscovery(Binder binder)
+    {
+        configBinder(binder).bindConfig(OidcDiscoveryConfig.class);
+        binder.bind(OAuth2ServerConfigProvider.class).to(OidcDiscovery.class).in(Scopes.SINGLETON);
     }
 
     @Override

@@ -16,31 +16,56 @@ package io.trino.spi.connector;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.function.ToIntFunction;
-
-import static io.trino.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
-import static java.util.Collections.singletonList;
 
 public interface ConnectorNodePartitioningProvider
 {
-    // TODO: Use ConnectorPartitionHandle (instead of int) to represent individual buckets.
-    // Currently, it's mixed. listPartitionHandles used CPartitionHandle whereas the other functions used int.
-
     /**
-     * Returns a list of all partitions associated with the provided {@code partitioningHandle}.
+     * Get the mapping from bucket to nodes for the specified partitioning handle. The returned mapping may
+     * be fixed or dynamic. If the mapping is fixed, the bucket will be assigned to an exact node; otherwise,
+     * the bucket will be assigned to a node chosen by the system.  The ConnectorPartitionHandle is declared
+     * in ConnectorTablePartitioning property of ConnectorTableProperties.
      * <p>
-     * This method must be implemented for connectors that support addressable split discovery.
-     * The partitions return here will be used as address for the purpose of split discovery.
+     * If the partitioning handle is not supported, this method must return an empty optional.
      */
-    default List<ConnectorPartitionHandle> listPartitionHandles(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorPartitioningHandle partitioningHandle)
+    default Optional<ConnectorBucketNodeMap> getBucketNodeMapping(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorPartitioningHandle partitioningHandle)
     {
-        return singletonList(NOT_PARTITIONED);
+        return Optional.empty();
     }
 
-    ConnectorBucketNodeMap getBucketNodeMap(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorPartitioningHandle partitioningHandle);
+    /**
+     * Gets a function that maps a split to a bucket number. The returned function must be deterministic, and must
+     * be consistent with getBucketNodeMapping. That means all rows in a split must be assigned to the same bucket.
+     * The bucket number must be in the range [0, bucketCount).
+     */
+    default ToIntFunction<ConnectorSplit> getSplitBucketFunction(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorPartitioningHandle partitioningHandle,
+            int bucketCount)
+    {
+        return getSplitBucketFunction(transactionHandle, session, partitioningHandle);
+    }
 
-    ToIntFunction<ConnectorSplit> getSplitBucketFunction(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorPartitioningHandle partitioningHandle);
+    /**
+     * @deprecated Use {@link #getSplitBucketFunction(ConnectorTransactionHandle, ConnectorSession, ConnectorPartitioningHandle, int)} instead
+     */
+    @Deprecated(forRemoval = true)
+    default ToIntFunction<ConnectorSplit> getSplitBucketFunction(ConnectorTransactionHandle transactionHandle, ConnectorSession session, ConnectorPartitioningHandle partitioningHandle)
+    {
+        return split -> {
+            throw new UnsupportedOperationException();
+        };
+    }
 
+    /**
+     * Get the function that maps a partition to a bucket number. The returned function must be deterministic, and
+     * must be consistent with getBucketNodeMapping. The result must be in the range [0, bucketCount).
+     */
     BucketFunction getBucketFunction(
             ConnectorTransactionHandle transactionHandle,
             ConnectorSession session,

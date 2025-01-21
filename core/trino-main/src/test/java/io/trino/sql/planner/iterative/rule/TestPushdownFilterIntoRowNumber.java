@@ -14,18 +14,27 @@
 package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.spi.type.TypeOperators;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Logical;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.assertions.RowNumberSymbolMatcher;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.Comparison.Operator.EQUAL;
+import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
+import static io.trino.sql.ir.Comparison.Operator.LESS_THAN;
+import static io.trino.sql.ir.Logical.Operator.AND;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.rowNumber;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.expression;
 
 public class TestPushdownFilterIntoRowNumber
         extends BaseRuleTest
@@ -33,12 +42,12 @@ public class TestPushdownFilterIntoRowNumber
     @Test
     public void testSourceRowNumber()
     {
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.filter(
-                            expression("row_number_1 < cast(100 as bigint)"),
+                            new Comparison(LESS_THAN, new Reference(BIGINT, "row_number_1"), new Constant(BIGINT, 100L)),
                             p.rowNumber(
                                     ImmutableList.of(a),
                                     Optional.empty(),
@@ -51,12 +60,12 @@ public class TestPushdownFilterIntoRowNumber
                                         .partitionBy(ImmutableList.of("a")),
                                 values("a")));
 
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.filter(
-                            expression("row_number_1 < cast(100 as bigint)"),
+                            new Comparison(LESS_THAN, new Reference(BIGINT, "row_number_1"), new Constant(BIGINT, 100L)),
                             p.rowNumber(
                                     ImmutableList.of(a),
                                     Optional.of(10),
@@ -69,12 +78,12 @@ public class TestPushdownFilterIntoRowNumber
                                         .partitionBy(ImmutableList.of("a")),
                                 values("a")));
 
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.filter(
-                            expression("cast(3 as bigint) < row_number_1 and row_number_1 < cast(5 as bigint)"),
+                            new Logical(AND, ImmutableList.of(new Comparison(LESS_THAN, new Constant(BIGINT, 3L), new Reference(BIGINT, "row_number_1")), new Comparison(LESS_THAN, new Reference(BIGINT, "row_number_1"), new Constant(BIGINT, 5L)))),
                             p.rowNumber(
                                     ImmutableList.of(a),
                                     Optional.of(10),
@@ -83,19 +92,19 @@ public class TestPushdownFilterIntoRowNumber
                 })
                 .matches(
                         filter(
-                                "cast(3 as bigint) < row_number_1 and row_number_1 < cast(5 as bigint)",
+                                new Logical(AND, ImmutableList.of(new Comparison(LESS_THAN, new Constant(BIGINT, 3L), new Reference(BIGINT, "row_number_1")), new Comparison(LESS_THAN, new Reference(BIGINT, "row_number_1"), new Constant(BIGINT, 5L)))),
                                 rowNumber(rowNumber -> rowNumber
                                                 .maxRowCountPerPartition(Optional.of(4))
                                                 .partitionBy(ImmutableList.of("a")),
                                         values("a"))
                                         .withAlias("row_number_1", new RowNumberSymbolMatcher())));
 
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.filter(
-                            expression("row_number_1 < cast(5 as bigint) and a = 1"),
+                            new Logical(AND, ImmutableList.of(new Comparison(LESS_THAN, new Reference(BIGINT, "row_number_1"), new Constant(BIGINT, 5L)), new Comparison(EQUAL, new Reference(BIGINT, "a"), new Constant(BIGINT, 1L)))),
                             p.rowNumber(
                                     ImmutableList.of(a),
                                     Optional.of(10),
@@ -104,7 +113,7 @@ public class TestPushdownFilterIntoRowNumber
                 })
                 .matches(
                         filter(
-                                "a = 1",
+                                new Comparison(EQUAL, new Reference(BIGINT, "a"), new Constant(BIGINT, 1L)),
                                 rowNumber(rowNumber -> rowNumber
                                                 .maxRowCountPerPartition(Optional.of(4))
                                                 .partitionBy(ImmutableList.of("a")),
@@ -115,10 +124,11 @@ public class TestPushdownFilterIntoRowNumber
     @Test
     public void testNoOutputsThroughRowNumber()
     {
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
-                    return p.filter(expression("row_number_1 < cast(-100 as bigint)"),
+                    return p.filter(
+                            new Comparison(LESS_THAN, new Reference(BIGINT, "row_number_1"), new Constant(BIGINT, -100L)),
                             p.rowNumber(ImmutableList.of(p.symbol("a")), Optional.empty(), rowNumberSymbol,
                                     p.values(p.symbol("a"))));
                 })
@@ -128,30 +138,32 @@ public class TestPushdownFilterIntoRowNumber
     @Test
     public void testDoNotFire()
     {
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
-                    return p.filter(expression("not_row_number < cast(100 as bigint)"),
+                    return p.filter(
+                            new Comparison(LESS_THAN, new Reference(BIGINT, "not_row_number"), new Cast(new Constant(INTEGER, 100L), BIGINT)),
                             p.rowNumber(ImmutableList.of(p.symbol("a")), Optional.empty(), rowNumberSymbol,
                                     p.values(p.symbol("a"), p.symbol("not_row_number"))));
                 })
                 .doesNotFire();
 
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
-                    return p.filter(expression("row_number_1 > cast(100 as bigint)"),
+                    return p.filter(
+                            new Comparison(GREATER_THAN, new Reference(BIGINT, "row_number_1"), new Cast(new Constant(INTEGER, 100L), BIGINT)),
                             p.rowNumber(ImmutableList.of(p.symbol("a")), Optional.empty(), rowNumberSymbol,
                                     p.values(p.symbol("a"))));
                 })
                 .doesNotFire();
 
-        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getMetadata(), new TypeOperators()))
+        tester().assertThat(new PushdownFilterIntoRowNumber(tester().getPlannerContext()))
                 .on(p -> {
                     Symbol a = p.symbol("a");
                     Symbol rowNumberSymbol = p.symbol("row_number_1");
                     return p.filter(
-                            expression("cast(3 as bigint) < row_number_1 and row_number_1 < cast(5 as bigint)"),
+                            new Logical(AND, ImmutableList.of(new Comparison(LESS_THAN, new Cast(new Constant(INTEGER, 3L), BIGINT), new Reference(BIGINT, "row_number_1")), new Comparison(LESS_THAN, new Reference(BIGINT, "row_number_1"), new Cast(new Constant(INTEGER, 5L), BIGINT)))),
                             p.rowNumber(
                                     ImmutableList.of(a),
                                     Optional.of(4),

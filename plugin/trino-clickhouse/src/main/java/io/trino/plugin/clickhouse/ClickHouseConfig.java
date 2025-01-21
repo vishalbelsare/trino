@@ -15,7 +15,9 @@ package io.trino.plugin.clickhouse;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.DefunctConfig;
 
+@DefunctConfig("clickhouse.legacy-driver")
 public class ClickHouseConfig
 {
     // TODO (https://github.com/trinodb/trino/issues/7102) reconsider default behavior

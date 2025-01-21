@@ -15,14 +15,17 @@ package io.trino.sql.planner.plan;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
+import com.google.errorprone.annotations.Immutable;
 
-import javax.annotation.concurrent.Immutable;
-
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
 public class DynamicFilterId
 {
+    private static final int INSTANCE_SIZE = instanceSize(DynamicFilterId.class);
+
     private final String id;
 
     @JsonCreator
@@ -57,5 +60,10 @@ public class DynamicFilterId
     public int hashCode()
     {
         return id.hashCode();
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE + estimatedSizeOf(id);
     }
 }

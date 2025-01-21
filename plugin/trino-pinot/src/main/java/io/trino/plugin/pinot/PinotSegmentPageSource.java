@@ -14,41 +14,41 @@
 package io.trino.plugin.pinot;
 
 import com.google.common.collect.ImmutableMap;
-import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import io.trino.plugin.pinot.client.PinotQueryClient;
+import io.trino.plugin.pinot.client.PinotDataFetcher;
+import io.trino.plugin.pinot.client.PinotDataTableWithSize;
+import io.trino.plugin.pinot.conversion.PinotTimestamps;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorPageSource;
-import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.type.StandardTypes;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
-import org.apache.commons.codec.DecoderException;
-import org.apache.commons.codec.binary.Hex;
+import org.apache.pinot.common.datatable.DataTable;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.common.utils.DataSchema.ColumnDataType;
-import org.apache.pinot.common.utils.DataTable;
-import org.apache.pinot.core.transport.ServerInstance;
+import org.roaringbitmap.RoaringBitmap;
 
-import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
+import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
 import static io.trino.plugin.pinot.PinotErrorCode.PINOT_DECODE_ERROR;
-import static io.trino.plugin.pinot.PinotErrorCode.PINOT_EXCEPTION;
 import static io.trino.plugin.pinot.PinotErrorCode.PINOT_UNSUPPORTED_COLUMN_TYPE;
+import static io.trino.plugin.pinot.decoders.VarbinaryDecoder.toBytes;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.RealType.REAL;
 import static java.lang.Float.floatToIntBits;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -56,57 +56,28 @@ import static java.util.Objects.requireNonNull;
 public class PinotSegmentPageSource
         implements ConnectorPageSource
 {
-    private static final Logger LOG = Logger.get(PinotSegmentPageSource.class);
-
     private final List<PinotColumnHandle> columnHandles;
-    private final PinotSplit split;
-    private final PinotQueryClient pinotQueryClient;
-    private final ConnectorSession session;
-    private final String query;
-    private final int limitForSegmentQueries;
-    private final AtomicLong currentRowCount = new AtomicLong();
-    private final int estimatedNonNumericColumnSize;
+    private final List<Type> columnTypes;
+    private final long targetSegmentPageSizeBytes;
+    private final PinotDataFetcher pinotDataFetcher;
 
-    private List<Type> columnTypes;
-    // dataTableList stores the dataTable returned from each server. Each dataTable is constructed to a Page, and then destroyed to save memory.
-    private LinkedList<PinotDataTableWithSize> dataTableList = new LinkedList<>();
     private long completedBytes;
-    private long readTimeNanos;
     private long estimatedMemoryUsageInBytes;
     private PinotDataTableWithSize currentDataTable;
     private boolean closed;
-    private boolean isPinotDataFetched;
 
     public PinotSegmentPageSource(
-            ConnectorSession session,
-            int estimatedNonNumericColumnSize,
-            int limitForSegmentQueries,
-            PinotQueryClient pinotQueryClient,
-            PinotSplit split,
+            long targetSegmentPageSizeBytes,
             List<PinotColumnHandle> columnHandles,
-            String query)
+            PinotDataFetcher pinotDataFetcher)
     {
-        this.limitForSegmentQueries = limitForSegmentQueries;
-        this.estimatedNonNumericColumnSize = estimatedNonNumericColumnSize;
-        this.split = requireNonNull(split, "split is null");
-        this.pinotQueryClient = requireNonNull(pinotQueryClient, "pinotQueryClient is null");
         this.columnHandles = requireNonNull(columnHandles, "columnHandles is null");
-        this.session = requireNonNull(session, "session is null");
-        this.query = requireNonNull(query, "query is null");
-    }
-
-    private static void checkExceptions(DataTable dataTable, PinotSplit split, String query)
-    {
-        Map<String, String> metadata = dataTable.getMetadata();
-        List<String> exceptions = new ArrayList<>();
-        metadata.forEach((k, v) -> {
-            if (k.startsWith(DataTable.EXCEPTION_METADATA_KEY)) {
-                exceptions.add(v);
-            }
-        });
-        if (!exceptions.isEmpty()) {
-            throw new PinotException(PinotErrorCode.PINOT_EXCEPTION, Optional.of(query), format("Encountered %d pinot exceptions for split %s: %s", exceptions.size(), split, exceptions));
-        }
+        this.columnTypes = columnHandles
+                .stream()
+                .map(PinotColumnHandle::getDataType)
+                .collect(Collectors.toList());
+        this.targetSegmentPageSizeBytes = targetSegmentPageSizeBytes;
+        this.pinotDataFetcher = requireNonNull(pinotDataFetcher, "pinotDataFetcher is null");
     }
 
     @Override
@@ -118,11 +89,11 @@ public class PinotSegmentPageSource
     @Override
     public long getReadTimeNanos()
     {
-        return readTimeNanos;
+        return pinotDataFetcher.getReadTimeNanos();
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
         return estimatedMemoryUsageInBytes;
     }
@@ -133,7 +104,7 @@ public class PinotSegmentPageSource
     @Override
     public boolean isFinished()
     {
-        return closed || (isPinotDataFetched && dataTableList.isEmpty());
+        return closed || (pinotDataFetcher.isDataFetched() && pinotDataFetcher.endOfData());
     }
 
     /**
@@ -146,85 +117,55 @@ public class PinotSegmentPageSource
             close();
             return null;
         }
-        if (!isPinotDataFetched) {
-            fetchPinotData();
+        if (!pinotDataFetcher.isDataFetched()) {
+            pinotDataFetcher.fetchData();
+            estimatedMemoryUsageInBytes = pinotDataFetcher.getMemoryUsageBytes();
         }
-        // To reduce memory usage, remove dataTable from dataTableList once it's processed.
-        if (currentDataTable != null) {
-            estimatedMemoryUsageInBytes -= currentDataTable.getEstimatedSizeInBytes();
-        }
-        if (dataTableList.size() == 0) {
+        if (pinotDataFetcher.endOfData()) {
             close();
             return null;
         }
-        currentDataTable = dataTableList.pop();
 
+        long pageSizeBytes = 0L;
         PageBuilder pageBuilder = new PageBuilder(columnTypes);
-        // Note that declared positions in the Page should be the same with number of rows in each Block
-        pageBuilder.declarePositions(currentDataTable.getDataTable().getNumberOfRows());
-        for (int columnHandleIdx = 0; columnHandleIdx < columnHandles.size(); columnHandleIdx++) {
-            BlockBuilder blockBuilder = pageBuilder.getBlockBuilder(columnHandleIdx);
-            Type columnType = columnTypes.get(columnHandleIdx);
-            // Write a block for each column in the original order.
-            writeBlock(blockBuilder, columnType, columnHandleIdx);
+        while (!pinotDataFetcher.endOfData() && pageSizeBytes < targetSegmentPageSizeBytes) {
+            // To reduce memory usage, remove dataTable from dataTableList once it's processed.
+            if (currentDataTable != null) {
+                estimatedMemoryUsageInBytes -= currentDataTable.estimatedSizeInBytes();
+            }
+            currentDataTable = pinotDataFetcher.getNextDataTable();
+            estimatedMemoryUsageInBytes += currentDataTable.estimatedSizeInBytes();
+            pageSizeBytes += currentDataTable.estimatedSizeInBytes();
+            pageBuilder.declarePositions(currentDataTable.dataTable().getNumberOfRows());
+            Map<Integer, RoaringBitmap> nullRowIds = buildColumnIdToNullRowId(currentDataTable.dataTable(), columnHandles);
+            for (int rowIndex = 0; rowIndex < currentDataTable.dataTable().getNumberOfRows(); rowIndex++) {
+                for (int columnHandleIdx = 0; columnHandleIdx < columnHandles.size(); columnHandleIdx++) {
+                    BlockBuilder blockBuilder = pageBuilder.getBlockBuilder(columnHandleIdx);
+                    Type columnType = columnTypes.get(columnHandleIdx);
+                    // Write a block for each column in the original order.
+                    if (nullRowIds.containsKey(columnHandleIdx) && nullRowIds.get(columnHandleIdx).contains(rowIndex)) {
+                        blockBuilder.appendNull();
+                    }
+                    else {
+                        writeBlock(blockBuilder, columnType, rowIndex, columnHandleIdx);
+                    }
+                }
+            }
         }
 
         return pageBuilder.build();
     }
 
-    /**
-     * Fetch data from Pinot for the current split and store the data returned from each Pinot server.
-     */
-    private void fetchPinotData()
+    private static Map<Integer, RoaringBitmap> buildColumnIdToNullRowId(DataTable dataTable, List<PinotColumnHandle> columnHandles)
     {
-        long startTimeNanos = System.nanoTime();
-        try {
-            Map<ServerInstance, DataTable> dataTableMap = queryPinot();
-            dataTableMap.values().stream()
-                    // ignore empty tables and tables with 0 rows
-                    .filter(table -> table != null && table.getNumberOfRows() > 0)
-                    .forEach(dataTable ->
-                    {
-                        checkExceptions(dataTable, split, query);
-                        checkTooManyRows(dataTable);
-                        // Store each dataTable which will later be constructed into Pages.
-                        // Also update estimatedMemoryUsage, mostly represented by the size of all dataTables, using numberOfRows and fieldTypes combined as an estimate
-                        int estimatedTableSizeInBytes = IntStream.rangeClosed(0, dataTable.getDataSchema().size() - 1)
-                                .map(i -> getEstimatedColumnSizeInBytes(dataTable.getDataSchema().getColumnDataType(i)) * dataTable.getNumberOfRows())
-                                .reduce(0, Integer::sum);
-                        dataTableList.add(new PinotDataTableWithSize(dataTable, estimatedTableSizeInBytes));
-                        estimatedMemoryUsageInBytes += estimatedTableSizeInBytes;
-                    });
-
-            this.columnTypes = columnHandles
-                    .stream()
-                    .map(columnHandle -> columnHandle.getDataType())
-                    .collect(Collectors.toList());
-            isPinotDataFetched = true;
+        ImmutableMap.Builder<Integer, RoaringBitmap> nullRowIds = ImmutableMap.builder();
+        for (int i = 0; i < columnHandles.size(); i++) {
+            RoaringBitmap nullRowId = dataTable.getNullRowIds(i);
+            if (nullRowId != null) {
+                nullRowIds.put(i, nullRowId);
+            }
         }
-        finally {
-            readTimeNanos += System.nanoTime() - startTimeNanos;
-        }
-    }
-
-    private void checkTooManyRows(DataTable dataTable)
-    {
-        if (currentRowCount.addAndGet(dataTable.getNumberOfRows()) > limitForSegmentQueries) {
-            throw new PinotException(PINOT_EXCEPTION, Optional.of(query), format("Segment query returned '%s' rows per split, maximum allowed is '%s' rows.", currentRowCount.get(), limitForSegmentQueries));
-        }
-    }
-
-    private Map<ServerInstance, DataTable> queryPinot()
-    {
-        String host = split.getSegmentHost().orElseThrow(() -> new PinotException(PinotErrorCode.PINOT_INVALID_PQL_GENERATED, Optional.empty(), "Expected the segment split to contain the host"));
-        LOG.info("Query '%s' on host '%s' for segment splits: %s", query, split.getSegmentHost(), split.getSegments());
-        return ImmutableMap.copyOf(
-                pinotQueryClient.queryPinotServerForDataTable(
-                        query,
-                        host,
-                        split.getSegments(),
-                        PinotSessionProperties.getConnectionTimeout(session).toMillis(),
-                        PinotSessionProperties.getPinotRetryCount(session)));
+        return nullRowIds.buildOrThrow();
     }
 
     @Override
@@ -244,27 +185,34 @@ public class PinotSegmentPageSource
      *
      * @param blockBuilder blockBuilder for the current column
      * @param columnType type of the column
+     * @param rowIdx row index
      * @param columnIdx column index
      */
 
-    private void writeBlock(BlockBuilder blockBuilder, Type columnType, int columnIdx)
+    private void writeBlock(BlockBuilder blockBuilder, Type columnType, int rowIdx, int columnIdx)
     {
         Class<?> javaType = columnType.getJavaType();
-        DataSchema.ColumnDataType pinotColumnType = currentDataTable.getDataTable().getDataSchema().getColumnDataType(columnIdx);
+        DataSchema.ColumnDataType pinotColumnType = currentDataTable.dataTable().getDataSchema().getColumnDataType(columnIdx);
         if (javaType.equals(boolean.class)) {
-            writeBooleanBlock(blockBuilder, columnType, columnIdx);
+            writeBooleanBlock(blockBuilder, columnType, rowIdx, columnIdx);
         }
         else if (javaType.equals(long.class)) {
-            writeLongBlock(blockBuilder, columnType, columnIdx);
+            if (columnType instanceof TimestampType) {
+                // Pinot TimestampType is always ShortTimestampType.
+                writeShortTimestampBlock(blockBuilder, columnType, rowIdx, columnIdx);
+            }
+            else {
+                writeLongBlock(blockBuilder, columnType, rowIdx, columnIdx);
+            }
         }
         else if (javaType.equals(double.class)) {
-            writeDoubleBlock(blockBuilder, columnType, columnIdx);
+            writeDoubleBlock(blockBuilder, columnType, rowIdx, columnIdx);
         }
         else if (javaType.equals(Slice.class)) {
-            writeSliceBlock(blockBuilder, columnType, columnIdx);
+            writeSliceBlock(blockBuilder, columnType, rowIdx, columnIdx);
         }
         else if (javaType.equals(Block.class)) {
-            writeArrayBlock(blockBuilder, columnType, columnIdx);
+            writeArrayBlock(blockBuilder, columnType, rowIdx, columnIdx);
         }
         else {
             throw new TrinoException(
@@ -275,127 +223,117 @@ public class PinotSegmentPageSource
         }
     }
 
-    private void writeBooleanBlock(BlockBuilder blockBuilder, Type columnType, int columnIndex)
+    private void writeBooleanBlock(BlockBuilder blockBuilder, Type columnType, int rowIndex, int columnIndex)
     {
-        for (int i = 0; i < currentDataTable.getDataTable().getNumberOfRows(); i++) {
-            columnType.writeBoolean(blockBuilder, getBoolean(i, columnIndex));
-            completedBytes++;
-        }
+        columnType.writeBoolean(blockBuilder, getBoolean(rowIndex, columnIndex));
+        completedBytes++;
     }
 
-    private void writeLongBlock(BlockBuilder blockBuilder, Type columnType, int columnIndex)
+    private void writeLongBlock(BlockBuilder blockBuilder, Type columnType, int rowIndex, int columnIndex)
     {
-        for (int i = 0; i < currentDataTable.getDataTable().getNumberOfRows(); i++) {
-            columnType.writeLong(blockBuilder, getLong(i, columnIndex));
-            completedBytes += Long.BYTES;
-        }
+        columnType.writeLong(blockBuilder, getLong(rowIndex, columnIndex));
+        completedBytes += Long.BYTES;
     }
 
-    private void writeDoubleBlock(BlockBuilder blockBuilder, Type columnType, int columnIndex)
+    private void writeDoubleBlock(BlockBuilder blockBuilder, Type columnType, int rowIndex, int columnIndex)
     {
-        for (int i = 0; i < currentDataTable.getDataTable().getNumberOfRows(); i++) {
-            columnType.writeDouble(blockBuilder, getDouble(i, columnIndex));
-            completedBytes += Double.BYTES;
-        }
+        columnType.writeDouble(blockBuilder, getDouble(rowIndex, columnIndex));
+        completedBytes += Double.BYTES;
     }
 
-    private void writeSliceBlock(BlockBuilder blockBuilder, Type columnType, int columnIndex)
+    private void writeSliceBlock(BlockBuilder blockBuilder, Type columnType, int rowIndex, int columnIndex)
     {
-        for (int i = 0; i < currentDataTable.getDataTable().getNumberOfRows(); i++) {
-            Slice slice = getSlice(i, columnIndex);
-            columnType.writeSlice(blockBuilder, slice, 0, slice.length());
-            completedBytes += slice.getBytes().length;
-        }
+        Slice slice = getSlice(rowIndex, columnIndex);
+        columnType.writeSlice(blockBuilder, slice, 0, slice.length());
+        completedBytes += slice.getBytes().length;
     }
 
-    private void writeArrayBlock(BlockBuilder blockBuilder, Type columnType, int columnIndex)
+    private void writeArrayBlock(BlockBuilder blockBuilder, Type columnType, int rowIndex, int columnIndex)
     {
-        for (int i = 0; i < currentDataTable.getDataTable().getNumberOfRows(); i++) {
-            Block block = getArrayBlock(i, columnIndex);
-            columnType.writeObject(blockBuilder, block);
-            completedBytes += block.getSizeInBytes();
-        }
+        Block block = getArrayBlock(rowIndex, columnIndex);
+        columnType.writeObject(blockBuilder, block);
+        completedBytes += block.getSizeInBytes();
     }
 
-    Type getType(int columnIndex)
+    private void writeShortTimestampBlock(BlockBuilder blockBuilder, Type columnType, int rowIndex, int columnIndex)
+    {
+        // Trino is using micros since epoch for ShortTimestampType, Pinot uses millis since epoch.
+        columnType.writeLong(blockBuilder, PinotTimestamps.toMicros(getLong(rowIndex, columnIndex)));
+        completedBytes += Long.BYTES;
+    }
+
+    private Type getType(int columnIndex)
     {
         checkArgument(columnIndex < columnHandles.size(), "Invalid field index");
         return columnHandles.get(columnIndex).getDataType();
     }
 
-    boolean getBoolean(int rowIdx, int columnIndex)
+    private boolean getBoolean(int rowIdx, int columnIndex)
     {
-        return currentDataTable.getDataTable().getInt(rowIdx, columnIndex) != 0;
+        return currentDataTable.dataTable().getInt(rowIdx, columnIndex) != 0;
     }
 
-    long getLong(int rowIndex, int columnIndex)
+    private long getLong(int rowIndex, int columnIndex)
     {
-        DataSchema.ColumnDataType dataType = currentDataTable.getDataTable().getDataSchema().getColumnDataType(columnIndex);
+        DataSchema.ColumnDataType dataType = currentDataTable.dataTable().getDataSchema().getColumnDataType(columnIndex);
         // Note columnType in the dataTable could be different from the original columnType in the columnHandle.
         // e.g. when original column type is int/long and aggregation value is requested, the returned dataType from Pinot would be double.
         // So need to cast it back to the original columnType.
-        switch (dataType) {
-            case DOUBLE:
-                return (long) currentDataTable.getDataTable().getDouble(rowIndex, columnIndex);
-            case INT:
-                return currentDataTable.getDataTable().getInt(rowIndex, columnIndex);
-            case FLOAT:
-                return floatToIntBits(currentDataTable.getDataTable().getFloat(rowIndex, columnIndex));
-            case LONG:
-                return currentDataTable.getDataTable().getLong(rowIndex, columnIndex);
-            default:
-                throw new PinotException(PINOT_DECODE_ERROR, Optional.empty(), format("Unexpected pinot type: '%s'", dataType));
-        }
+        return switch (dataType) {
+            case DOUBLE -> (long) currentDataTable.dataTable().getDouble(rowIndex, columnIndex);
+            case INT -> currentDataTable.dataTable().getInt(rowIndex, columnIndex);
+            case FLOAT -> floatToIntBits(currentDataTable.dataTable().getFloat(rowIndex, columnIndex));
+            case LONG, TIMESTAMP -> currentDataTable.dataTable().getLong(rowIndex, columnIndex);
+            default -> throw new PinotException(PINOT_DECODE_ERROR, Optional.empty(), format("Unexpected pinot type: '%s'", dataType));
+        };
     }
 
-    double getDouble(int rowIndex, int columnIndex)
+    private double getDouble(int rowIndex, int columnIndex)
     {
-        DataSchema.ColumnDataType dataType = currentDataTable.getDataTable().getDataSchema().getColumnDataType(columnIndex);
+        DataSchema.ColumnDataType dataType = currentDataTable.dataTable().getDataSchema().getColumnDataType(columnIndex);
         if (dataType.equals(ColumnDataType.FLOAT)) {
-            return currentDataTable.getDataTable().getFloat(rowIndex, columnIndex);
+            return currentDataTable.dataTable().getFloat(rowIndex, columnIndex);
         }
-        else {
-            return currentDataTable.getDataTable().getDouble(rowIndex, columnIndex);
-        }
+        return currentDataTable.dataTable().getDouble(rowIndex, columnIndex);
     }
 
-    Block getArrayBlock(int rowIndex, int columnIndex)
+    private Block getArrayBlock(int rowIndex, int columnIndex)
     {
         Type trinoType = getType(columnIndex);
         Type elementType = trinoType.getTypeParameters().get(0);
-        DataSchema.ColumnDataType columnType = currentDataTable.getDataTable().getDataSchema().getColumnDataType(columnIndex);
+        DataSchema.ColumnDataType columnType = currentDataTable.dataTable().getDataSchema().getColumnDataType(columnIndex);
         BlockBuilder blockBuilder;
         switch (columnType) {
             case INT_ARRAY:
-                int[] intArray = currentDataTable.getDataTable().getIntArray(rowIndex, columnIndex);
+                int[] intArray = currentDataTable.dataTable().getIntArray(rowIndex, columnIndex);
                 blockBuilder = elementType.createBlockBuilder(null, intArray.length);
                 for (int element : intArray) {
-                    blockBuilder.writeInt(element);
+                    INTEGER.writeInt(blockBuilder, element);
                 }
                 break;
             case LONG_ARRAY:
-                long[] longArray = currentDataTable.getDataTable().getLongArray(rowIndex, columnIndex);
+                long[] longArray = currentDataTable.dataTable().getLongArray(rowIndex, columnIndex);
                 blockBuilder = elementType.createBlockBuilder(null, longArray.length);
                 for (long element : longArray) {
-                    blockBuilder.writeLong(element);
+                    BIGINT.writeLong(blockBuilder, element);
                 }
                 break;
             case FLOAT_ARRAY:
-                float[] floatArray = currentDataTable.getDataTable().getFloatArray(rowIndex, columnIndex);
+                float[] floatArray = currentDataTable.dataTable().getFloatArray(rowIndex, columnIndex);
                 blockBuilder = elementType.createBlockBuilder(null, floatArray.length);
                 for (float element : floatArray) {
-                    blockBuilder.writeInt(floatToIntBits(element));
+                    REAL.writeFloat(blockBuilder, element);
                 }
                 break;
             case DOUBLE_ARRAY:
-                double[] doubleArray = currentDataTable.getDataTable().getDoubleArray(rowIndex, columnIndex);
+                double[] doubleArray = currentDataTable.dataTable().getDoubleArray(rowIndex, columnIndex);
                 blockBuilder = elementType.createBlockBuilder(null, doubleArray.length);
                 for (double element : doubleArray) {
                     elementType.writeDouble(blockBuilder, element);
                 }
                 break;
             case STRING_ARRAY:
-                String[] stringArray = currentDataTable.getDataTable().getStringArray(rowIndex, columnIndex);
+                String[] stringArray = currentDataTable.dataTable().getStringArray(rowIndex, columnIndex);
                 blockBuilder = elementType.createBlockBuilder(null, stringArray.length);
                 for (String element : stringArray) {
                     Slice slice = getUtf8Slice(element);
@@ -408,81 +346,44 @@ public class PinotSegmentPageSource
         return blockBuilder.build();
     }
 
-    Slice getSlice(int rowIndex, int columnIndex)
+    private Slice getSlice(int rowIndex, int columnIndex)
     {
         Type trinoType = getType(columnIndex);
+        DataTable dataTable = currentDataTable.dataTable();
+
         if (trinoType instanceof VarcharType) {
-            String field = currentDataTable.getDataTable().getString(rowIndex, columnIndex);
+            String field = dataTable.getString(rowIndex, columnIndex);
             return getUtf8Slice(field);
         }
-        else if (trinoType instanceof VarbinaryType) {
-            return Slices.wrappedBuffer(toBytes(currentDataTable.getDataTable().getString(rowIndex, columnIndex)));
+        if (trinoType instanceof VarbinaryType) {
+            // Pinot 0.11.0 and 0.12.1 default to use V3 data table for server response.
+            // Pinot 1.0.0 and above default to use V4 data table.
+            // Pinot v4 data table uses variable length encoding for bytes instead of hex string representation in v3.
+            // In order to change the data table version, users need to explicitly set:
+            // `pinot.server.instance.currentDataTableVersion=3` in pinot server config.
+            if (dataTable.getVersion() >= 4) {
+                try {
+                    return Slices.wrappedBuffer(dataTable.getBytes(rowIndex, columnIndex).getBytes());
+                }
+                catch (NullPointerException e) {
+                    // Pinot throws NPE when the entry is null.
+                    return Slices.wrappedBuffer();
+                }
+            }
+            return Slices.wrappedBuffer(toBytes(dataTable.getString(rowIndex, columnIndex)));
+        }
+        if (trinoType.getTypeSignature().getBase().equalsIgnoreCase(StandardTypes.JSON)) {
+            String field = dataTable.getString(rowIndex, columnIndex);
+            return jsonParse(getUtf8Slice(field));
         }
         return Slices.EMPTY_SLICE;
     }
 
-    static byte[] toBytes(String stringValue)
-    {
-        try {
-            return Hex.decodeHex(stringValue.toCharArray());
-        }
-        catch (DecoderException e) {
-            throw new IllegalArgumentException("Value: " + stringValue + " is not Hex encoded", e);
-        }
-    }
-
-    Slice getUtf8Slice(String value)
+    private Slice getUtf8Slice(String value)
     {
         if (isNullOrEmpty(value)) {
             return Slices.EMPTY_SLICE;
         }
         return Slices.utf8Slice(value);
-    }
-
-    /**
-     * Get estimated size in bytes for the Pinot column.
-     * Deterministic for numeric fields; use estimate for other types to save calculation.
-     *
-     * @param dataType FieldSpec.dataType for Pinot column.
-     * @return estimated size in bytes.
-     */
-    private int getEstimatedColumnSizeInBytes(DataSchema.ColumnDataType dataType)
-    {
-        if (dataType.isNumber()) {
-            switch (dataType) {
-                case LONG:
-                    return Long.BYTES;
-                case FLOAT:
-                    return Float.BYTES;
-                case DOUBLE:
-                    return Double.BYTES;
-                case INT:
-                default:
-                    return Integer.BYTES;
-            }
-        }
-        return estimatedNonNumericColumnSize;
-    }
-
-    private static class PinotDataTableWithSize
-    {
-        DataTable dataTable;
-        int estimatedSizeInBytes;
-
-        PinotDataTableWithSize(DataTable dataTable, int estimatedSizeInBytes)
-        {
-            this.dataTable = dataTable;
-            this.estimatedSizeInBytes = estimatedSizeInBytes;
-        }
-
-        DataTable getDataTable()
-        {
-            return dataTable;
-        }
-
-        int getEstimatedSizeInBytes()
-        {
-            return estimatedSizeInBytes;
-        }
     }
 }

@@ -13,14 +13,9 @@
  */
 package io.trino.plugin.oracle;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.SqlExecutor;
-import org.testng.annotations.AfterClass;
-
-import static io.trino.plugin.oracle.TestingOracleServer.TEST_PASS;
-import static io.trino.plugin.oracle.TestingOracleServer.TEST_USER;
 
 public class TestOracleTypeMapping
         extends AbstractTestOracleTypeMapping
@@ -31,31 +26,17 @@ public class TestOracleTypeMapping
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        this.oracleServer = new TestingOracleServer();
-        return OracleQueryRunner.createOracleQueryRunner(
-                oracleServer,
-                ImmutableMap.of(),
-                ImmutableMap.<String, String>builder()
-                        .put("connection-url", oracleServer.getJdbcUrl())
-                        .put("connection-user", TEST_USER)
-                        .put("connection-password", TEST_PASS)
-                        .put("allow-drop-table", "true")
+        this.oracleServer = closeAfterClass(new TestingOracleServer());
+        return OracleQueryRunner.builder(oracleServer)
+                .addConnectorProperties(ImmutableMap.<String, String>builder()
                         .put("oracle.connection-pool.enabled", "false")
                         .put("oracle.remarks-reporting.enabled", "false")
-                        .build(),
-                ImmutableList.of());
-    }
-
-    @AfterClass(alwaysRun = true)
-    public final void destroy()
-    {
-        if (oracleServer != null) {
-            oracleServer.close();
-        }
+                        .buildOrThrow())
+                .build();
     }
 
     @Override
-    protected SqlExecutor getOracleSqlExecutor()
+    protected SqlExecutor onRemoteDatabase()
     {
         return sql -> oracleServer.execute(sql);
     }

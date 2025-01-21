@@ -17,9 +17,11 @@ import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
 import io.airlift.bytecode.BytecodeBlock;
 import io.airlift.bytecode.BytecodeNode;
+import io.airlift.bytecode.ClassDefinition;
+import io.airlift.bytecode.Parameter;
 import io.airlift.bytecode.Scope;
 import io.airlift.bytecode.Variable;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.FunctionManager;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.LambdaBytecodeGenerator.CompiledLambda;
 import io.trino.sql.relational.CallExpression;
@@ -31,6 +33,7 @@ import io.trino.sql.relational.RowExpressionVisitor;
 import io.trino.sql.relational.SpecialForm;
 import io.trino.sql.relational.VariableReferenceExpression;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -45,24 +48,30 @@ import static io.trino.sql.gen.LambdaBytecodeGenerator.generateLambda;
 
 public class RowExpressionCompiler
 {
+    private final ClassDefinition classDefinition;
     private final CallSiteBinder callSiteBinder;
     private final CachedInstanceBinder cachedInstanceBinder;
     private final RowExpressionVisitor<BytecodeNode, Scope> fieldReferenceCompiler;
-    private final Metadata metadata;
+    private final FunctionManager functionManager;
     private final Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap;
+    private final List<Parameter> contextArguments;  // arguments that need to be propagates to generated methods
 
-    RowExpressionCompiler(
+    public RowExpressionCompiler(
+            ClassDefinition classDefinition,
             CallSiteBinder callSiteBinder,
             CachedInstanceBinder cachedInstanceBinder,
             RowExpressionVisitor<BytecodeNode, Scope> fieldReferenceCompiler,
-            Metadata metadata,
-            Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap)
+            FunctionManager functionManager,
+            Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap,
+            List<Parameter> contextArguments)
     {
+        this.classDefinition = classDefinition;
         this.callSiteBinder = callSiteBinder;
         this.cachedInstanceBinder = cachedInstanceBinder;
         this.fieldReferenceCompiler = fieldReferenceCompiler;
-        this.metadata = metadata;
+        this.functionManager = functionManager;
         this.compiledLambdaMap = compiledLambdaMap;
+        this.contextArguments = ImmutableList.copyOf(contextArguments);
     }
 
     public BytecodeNode compile(RowExpression rowExpression, Scope scope)
@@ -86,68 +95,41 @@ public class RowExpressionCompiler
                     context.getScope(),
                     callSiteBinder,
                     cachedInstanceBinder,
-                    metadata);
+                    functionManager,
+                    classDefinition,
+                    contextArguments);
 
-            return generatorContext.generateFullCall(call.getResolvedFunction(), call.getArguments());
+            return generatorContext.generateFullCall(call.resolvedFunction(), call.arguments());
         }
 
         @Override
         public BytecodeNode visitSpecialForm(SpecialForm specialForm, Context context)
         {
-            BytecodeGenerator generator;
-            // special-cased in function registry
-            switch (specialForm.getForm()) {
-                // lazy evaluation
-                case IF:
-                    generator = new IfCodeGenerator(specialForm);
-                    break;
-                case NULL_IF:
-                    generator = new NullIfCodeGenerator(specialForm);
-                    break;
-                case SWITCH:
-                    // (SWITCH <expr> (WHEN <expr> <expr>) (WHEN <expr> <expr>) <expr>)
-                    generator = new SwitchCodeGenerator(specialForm);
-                    break;
-                case BETWEEN:
-                    generator = new BetweenCodeGenerator(specialForm);
-                    break;
-                // functions that take null as input
-                case IS_NULL:
-                    generator = new IsNullCodeGenerator(specialForm);
-                    break;
-                case COALESCE:
-                    generator = new CoalesceCodeGenerator(specialForm);
-                    break;
-                // functions that require varargs and/or complex types (e.g., lists)
-                case IN:
-                    generator = new InCodeGenerator(specialForm);
-                    break;
-                // optimized implementations (shortcircuiting behavior)
-                case AND:
-                    generator = new AndCodeGenerator(specialForm);
-                    break;
-                case OR:
-                    generator = new OrCodeGenerator(specialForm);
-                    break;
-                case DEREFERENCE:
-                    generator = new DereferenceCodeGenerator(specialForm);
-                    break;
-                case ROW_CONSTRUCTOR:
-                    generator = new RowConstructorCodeGenerator(specialForm);
-                    break;
-                case BIND:
-                    generator = new BindCodeGenerator(specialForm, compiledLambdaMap, context.getLambdaInterface().get());
-                    break;
-                default:
-                    throw new IllegalStateException("Cannot compile special form: " + specialForm.getForm());
-            }
+            BytecodeGenerator generator = switch (specialForm.form()) {
+                case IF -> new IfCodeGenerator(specialForm);
+                case NULL_IF -> new NullIfCodeGenerator(specialForm);
+                case SWITCH -> new SwitchCodeGenerator(specialForm);
+                case BETWEEN -> new BetweenCodeGenerator(specialForm);
+                case IS_NULL -> new IsNullCodeGenerator(specialForm);
+                case COALESCE -> new CoalesceCodeGenerator(specialForm);
+                case IN -> new InCodeGenerator(specialForm);
+                case AND -> new AndCodeGenerator(specialForm);
+                case OR -> new OrCodeGenerator(specialForm);
+                case DEREFERENCE -> new DereferenceCodeGenerator(specialForm);
+                case ROW_CONSTRUCTOR -> new RowConstructorCodeGenerator(specialForm);
+                case ARRAY_CONSTRUCTOR -> new ArrayConstructorCodeGenerator(specialForm);
+                case BIND -> new BindCodeGenerator(specialForm, compiledLambdaMap, context.getLambdaInterface().get());
+                default -> throw new IllegalStateException("Cannot compile special form: " + specialForm.form());
+            };
 
             BytecodeGeneratorContext generatorContext = new BytecodeGeneratorContext(
                     RowExpressionCompiler.this,
                     context.getScope(),
                     callSiteBinder,
                     cachedInstanceBinder,
-                    metadata);
+                    functionManager,
+                    classDefinition,
+                    contextArguments);
 
             return generator.generateExpression(generatorContext);
         }
@@ -155,8 +137,8 @@ public class RowExpressionCompiler
         @Override
         public BytecodeNode visitConstant(ConstantExpression constant, Context context)
         {
-            Object value = constant.getValue();
-            Class<?> javaType = constant.getType().getJavaType();
+            Object value = constant.value();
+            Class<?> javaType = constant.type().getJavaType();
 
             BytecodeBlock block = new BytecodeBlock();
             if (value == null) {
@@ -166,7 +148,7 @@ public class RowExpressionCompiler
             }
 
             // use LDC for primitives (boolean, short, int, long, float, double)
-            block.comment("constant " + constant.getType().getTypeSignature());
+            block.comment("constant " + constant.type().getTypeSignature());
             if (javaType == boolean.class) {
                 return block.append(loadBoolean((Boolean) value));
             }
@@ -181,10 +163,10 @@ public class RowExpressionCompiler
             }
 
             // bind constant object directly into the call-site using invoke dynamic
-            Binding binding = callSiteBinder.bind(value, constant.getType().getJavaType());
+            Binding binding = callSiteBinder.bind(value, constant.type().getJavaType());
 
             return new BytecodeBlock()
-                    .setDescription("constant " + constant.getType())
+                    .setDescription("constant " + constant.type())
                     .comment(constant.toString())
                     .append(loadConstant(binding));
         }
@@ -209,7 +191,9 @@ public class RowExpressionCompiler
                     context.getScope(),
                     callSiteBinder,
                     cachedInstanceBinder,
-                    metadata);
+                    functionManager,
+                    classDefinition,
+                    contextArguments);
 
             return generateLambda(
                     generatorContext,
@@ -221,8 +205,8 @@ public class RowExpressionCompiler
         @Override
         public BytecodeNode visitVariableReference(VariableReferenceExpression reference, Context context)
         {
-            if (reference.getName().startsWith(TEMP_PREFIX)) {
-                return context.getScope().getTempVariable(reference.getName().substring(TEMP_PREFIX.length()));
+            if (reference.name().startsWith(TEMP_PREFIX)) {
+                return context.getScope().getTempVariable(reference.name().substring(TEMP_PREFIX.length()));
             }
             return fieldReferenceCompiler.visitVariableReference(reference, context.getScope());
         }

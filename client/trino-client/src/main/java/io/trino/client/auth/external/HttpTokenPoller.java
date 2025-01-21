@@ -15,11 +15,11 @@ package io.trino.client.auth.external;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import dev.failsafe.Failsafe;
+import dev.failsafe.FailsafeException;
+import dev.failsafe.RetryPolicy;
 import io.trino.client.JsonCodec;
 import io.trino.client.JsonResponse;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.FailsafeException;
-import net.jodah.failsafe.RetryPolicy;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -29,16 +29,18 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.time.Duration;
+import java.util.OptionalLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.net.HttpHeaders.USER_AGENT;
+import static io.trino.client.HttpStatusCodes.shouldRetry;
 import static io.trino.client.JsonCodec.jsonCodec;
 import static io.trino.client.JsonResponse.execute;
 import static java.lang.String.format;
+import static java.net.HttpURLConnection.HTTP_INTERNAL_ERROR;
 import static java.net.HttpURLConnection.HTTP_OK;
-import static java.net.HttpURLConnection.HTTP_UNAVAILABLE;
 import static java.time.temporal.ChronoUnit.MILLIS;
 import static java.util.Objects.requireNonNull;
 
@@ -73,11 +75,12 @@ public class HttpTokenPoller
     public TokenPollResult pollForToken(URI tokenUri, Duration timeout)
     {
         try {
-            return Failsafe.with(new RetryPolicy<TokenPollResult>()
+            return Failsafe.with(RetryPolicy.builder()
                     .withMaxAttempts(-1)
                     .withMaxDuration(timeout)
                     .withBackoff(100, 500, MILLIS)
-                    .handle(IOException.class))
+                    .handle(IOException.class)
+                    .build())
                     .get(() -> executePoll(prepareRequestBuilder(tokenUri).build()));
         }
         catch (FailsafeException e) {
@@ -92,11 +95,12 @@ public class HttpTokenPoller
     public void tokenReceived(URI tokenUri)
     {
         try {
-            Failsafe.with(new RetryPolicy<Integer>()
+            Failsafe.with(RetryPolicy.<Integer>builder()
                     .withMaxAttempts(-1)
                     .withMaxDuration(Duration.ofSeconds(4))
                     .withBackoff(100, 500, MILLIS)
-                    .handleResultIf(code -> code != HTTP_OK))
+                    .handleResultIf(code -> code >= HTTP_INTERNAL_ERROR)
+                    .build())
                     .get(() -> {
                         Request request = prepareRequestBuilder(tokenUri)
                                 .delete()
@@ -136,9 +140,9 @@ public class HttpTokenPoller
             return response.getValue().toResult();
         }
 
-        String message = format("Request to %s failed: %s [Error: %s]", request.url(), response, response.getResponseBody());
+        String message = format("Request to %s failed: %s [Error: %s]", request.url(), response, response.getResponseBody().orElse("<Response Too Large>"));
 
-        if (response.getStatusCode() == HTTP_UNAVAILABLE) {
+        if (shouldRetry(response.getStatusCode())) {
             throw new IOException(message);
         }
 
@@ -149,7 +153,7 @@ public class HttpTokenPoller
             throws IOException
     {
         try {
-            return execute(TOKEN_POLL_CODEC, client.get(), request);
+            return execute(TOKEN_POLL_CODEC, client.get(), request, OptionalLong.empty());
         }
         catch (UncheckedIOException e) {
             throw e.getCause();

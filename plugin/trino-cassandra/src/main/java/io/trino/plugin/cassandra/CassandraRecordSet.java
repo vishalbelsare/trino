@@ -13,7 +13,6 @@
  */
 package io.trino.plugin.cassandra;
 
-import com.google.common.collect.ImmutableList;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.RecordSet;
 import io.trino.spi.type.Type;
@@ -21,24 +20,28 @@ import io.trino.spi.type.Type;
 import java.util.List;
 import java.util.function.Function;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 
 public class CassandraRecordSet
         implements RecordSet
 {
     private final CassandraSession cassandraSession;
+    private final CassandraTypeManager cassandraTypeManager;
     private final String cql;
+    private final List<String> cassandraNames;
     private final List<CassandraType> cassandraTypes;
     private final List<Type> columnTypes;
 
-    public CassandraRecordSet(CassandraSession cassandraSession, String cql, List<CassandraColumnHandle> cassandraColumns)
+    public CassandraRecordSet(CassandraSession cassandraSession, CassandraTypeManager cassandraTypeManager, String cql, List<CassandraColumnHandle> cassandraColumns)
     {
         this.cassandraSession = requireNonNull(cassandraSession, "cassandraSession is null");
+        this.cassandraTypeManager = requireNonNull(cassandraTypeManager, "cassandraTypeManager is null");
         this.cql = requireNonNull(cql, "cql is null");
 
         requireNonNull(cassandraColumns, "cassandraColumns is null");
-        this.cassandraTypes = transformList(cassandraColumns, CassandraColumnHandle::getCassandraType);
+        this.cassandraNames = transformList(cassandraColumns, CassandraColumnHandle::name);
+        this.cassandraTypes = transformList(cassandraColumns, CassandraColumnHandle::cassandraType);
         this.columnTypes = transformList(cassandraColumns, CassandraColumnHandle::getType);
     }
 
@@ -51,11 +54,11 @@ public class CassandraRecordSet
     @Override
     public RecordCursor cursor()
     {
-        return new CassandraRecordCursor(cassandraSession, cassandraTypes, cql);
+        return new CassandraRecordCursor(cassandraSession, cassandraTypeManager, cassandraNames, cassandraTypes, cql);
     }
 
     private static <T, R> List<R> transformList(List<T> list, Function<T, R> function)
     {
-        return ImmutableList.copyOf(list.stream().map(function).collect(toList()));
+        return list.stream().map(function).collect(toImmutableList());
     }
 }

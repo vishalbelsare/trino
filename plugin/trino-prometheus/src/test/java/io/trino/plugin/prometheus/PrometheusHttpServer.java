@@ -13,28 +13,23 @@
  */
 package io.trino.plugin.prometheus;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Resources;
 import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Module;
-import com.google.inject.TypeLiteral;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
-import io.airlift.http.server.TheServlet;
 import io.airlift.http.server.testing.TestingHttpServer;
 import io.airlift.http.server.testing.TestingHttpServerModule;
 import io.airlift.node.testing.TestingNodeModule;
-
-import javax.servlet.Servlet;
-import javax.servlet.http.HttpServlet;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.Servlet;
+import jakarta.servlet.http.HttpServlet;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 import java.io.IOException;
 import java.net.URI;
 import java.net.URL;
-import java.util.Map;
 
 import static io.trino.plugin.prometheus.PrometheusClient.METRICS_ENDPOINT;
 
@@ -74,8 +69,7 @@ public class PrometheusHttpServer
         @Override
         public void configure(Binder binder)
         {
-            binder.bind(new TypeLiteral<Map<String, String>>() {}).annotatedWith(TheServlet.class).toInstance(ImmutableMap.of());
-            binder.bind(Servlet.class).annotatedWith(TheServlet.class).toInstance(new PrometheusHttpServlet());
+            binder.bind(Servlet.class).toInstance(new PrometheusHttpServlet());
         }
     }
 

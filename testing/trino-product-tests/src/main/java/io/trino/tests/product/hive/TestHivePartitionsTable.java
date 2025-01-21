@@ -14,6 +14,7 @@
 package io.trino.tests.product.hive;
 
 import com.google.common.math.IntMath;
+import com.google.inject.Inject;
 import io.trino.tempto.ProductTest;
 import io.trino.tempto.Requirement;
 import io.trino.tempto.RequirementsProvider;
@@ -27,8 +28,6 @@ import io.trino.tempto.query.QueryResult;
 import io.trino.testng.services.Flaky;
 import org.testng.annotations.Test;
 
-import javax.inject.Inject;
-
 import java.math.RoundingMode;
 import java.util.Optional;
 import java.util.stream.IntStream;
@@ -36,21 +35,19 @@ import java.util.stream.IntStream;
 import static io.trino.tempto.Requirements.compose;
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
 import static io.trino.tempto.assertions.QueryAssert.assertQueryFailure;
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
 import static io.trino.tempto.fulfillment.table.TableRequirements.immutableTable;
 import static io.trino.tempto.fulfillment.table.TableRequirements.mutableTable;
 import static io.trino.tempto.fulfillment.table.hive.InlineDataSource.createResourceDataSource;
 import static io.trino.tempto.fulfillment.table.hive.InlineDataSource.createStringDataSource;
 import static io.trino.tempto.fulfillment.table.hive.tpch.TpchTableDefinitions.NATION;
-import static io.trino.tempto.query.QueryExecutor.query;
-import static io.trino.tests.product.TestGroups.HIVE_PARTITIONING;
-import static io.trino.tests.product.hive.HiveProductTest.ERROR_COMMITTING_WRITE_TO_HIVE_ISSUE;
-import static io.trino.tests.product.hive.HiveProductTest.ERROR_COMMITTING_WRITE_TO_HIVE_MATCH;
+import static io.trino.tests.product.utils.HadoopTestUtils.RETRYABLE_FAILURES_ISSUES;
+import static io.trino.tests.product.utils.HadoopTestUtils.RETRYABLE_FAILURES_MATCH;
+import static io.trino.tests.product.utils.QueryExecutors.onTrino;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
 
 public class TestHivePartitionsTable
         extends ProductTest
@@ -102,8 +99,8 @@ public class TestHivePartitionsTable
                 .build();
     }
 
-    @Test(groups = HIVE_PARTITIONING)
-    @Flaky(issue = ERROR_COMMITTING_WRITE_TO_HIVE_ISSUE, match = ERROR_COMMITTING_WRITE_TO_HIVE_MATCH)
+    @Test
+    @Flaky(issue = RETRYABLE_FAILURES_ISSUES, match = RETRYABLE_FAILURES_MATCH)
     public void testShowPartitionsFromHiveTable()
     {
         String tableNameInDatabase = tablesState.get(PARTITIONED_TABLE).getNameInDatabase();
@@ -111,30 +108,30 @@ public class TestHivePartitionsTable
 
         QueryResult partitionListResult;
 
-        partitionListResult = query("SELECT * FROM " + partitionsTable);
+        partitionListResult = onTrino().executeQuery("SELECT * FROM " + partitionsTable);
         assertThat(partitionListResult).containsExactlyInOrder(row(1), row(2));
         assertColumnNames(partitionListResult, "part_col");
 
-        partitionListResult = query(format("SELECT * FROM %s WHERE part_col = 1", partitionsTable));
+        partitionListResult = onTrino().executeQuery(format("SELECT * FROM %s WHERE part_col = 1", partitionsTable));
         assertThat(partitionListResult).containsExactlyInOrder(row(1));
         assertColumnNames(partitionListResult, "part_col");
 
-        assertQueryFailure(() -> query(format("SELECT * FROM %s WHERE no_such_column = 1", partitionsTable)))
+        assertQueryFailure(() -> onTrino().executeQuery(format("SELECT * FROM %s WHERE no_such_column = 1", partitionsTable)))
                 .hasMessageContaining("Column 'no_such_column' cannot be resolved");
-        assertQueryFailure(() -> query(format("SELECT * FROM %s WHERE col = 1", partitionsTable)))
+        assertQueryFailure(() -> onTrino().executeQuery(format("SELECT * FROM %s WHERE col = 1", partitionsTable)))
                 .hasMessageContaining("Column 'col' cannot be resolved");
     }
 
-    @Test(groups = HIVE_PARTITIONING)
-    @Flaky(issue = ERROR_COMMITTING_WRITE_TO_HIVE_ISSUE, match = ERROR_COMMITTING_WRITE_TO_HIVE_MATCH)
+    @Test
+    @Flaky(issue = RETRYABLE_FAILURES_ISSUES, match = RETRYABLE_FAILURES_MATCH)
     public void testShowPartitionsFromUnpartitionedTable()
     {
-        assertQueryFailure(() -> query("SELECT * FROM \"nation$partitions\""))
-                .hasMessageMatching(".*Table 'hive.default.nation\\$partitions' does not exist");
+        assertQueryFailure(() -> onTrino().executeQuery("SELECT * FROM \"nation$partitions\""))
+                .hasMessageMatching(".*Table 'hive.default.\"nation\\$partitions\"' does not exist");
     }
 
-    @Test(groups = HIVE_PARTITIONING)
-    @Flaky(issue = ERROR_COMMITTING_WRITE_TO_HIVE_ISSUE, match = ERROR_COMMITTING_WRITE_TO_HIVE_MATCH)
+    @Test
+    @Flaky(issue = RETRYABLE_FAILURES_ISSUES, match = RETRYABLE_FAILURES_MATCH)
     public void testShowPartitionsFromHiveTableWithTooManyPartitions()
     {
         String tableName = tablesState.get(PARTITIONED_TABLE_WITH_VARIABLE_PARTITIONS).getNameInDatabase();
@@ -142,22 +139,22 @@ public class TestHivePartitionsTable
         createPartitions(tableName, TOO_MANY_PARTITIONS);
 
         // Verify we created enough partitions for the test to be meaningful
-        assertThatThrownBy(() -> query("SELECT * FROM " + tableName))
+        assertThatThrownBy(() -> onTrino().executeQuery("SELECT * FROM " + tableName))
                 .hasMessageMatching(".*: Query over table '\\S+' can potentially read more than \\d+ partitions");
 
         QueryResult partitionListResult;
 
-        partitionListResult = query(format("SELECT * FROM %s WHERE part_col < 7", partitionsTable));
+        partitionListResult = onTrino().executeQuery(format("SELECT * FROM %s WHERE part_col < 7", partitionsTable));
         assertThat(partitionListResult).containsExactlyInOrder(row(0), row(1), row(2), row(3), row(4), row(5), row(6));
         assertColumnNames(partitionListResult, "part_col");
 
-        partitionListResult = query(format("SELECT a.part_col FROM (SELECT * FROM %s WHERE part_col = 1) a, (SELECT * FROM %s WHERE part_col = 1) b WHERE a.col = b.col", tableName, tableName));
+        partitionListResult = onTrino().executeQuery(format("SELECT a.part_col FROM (SELECT * FROM %s WHERE part_col = 1) a, (SELECT * FROM %s WHERE part_col = 1) b WHERE a.col = b.col", tableName, tableName));
         assertThat(partitionListResult).containsExactlyInOrder(row(1));
 
-        partitionListResult = query(format("SELECT * FROM %s WHERE part_col < -10", partitionsTable));
+        partitionListResult = onTrino().executeQuery(format("SELECT * FROM %s WHERE part_col < -10", partitionsTable));
         assertThat(partitionListResult).hasNoRows();
 
-        partitionListResult = query(format("SELECT * FROM %s ORDER BY part_col LIMIT 7", partitionsTable));
+        partitionListResult = onTrino().executeQuery(format("SELECT * FROM %s ORDER BY part_col LIMIT 7", partitionsTable));
         assertThat(partitionListResult).containsExactlyInOrder(row(0), row(1), row(2), row(3), row(4), row(5), row(6));
     }
 
@@ -175,7 +172,7 @@ public class TestHivePartitionsTable
                 .forEach(batch -> {
                     int rangeStart = batch * maxPartitionsAtOnce;
                     int rangeEndInclusive = min((batch + 1) * maxPartitionsAtOnce, partitionsToCreate) - 1;
-                    query(format(
+                    onTrino().executeQuery(format(
                             "INSERT INTO %s (part_col, col) " +
                                     "SELECT CAST(id AS integer), 42 FROM UNNEST (sequence(%s, %s)) AS u(id)",
                             tableName,
@@ -187,8 +184,10 @@ public class TestHivePartitionsTable
     private static void assertColumnNames(QueryResult queryResult, String... columnNames)
     {
         for (int i = 0; i < columnNames.length; i++) {
-            assertEquals(queryResult.tryFindColumnIndex(columnNames[i]), Optional.of(i + 1), "Index of column " + columnNames[i]);
+            assertThat(queryResult.tryFindColumnIndex(columnNames[i]))
+                    .as("Index of column " + columnNames[i])
+                    .isEqualTo(Optional.of(i + 1));
         }
-        assertEquals(queryResult.getColumnsCount(), columnNames.length);
+        assertThat(queryResult.getColumnsCount()).isEqualTo(columnNames.length);
     }
 }

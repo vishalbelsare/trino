@@ -16,29 +16,38 @@ package io.trino.plugin.phoenix5;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.SizeOf;
 import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.spi.HostAddress;
 import org.apache.phoenix.mapreduce.PhoenixInputSplit;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 public class PhoenixSplit
         extends JdbcSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(PhoenixSplit.class);
+
     private final List<HostAddress> addresses;
-    private final WrappedPhoenixInputSplit phoenixInputSplit;
+    private final SerializedPhoenixInputSplit serializedPhoenixInputSplit;
 
     @JsonCreator
     public PhoenixSplit(
             @JsonProperty("addresses") List<HostAddress> addresses,
-            @JsonProperty("phoenixInputSplit") WrappedPhoenixInputSplit wrappedPhoenixInputSplit)
+            @JsonProperty("serializedPhoenixInputSplit") SerializedPhoenixInputSplit serializedPhoenixInputSplit)
     {
         super(Optional.empty());
         this.addresses = requireNonNull(addresses, "addresses is null");
-        this.phoenixInputSplit = requireNonNull(wrappedPhoenixInputSplit, "wrappedPhoenixInputSplit is null");
+        this.serializedPhoenixInputSplit = requireNonNull(serializedPhoenixInputSplit, "serializedPhoenixInputSplit is null");
     }
 
     @JsonProperty
@@ -48,15 +57,30 @@ public class PhoenixSplit
         return addresses;
     }
 
-    @JsonProperty("phoenixInputSplit")
-    public WrappedPhoenixInputSplit getWrappedPhoenixInputSplit()
+    @JsonProperty
+    public SerializedPhoenixInputSplit getSerializedPhoenixInputSplit()
     {
-        return phoenixInputSplit;
+        return serializedPhoenixInputSplit;
     }
 
     @JsonIgnore
     public PhoenixInputSplit getPhoenixInputSplit()
     {
-        return phoenixInputSplit.getPhoenixInputSplit();
+        return serializedPhoenixInputSplit.deserialize();
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + sizeOf(getAdditionalPredicate(), SizeOf::estimatedSizeOf)
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes)
+                + serializedPhoenixInputSplit.getRetainedSizeInBytes();
+    }
+
+    @Override
+    public Map<String, String> getSplitInfo()
+    {
+        return ImmutableMap.of("addresses", addresses.stream().map(HostAddress::toString).collect(joining(",")));
     }
 }

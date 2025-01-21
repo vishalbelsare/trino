@@ -13,15 +13,14 @@
  */
 package io.trino.sql.planner.planprinter;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
-import io.trino.cost.PlanCostEstimate;
 import io.trino.cost.PlanNodeStatsAndCostSummary;
-import io.trino.cost.PlanNodeStatsEstimate;
+import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.spi.metrics.Metric;
 import io.trino.spi.metrics.Metrics;
-import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.planprinter.NodeRepresentation.TypedSymbol;
+import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.Iterator;
 import java.util.List;
@@ -33,8 +32,9 @@ import java.util.TreeMap;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.server.protocol.spooling.SpooledBlock.SPOOLING_METADATA_COLUMN_NAME;
 import static java.lang.Double.NEGATIVE_INFINITY;
 import static java.lang.Double.POSITIVE_INFINITY;
 import static java.lang.Double.isFinite;
@@ -62,18 +62,22 @@ public class TextRenderer
         StringBuilder output = new StringBuilder();
         NodeRepresentation root = plan.getRoot();
         boolean hasChildren = hasChildren(root, plan);
-        return writeTextOutput(output, plan, Indent.newInstance(level, hasChildren), root);
+        return writeTextOutput(output, plan, Indent.newInstance(level, hasChildren), root, false);
     }
 
-    private String writeTextOutput(StringBuilder output, PlanRepresentation plan, Indent indent, NodeRepresentation node)
+    private String writeTextOutput(StringBuilder output, PlanRepresentation plan, Indent indent, NodeRepresentation node, boolean isAdaptivePlanInitialNode)
     {
         output.append(indent.nodeIndent())
                 .append(node.getName())
-                .append(node.getIdentifier())
+                .append(node.getDescriptor().entrySet().stream()
+                        .filter(entry -> !(entry.getValue().isEmpty() || entry.getValue().equals("[]")))
+                        .map(entry -> entry.getKey() + " = " + entry.getValue())
+                        .collect(joining(", ", "[", "]")))
                 .append("\n");
 
         String columns = node.getOutputs().stream()
-                .map(s -> s.getSymbol() + ":" + s.getType())
+                .filter(s -> !s.name().equals(SPOOLING_METADATA_COLUMN_NAME))
+                .map(s -> s.name() + ":" + s.type())
                 .collect(joining(", "));
 
         output.append(indentMultilineString("Layout: [" + columns + "]\n", indent.detailIndent()));
@@ -83,9 +87,9 @@ public class TextRenderer
             output.append(indentMultilineString(reorderJoinStatsAndCost, indent.detailIndent()));
         }
 
-        String estimates = printEstimates(plan, node);
+        List<PlanNodeStatsAndCostSummary> estimates = node.getEstimates();
         if (!estimates.isEmpty()) {
-            output.append(indentMultilineString(estimates, indent.detailIndent()));
+            output.append(indentMultilineString(printEstimates(estimates), indent.detailIndent()));
         }
 
         String stats = printStats(plan, node);
@@ -94,31 +98,43 @@ public class TextRenderer
         }
 
         if (!node.getDetails().isEmpty()) {
-            String details = indentMultilineString(node.getDetails(), indent.detailIndent());
+            String details = indentMultilineString(Joiner.on("\n").join(node.getDetails()), indent.detailIndent());
             output.append(details);
             if (!details.endsWith("\n")) {
                 output.append('\n');
             }
         }
 
-        List<NodeRepresentation> children = node.getChildren().stream()
-                .map(plan::getNode)
+        // Print the initial children first, then the children
+        printChildren(output, plan, node.getInitialChildren(), indent, true);
+        printChildren(output, plan, node.getChildren(), indent, isAdaptivePlanInitialNode);
+
+        return output.toString();
+    }
+
+    private void printChildren(
+            StringBuilder output,
+            PlanRepresentation plan,
+            List<PlanNodeId> childrenIds,
+            Indent indent,
+            boolean isAdaptivePlanInitialNode)
+    {
+        List<NodeRepresentation> children = childrenIds.stream()
+                .map(isAdaptivePlanInitialNode ? plan::getInitialNode : plan::getNode)
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .collect(toList());
 
         for (Iterator<NodeRepresentation> iterator = children.iterator(); iterator.hasNext(); ) {
             NodeRepresentation child = iterator.next();
-            writeTextOutput(output, plan, indent.forChild(!iterator.hasNext(), hasChildren(child, plan)), child);
+            writeTextOutput(output, plan, indent.forChild(!iterator.hasNext(), hasChildren(child, plan)), child, isAdaptivePlanInitialNode);
         }
-
-        return output.toString();
     }
 
     private String printStats(PlanRepresentation plan, NodeRepresentation node)
     {
         StringBuilder output = new StringBuilder();
-        if (node.getStats().isEmpty() || !(plan.getTotalCpuTime().isPresent() && plan.getTotalScheduledTime().isPresent())) {
+        if (node.getStats().isEmpty() || !(plan.getTotalCpuTime().isPresent() && plan.getTotalScheduledTime().isPresent() && plan.getTotalBlockedTime().isPresent())) {
             return "";
         }
 
@@ -126,12 +142,15 @@ public class TextRenderer
 
         double scheduledTimeFraction = 100.0d * nodeStats.getPlanNodeScheduledTime().toMillis() / plan.getTotalScheduledTime().get().toMillis();
         double cpuTimeFraction = 100.0d * nodeStats.getPlanNodeCpuTime().toMillis() / plan.getTotalCpuTime().get().toMillis();
+        double blockedTimeFraction = 100.0d * nodeStats.getPlanNodeBlockedTime().toMillis() / plan.getTotalBlockedTime().get().toMillis();
 
-        output.append(format("CPU: %s (%s%%), Scheduled: %s (%s%%)",
+        output.append(format("CPU: %s (%s%%), Scheduled: %s (%s%%), Blocked: %s (%s%%)",
                 nodeStats.getPlanNodeCpuTime().convertToMostSuccinctTimeUnit(),
                 formatDouble(cpuTimeFraction),
                 nodeStats.getPlanNodeScheduledTime().convertToMostSuccinctTimeUnit(),
-                formatDouble(scheduledTimeFraction)));
+                formatDouble(scheduledTimeFraction),
+                nodeStats.getPlanNodeBlockedTime().convertToMostSuccinctTimeUnit(),
+                formatDouble(blockedTimeFraction)));
 
         output.append(format(", Output: %s (%s)", formatPositions(nodeStats.getPlanNodeOutputPositions()), nodeStats.getPlanNodeOutputDataSize().toString()));
         if (nodeStats.getPlanNodeSpilledDataSize().toBytes() > 0) {
@@ -142,7 +161,6 @@ public class TextRenderer
         printMetrics(output, "connector metrics:", BasicOperatorStats::getConnectorMetrics, nodeStats);
         printMetrics(output, "metrics:", BasicOperatorStats::getMetrics, nodeStats);
         printDistributions(output, nodeStats);
-        printCollisions(output, nodeStats);
 
         if (nodeStats instanceof WindowPlanNodeStats) {
             printWindowOperatorStats(output, ((WindowPlanNodeStats) nodeStats).getWindowOperatorStats());
@@ -160,13 +178,25 @@ public class TextRenderer
         Map<String, String> translatedOperatorTypes = translateOperatorTypes(stats.getOperatorTypes());
         for (String operator : translatedOperatorTypes.keySet()) {
             String translatedOperatorType = translatedOperatorTypes.get(operator);
-            Metrics metrics = metricsGetter.apply(stats.getOperatorStats().get(operator));
-            if (metrics.getMetrics().isEmpty()) {
+            Map<String, Metric<?>> metrics = metricsGetter.apply(stats.getOperatorStats().get(operator)).getMetrics();
+
+            // filter out empty distributions
+            metrics = metrics.entrySet().stream()
+                    .filter(entry -> {
+                        if (!(entry.getValue() instanceof TDigestHistogram histogram)) {
+                            return true;
+                        }
+
+                        return histogram.getMin() != 0. || histogram.getMax() != 0.;
+                    })
+                    .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
+
+            if (metrics.isEmpty()) {
                 continue;
             }
 
             output.append(translatedOperatorType + label).append("\n");
-            Map<String, Metric<?>> sortedMap = new TreeMap<>(metrics.getMetrics());
+            Map<String, Metric<?>> sortedMap = new TreeMap<>(metrics);
             sortedMap.forEach((name, metric) -> output.append(format("  '%s' = %s\n", name, metric)));
         }
     }
@@ -187,32 +217,6 @@ public class TextRenderer
                     "Input avg.: %s rows, Input std.dev.: %s%%\n",
                     formatDouble(inputAverage),
                     formatDouble(100.0d * inputStdDevs.get(operator) / inputAverage)));
-        }
-    }
-
-    private void printCollisions(StringBuilder output, PlanNodeStats stats)
-    {
-        if (!(stats instanceof HashCollisionPlanNodeStats)) {
-            return;
-        }
-
-        HashCollisionPlanNodeStats collisionStats = (HashCollisionPlanNodeStats) stats;
-        Map<String, Double> hashCollisionsAverages = collisionStats.getOperatorHashCollisionsAverages();
-        verify(hashCollisionsAverages.keySet().size() == 1, "Multiple hash collision operator stats %s", hashCollisionsAverages);
-
-        double hashCollisionsAverage = getOnlyElement(hashCollisionsAverages.values());
-        double hashCollisionsStdDev = getOnlyElement(collisionStats.getOperatorHashCollisionsStdDevs().values());
-        double expectedHashCollisionsAverage = getOnlyElement(collisionStats.getOperatorExpectedCollisionsAverages().values());
-        double hashCollisionsStdDevRatio = hashCollisionsStdDev / hashCollisionsAverage;
-
-        if (expectedHashCollisionsAverage != 0.0d) {
-            double hashCollisionsRatio = hashCollisionsAverage / expectedHashCollisionsAverage;
-            output.append(format(Locale.US, "Collisions avg.: %s (%s%% est.), Collisions std.dev.: %s%%\n",
-                    formatDouble(hashCollisionsAverage), formatDouble(hashCollisionsRatio * 100.0d), formatDouble(hashCollisionsStdDevRatio * 100.0d)));
-        }
-        else {
-            output.append(format(Locale.US, "Collisions avg.: %s, Collisions std.dev.: %s%%\n",
-                    formatDouble(hashCollisionsAverage), formatDouble(hashCollisionsStdDevRatio * 100.0d)));
         }
     }
 
@@ -244,13 +248,6 @@ public class TextRenderer
                     "HashBuilderOperator", "Right (build) ");
         }
 
-        if (operators.contains("LookupJoinOperator") && operators.contains("DynamicFilterSourceOperator")) {
-            // join plan node
-            return ImmutableMap.of(
-                    "LookupJoinOperator", "Left (probe) ",
-                    "DynamicFilterSourceOperator", "Right (build) ");
-        }
-
         return ImmutableMap.of();
     }
 
@@ -262,6 +259,13 @@ public class TextRenderer
         return "";
     }
 
+    private String printEstimates(List<PlanNodeStatsAndCostSummary> estimates)
+    {
+        return estimates.stream()
+                .map(this::formatPlanNodeStatsAndCostSummary)
+                .collect(joining("/", "Estimates: ", "\n"));
+    }
+
     private String formatPlanNodeStatsAndCostSummary(PlanNodeStatsAndCostSummary stats)
     {
         requireNonNull(stats, "stats is null");
@@ -271,41 +275,6 @@ public class TextRenderer
                 formatAsCpuCost(stats.getCpuCost()),
                 formatAsDataSize(stats.getMemoryCost()),
                 formatAsDataSize(stats.getNetworkCost()));
-    }
-
-    private String printEstimates(PlanRepresentation plan, NodeRepresentation node)
-    {
-        if (node.getEstimatedStats().stream().allMatch(PlanNodeStatsEstimate::isOutputRowCountUnknown) &&
-                node.getEstimatedCost().stream().allMatch(c -> c.equals(PlanCostEstimate.unknown()))) {
-            return "";
-        }
-
-        StringBuilder output = new StringBuilder();
-        int estimateCount = node.getEstimatedStats().size();
-
-        output.append("Estimates: ");
-        for (int i = 0; i < estimateCount; i++) {
-            PlanNodeStatsEstimate stats = node.getEstimatedStats().get(i);
-            PlanCostEstimate cost = node.getEstimatedCost().get(i);
-
-            List<Symbol> outputSymbols = node.getOutputs().stream()
-                    .map(TypedSymbol::getSymbol)
-                    .collect(toList());
-
-            output.append(format("{rows: %s (%s), cpu: %s, memory: %s, network: %s}",
-                    formatAsLong(stats.getOutputRowCount()),
-                    formatAsDataSize(stats.getOutputSizeInBytes(outputSymbols, plan.getTypes())),
-                    formatAsCpuCost(cost.getCpuCost()),
-                    formatAsDataSize(cost.getMaxMemory()),
-                    formatAsDataSize(cost.getNetworkCost())));
-
-            if (i < estimateCount - 1) {
-                output.append("/");
-            }
-        }
-
-        output.append("\n");
-        return output.toString();
     }
 
     private static boolean hasChildren(NodeRepresentation node, PlanRepresentation plan)

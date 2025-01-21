@@ -13,23 +13,21 @@
  */
 package io.trino.server.remotetask;
 
-import com.google.common.collect.ObjectArrays;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.errorprone.annotations.FormatMethod;
-import io.airlift.event.client.ServiceUnavailableException;
+import com.google.errorprone.annotations.ThreadSafe;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.execution.TaskId;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoTransportException;
-
-import javax.annotation.concurrent.ThreadSafe;
+import jakarta.ws.rs.ServiceUnavailableException;
 
 import java.io.EOFException;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.nio.channels.ClosedChannelException;
 import java.util.Queue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -139,15 +137,14 @@ class RequestErrorTracker
         }
     }
 
-    @FormatMethod
     @SuppressWarnings("FormatStringAnnotation") // we manipulate the format string and there's no way to make Error Prone accept the result
-    static void logError(Throwable t, String format, Object... args)
+    static void logError(Throwable t, String message)
     {
         if (isExpectedError(t)) {
-            log.error(format + ": %s", ObjectArrays.concat(args, t));
+            log.error("%s: %s", message, t);
         }
         else {
-            log.error(t, format, args);
+            log.error(t, message);
         }
     }
 
@@ -158,6 +155,8 @@ class RequestErrorTracker
                     (t instanceof SocketTimeoutException) ||
                     (t instanceof EOFException) ||
                     (t instanceof TimeoutException) ||
+                    (t instanceof CancellationException) ||
+                    (t instanceof ClosedChannelException) ||
                     (t instanceof ServiceUnavailableException)) {
                 return true;
             }

@@ -13,25 +13,16 @@
  */
 package io.trino.plugin.elasticsearch;
 
-import static java.lang.String.format;
+import java.io.IOException;
+
+import static io.trino.plugin.elasticsearch.ElasticsearchServer.ELASTICSEARCH_7_IMAGE;
 
 public class TestElasticsearch7ConnectorTest
         extends BaseElasticsearchConnectorTest
 {
     public TestElasticsearch7ConnectorTest()
+            throws IOException
     {
-        super("elasticsearch:7.0.0");
-    }
-
-    @Override
-    protected String indexEndpoint(String index, String docId)
-    {
-        return format("/%s/_doc/%s", index, docId);
-    }
-
-    @Override
-    protected String indexMapping(String properties)
-    {
-        return "{\"mappings\": " + properties + "}";
+        super(new ElasticsearchServer(ELASTICSEARCH_7_IMAGE));
     }
 }

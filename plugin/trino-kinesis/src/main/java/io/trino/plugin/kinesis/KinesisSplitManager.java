@@ -26,6 +26,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 
@@ -49,7 +50,7 @@ public class KinesisSplitManager
 
     private final KinesisClientProvider clientManager;
 
-    private Map<String, InternalStreamDescription> streamMap = Collections.synchronizedMap(new HashMap<>());
+    private final Map<String, InternalStreamDescription> streamMap = Collections.synchronizedMap(new HashMap<>());
 
     /**
      * Cache the result of a Kinesis describe stream call so we don't need to retrieve
@@ -99,19 +100,19 @@ public class KinesisSplitManager
             ConnectorTransactionHandle transactionHandle,
             ConnectorSession session,
             ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         KinesisTableHandle kinesisTableHandle = (KinesisTableHandle) table;
 
-        InternalStreamDescription description = this.getStreamDescription(kinesisTableHandle.getStreamName());
+        InternalStreamDescription description = this.getStreamDescription(kinesisTableHandle.streamName());
 
         ImmutableList.Builder<ConnectorSplit> builder = ImmutableList.builder();
         for (Shard shard : description.getShards()) {
             KinesisSplit split = new KinesisSplit(
-                    kinesisTableHandle.getStreamName(),
-                    kinesisTableHandle.getMessageDataFormat(),
-                    kinesisTableHandle.getCompressionCodec(),
+                    kinesisTableHandle.streamName(),
+                    kinesisTableHandle.messageDataFormat(),
+                    kinesisTableHandle.compressionCodec(),
                     shard.getShardId(),
                     shard.getSequenceNumberRange().getStartingSequenceNumber(),
                     shard.getSequenceNumberRange().getEndingSequenceNumber());
@@ -150,7 +151,7 @@ public class KinesisSplitManager
                 internalStreamDescription.addAllShards(describeStreamResult.getStreamDescription().getShards());
 
                 if (describeStreamResult.getStreamDescription().getHasMoreShards() && (shards.size() > 0)) {
-                    exclusiveStartShardId = shards.get(shards.size() - 1).getShardId();
+                    exclusiveStartShardId = shards.getLast().getShardId();
                 }
                 else {
                     exclusiveStartShardId = null;

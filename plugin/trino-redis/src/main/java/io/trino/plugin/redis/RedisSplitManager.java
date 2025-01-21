@@ -14,6 +14,8 @@
 package io.trino.plugin.redis;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.inject.Inject;
 import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
@@ -21,15 +23,15 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import redis.clients.jedis.Jedis;
 
-import javax.inject.Inject;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
@@ -40,7 +42,7 @@ import static java.util.Objects.requireNonNull;
 public class RedisSplitManager
         implements ConnectorSplitManager
 {
-    private final RedisConnectorConfig redisConnectorConfig;
+    private final Set<HostAddress> nodes;
     private final RedisJedisManager jedisManager;
 
     private static final long REDIS_MAX_SPLITS = 100;
@@ -51,7 +53,8 @@ public class RedisSplitManager
             RedisConnectorConfig redisConnectorConfig,
             RedisJedisManager jedisManager)
     {
-        this.redisConnectorConfig = requireNonNull(redisConnectorConfig, "redisConnectorConfig is null");
+        requireNonNull(redisConnectorConfig, "redisConnectorConfig is null");
+        this.nodes = ImmutableSet.copyOf(redisConnectorConfig.getNodes());
         this.jedisManager = requireNonNull(jedisManager, "jedisManager is null");
     }
 
@@ -60,12 +63,12 @@ public class RedisSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         RedisTableHandle redisTableHandle = (RedisTableHandle) table;
 
-        List<HostAddress> nodes = new ArrayList<>(redisConnectorConfig.getNodes());
+        List<HostAddress> nodes = new ArrayList<>(this.nodes);
         Collections.shuffle(nodes);
 
         checkState(!nodes.isEmpty(), "No Redis nodes available");
@@ -74,9 +77,9 @@ public class RedisSplitManager
         long numberOfKeys = 1;
         // when Redis keys are provides in a zset, create multiple
         // splits by splitting zset in chunks
-        if (redisTableHandle.getKeyDataFormat().equals("zset")) {
+        if (redisTableHandle.keyDataFormat().equals("zset")) {
             try (Jedis jedis = jedisManager.getJedisPool(nodes.get(0)).getResource()) {
-                numberOfKeys = jedis.zcount(redisTableHandle.getKeyName(), "-inf", "+inf");
+                numberOfKeys = jedis.zcount(redisTableHandle.keyName(), "-inf", "+inf");
             }
         }
 
@@ -93,11 +96,12 @@ public class RedisSplitManager
             }
 
             RedisSplit split = new RedisSplit(
-                    redisTableHandle.getSchemaName(),
-                    redisTableHandle.getTableName(),
-                    redisTableHandle.getKeyDataFormat(),
-                    redisTableHandle.getValueDataFormat(),
-                    redisTableHandle.getKeyName(),
+                    redisTableHandle.schemaName(),
+                    redisTableHandle.tableName(),
+                    redisTableHandle.keyDataFormat(),
+                    redisTableHandle.valueDataFormat(),
+                    redisTableHandle.keyName(),
+                    redisTableHandle.constraint(),
                     startIndex,
                     endIndex,
                     nodes);

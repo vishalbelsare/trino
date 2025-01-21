@@ -15,9 +15,11 @@ package io.trino.plugin.kinesis;
 
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
+import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorRecordSetProvider;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.session.PropertyMetadata;
@@ -32,6 +34,7 @@ import static java.util.Objects.requireNonNull;
 public class KinesisConnector
         implements Connector
 {
+    private final LifeCycleManager lifeCycleManager;
     private final KinesisMetadata metadata;
     private final KinesisSplitManager splitManager;
     private final KinesisRecordSetProvider recordSetProvider;
@@ -40,11 +43,13 @@ public class KinesisConnector
 
     @Inject
     public KinesisConnector(
+            LifeCycleManager lifeCycleManager,
             KinesisMetadata metadata,
             KinesisSplitManager splitManager,
             KinesisRecordSetProvider recordSetProvider,
             KinesisSessionProperties properties)
     {
+        this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.recordSetProvider = requireNonNull(recordSetProvider, "recordSetProvider is null");
@@ -52,7 +57,7 @@ public class KinesisConnector
     }
 
     @Override
-    public ConnectorMetadata getMetadata(ConnectorTransactionHandle transactionHandle)
+    public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle)
     {
         return metadata;
     }
@@ -80,5 +85,11 @@ public class KinesisConnector
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return propertyList;
+    }
+
+    @Override
+    public void shutdown()
+    {
+        lifeCycleManager.stop();
     }
 }

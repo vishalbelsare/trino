@@ -23,26 +23,24 @@ import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorTableProperties;
+import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.SystemTable;
-import io.trino.spi.predicate.Domain;
-import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Predicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.connector.system.SystemColumnHandle.toSystemColumnHandles;
 import static io.trino.metadata.MetadataUtil.findColumnMetadata;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.String.format;
 import static java.util.Collections.singletonMap;
 import static java.util.Objects.requireNonNull;
@@ -67,12 +65,17 @@ public class SystemTablesMetadata
     }
 
     @Override
-    public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName)
+    public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
         Optional<SystemTable> table = tables.getSystemTable(session, tableName);
         if (table.isEmpty()) {
             return null;
         }
+
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+        }
+
         return SystemTableHandle.fromSchemaTableName(tableName);
     }
 
@@ -97,7 +100,7 @@ public class SystemTablesMetadata
     {
         ConnectorTableMetadata tableMetadata = checkAndGetTable(session, tableHandle).getTableMetadata();
 
-        String columnName = ((SystemColumnHandle) columnHandle).getColumnName();
+        String columnName = ((SystemColumnHandle) columnHandle).columnName();
 
         ColumnMetadata columnMetadata = findColumnMetadata(tableMetadata, columnName);
         checkArgument(columnMetadata != null, "Column '%s' on table '%s' does not exist", columnName, tableMetadata.getTable());
@@ -114,9 +117,9 @@ public class SystemTablesMetadata
     private SystemTable checkAndGetTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         SystemTableHandle systemTableHandle = (SystemTableHandle) tableHandle;
-        return tables.getSystemTable(session, systemTableHandle.getSchemaTableName())
+        return tables.getSystemTable(session, systemTableHandle.schemaTableName())
                 // table might disappear in the meantime
-                .orElseThrow(() -> new TrinoException(NOT_FOUND, format("Table '%s' not found", systemTableHandle.getSchemaTableName())));
+                .orElseThrow(() -> new TrinoException(NOT_FOUND, format("Table '%s' not found", systemTableHandle.schemaTableName())));
     }
 
     @Override
@@ -139,19 +142,7 @@ public class SystemTablesMetadata
                 builder.put(tableMetadata.getTable(), tableMetadata.getColumns());
             }
         }
-        return builder.build();
-    }
-
-    @Override
-    public boolean usesLegacyTableLayouts()
-    {
-        return false;
-    }
-
-    @Override
-    public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
-    {
-        return new ConnectorTableProperties();
+        return builder.buildOrThrow();
     }
 
     @Override
@@ -159,15 +150,15 @@ public class SystemTablesMetadata
     {
         SystemTableHandle table = (SystemTableHandle) handle;
 
-        TupleDomain<ColumnHandle> oldDomain = table.getConstraint();
+        TupleDomain<ColumnHandle> oldDomain = table.constraint();
         TupleDomain<ColumnHandle> newDomain = oldDomain.intersect(constraint.getSummary());
         if (oldDomain.equals(newDomain) && constraint.predicate().isEmpty()) {
             return Optional.empty();
         }
 
         SystemTable systemTable = checkAndGetTable(session, table);
-        if (systemTable instanceof JdbcTable) {
-            TupleDomain<ColumnHandle> filtered = ((JdbcTable) systemTable).applyFilter(session, effectiveConstraint(oldDomain, constraint, newDomain));
+        if (systemTable instanceof JdbcTable jdbcTable) {
+            TupleDomain<ColumnHandle> filtered = jdbcTable.applyFilter(session, effectiveConstraint(oldDomain, constraint, newDomain));
             newDomain = newDomain.intersect(filtered);
         }
 
@@ -178,8 +169,8 @@ public class SystemTablesMetadata
         if (newDomain.isNone()) {
             // TODO (https://github.com/trinodb/trino/issues/3647) indicate the table scan is empty
         }
-        table = new SystemTableHandle(table.getSchemaName(), table.getTableName(), newDomain);
-        return Optional.of(new ConstraintApplicationResult<>(table, constraint.getSummary(), false));
+        table = new SystemTableHandle(table.schemaName(), table.tableName(), newDomain);
+        return Optional.of(new ConstraintApplicationResult<>(table, constraint.getSummary(), constraint.getExpression(), false));
     }
 
     private Constraint effectiveConstraint(TupleDomain<ColumnHandle> oldDomain, Constraint newConstraint, TupleDomain<ColumnHandle> effectiveDomain)
@@ -189,26 +180,9 @@ public class SystemTablesMetadata
         }
         return new Constraint(
                 effectiveDomain,
-                convertToPredicate(oldDomain).and(newConstraint.predicate().get()),
+                oldDomain.asPredicate().and(newConstraint.predicate().get()),
                 Sets.union(
                         oldDomain.getDomains().orElseThrow().keySet(),
                         newConstraint.getPredicateColumns().orElseThrow()));
-    }
-
-    private static Predicate<Map<ColumnHandle, NullableValue>> convertToPredicate(TupleDomain<ColumnHandle> tupleDomain)
-    {
-        if (tupleDomain.isNone()) {
-            return bindings -> false;
-        }
-        Map<ColumnHandle, Domain> domains = tupleDomain.getDomains().orElseThrow();
-        return bindings -> {
-            for (Map.Entry<ColumnHandle, NullableValue> entry : bindings.entrySet()) {
-                Domain domain = domains.get(entry.getKey());
-                if (domain != null && !domain.includesNullableValue(entry.getValue().getValue())) {
-                    return false;
-                }
-            }
-            return true;
-        };
     }
 }

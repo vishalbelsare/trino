@@ -15,40 +15,42 @@ package io.trino.operator;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.MoreExecutors;
-import io.trino.Session;
+import io.airlift.units.Duration;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.metadata.Split;
-import io.trino.operator.WorkProcessorSourceOperatorAdapter.AdapterWorkProcessorSourceOperatorFactory;
 import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
-import io.trino.spi.connector.UpdatablePageSource;
 import io.trino.spi.metrics.Metrics;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.TestingTaskContext;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
-import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Supplier;
 
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestWorkProcessorSourceOperatorAdapter
 {
     private ScheduledExecutorService scheduledExecutor;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         scheduledExecutor = newSingleThreadScheduledExecutor();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         scheduledExecutor.shutdownNow();
@@ -70,28 +72,34 @@ public class TestWorkProcessorSourceOperatorAdapter
 
         operator.getOutput();
         assertThat(operator.isFinished()).isFalse();
-        assertThat(getOnlyElement(context.getNestedOperatorStats()).getMetrics().getMetrics())
-                .hasSize(2)
+        assertThat(context.getOperatorStats().getMetrics().getMetrics())
+                .hasSize(5)
                 .containsEntry("testOperatorMetric", new LongCount(1));
-        assertThat(getOnlyElement(context.getNestedOperatorStats()).getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of("testConnectorMetric", new LongCount(2)));
+        assertThat(context.getOperatorStats().getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of(
+                "testConnectorMetric", new LongCount(2)));
+        assertThat(context.getOperatorStats().getPhysicalInputReadTime())
+                .isEqualTo(new Duration(7, NANOSECONDS));
 
         operator.getOutput();
         assertThat(operator.isFinished()).isTrue();
-        assertThat(getOnlyElement(context.getNestedOperatorStats()).getMetrics().getMetrics())
-                .hasSize(2)
+        assertThat(context.getOperatorStats().getMetrics().getMetrics())
+                .hasSize(5)
                 .containsEntry("testOperatorMetric", new LongCount(2));
-        assertThat(getOnlyElement(context.getNestedOperatorStats()).getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of("testConnectorMetric", new LongCount(3)));
+        assertThat(context.getOperatorStats().getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of(
+                "testConnectorMetric", new LongCount(3)));
+        assertThat(context.getOperatorStats().getPhysicalInputReadTime())
+                .isEqualTo(new Duration(7, NANOSECONDS));
     }
 
     private static class TestWorkProcessorOperatorFactory
-            implements AdapterWorkProcessorSourceOperatorFactory
+            implements WorkProcessorSourceOperatorFactory
     {
         @Override
         public WorkProcessorSourceOperator create(
-                Session session,
+                OperatorContext operatorContext,
                 MemoryTrackingContext memoryTrackingContext,
                 DriverYieldSignal yieldSignal,
-                WorkProcessor<Split> splits)
+                WorkProcessor<Split> split)
         {
             return new TestWorkProcessorOperator();
         }
@@ -139,16 +147,16 @@ public class TestWorkProcessorSourceOperatorAdapter
         }
 
         @Override
+        public Duration getReadTime()
+        {
+            return new Duration(7, NANOSECONDS);
+        }
+
+        @Override
         public WorkProcessor<Page> getOutputPages()
         {
             return WorkProcessor.of(new Page(0))
                     .withProcessEntryMonitor(() -> count++);
-        }
-
-        @Override
-        public Supplier<Optional<UpdatablePageSource>> getUpdatablePageSourceSupplier()
-        {
-            return null;
         }
     }
 }

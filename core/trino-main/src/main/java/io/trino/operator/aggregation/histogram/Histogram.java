@@ -13,126 +13,47 @@
  */
 package io.trino.operator.aggregation.histogram;
 
-import com.google.common.collect.ImmutableList;
-import io.trino.metadata.AggregationFunctionMetadata;
-import io.trino.metadata.BoundSignature;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
-import io.trino.metadata.SqlAggregationFunction;
-import io.trino.operator.aggregation.AggregationMetadata;
-import io.trino.operator.aggregation.AggregationMetadata.AccumulatorStateDescriptor;
-import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.ValueBlock;
+import io.trino.spi.function.AggregationFunction;
+import io.trino.spi.function.AggregationState;
+import io.trino.spi.function.BlockIndex;
+import io.trino.spi.function.BlockPosition;
+import io.trino.spi.function.CombineFunction;
+import io.trino.spi.function.Description;
+import io.trino.spi.function.InputFunction;
+import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlType;
+import io.trino.spi.function.TypeParameter;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeSignature;
-import io.trino.type.BlockTypeOperators;
-import io.trino.type.BlockTypeOperators.BlockPositionEqual;
-import io.trino.type.BlockTypeOperators.BlockPositionHashCode;
 
-import java.lang.invoke.MethodHandle;
-import java.util.Optional;
-
-import static io.trino.metadata.FunctionKind.AGGREGATE;
-import static io.trino.metadata.Signature.comparableTypeParameter;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.BLOCK_INDEX;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.BLOCK_INPUT_CHANNEL;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.STATE;
-import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.TypeSignature.mapType;
-import static io.trino.util.Reflection.methodHandle;
-import static java.util.Objects.requireNonNull;
-
-public class Histogram
-        extends SqlAggregationFunction
+@AggregationFunction("histogram")
+@Description("Count the number of times each value occurs")
+public final class Histogram
 {
-    public static final String NAME = "histogram";
-    private static final MethodHandle OUTPUT_FUNCTION = methodHandle(Histogram.class, "output", Type.class, HistogramState.class, BlockBuilder.class);
-    private static final MethodHandle INPUT_FUNCTION = methodHandle(Histogram.class, "input", Type.class, HistogramState.class, Block.class, int.class);
-    private static final MethodHandle COMBINE_FUNCTION = methodHandle(Histogram.class, "combine", HistogramState.class, HistogramState.class);
+    private Histogram() {}
 
-    public static final int EXPECTED_SIZE_FOR_HASHING = 10;
-    private final BlockTypeOperators blockTypeOperators;
-
-    public Histogram(BlockTypeOperators blockTypeOperators)
+    @InputFunction
+    @TypeParameter("T")
+    public static void input(
+            @TypeParameter("T") Type type,
+            @AggregationState("T") HistogramState state,
+            @BlockPosition @SqlType("T") ValueBlock key,
+            @BlockIndex int position)
     {
-        super(
-                new FunctionMetadata(
-                        new Signature(
-                                NAME,
-                                ImmutableList.of(comparableTypeParameter("K")),
-                                ImmutableList.of(),
-                                mapType(new TypeSignature("K"), BIGINT.getTypeSignature()),
-                                ImmutableList.of(new TypeSignature("K")),
-                                false),
-                        new FunctionNullability(true, ImmutableList.of(false)),
-                        false,
-                        true,
-                        "Count the number of times each value occurs",
-                        AGGREGATE),
-                new AggregationFunctionMetadata(
-                        false,
-                        mapType(new TypeSignature("K"), BIGINT.getTypeSignature())));
-        this.blockTypeOperators = blockTypeOperators;
+        state.add(key, position, 1L);
     }
 
-    @Override
-    public AggregationMetadata specialize(BoundSignature boundSignature)
+    @CombineFunction
+    public static void combine(@AggregationState("T") HistogramState state, @AggregationState("T") HistogramState otherState)
     {
-        Type keyType = boundSignature.getArgumentTypes().get(0);
-        BlockPositionEqual keyEqual = blockTypeOperators.getEqualOperator(keyType);
-        BlockPositionHashCode keyHashCode = blockTypeOperators.getHashCodeOperator(keyType);
-        Type outputType = boundSignature.getReturnType();
-        return generateAggregation(keyType, keyEqual, keyHashCode, outputType);
+        state.merge(otherState);
     }
 
-    private static AggregationMetadata generateAggregation(
-            Type keyType,
-            BlockPositionEqual keyEqual,
-            BlockPositionHashCode keyHashCode,
-            Type outputType)
+    @OutputFunction("map(T, BIGINT)")
+    public static void output(@TypeParameter("T") Type type, @AggregationState("T") HistogramState state, BlockBuilder out)
     {
-        HistogramStateSerializer stateSerializer = new HistogramStateSerializer(outputType);
-        MethodHandle inputFunction = INPUT_FUNCTION.bindTo(keyType);
-        MethodHandle outputFunction = OUTPUT_FUNCTION.bindTo(outputType);
-
-        return new AggregationMetadata(
-                ImmutableList.of(STATE, BLOCK_INPUT_CHANNEL, BLOCK_INDEX),
-                inputFunction,
-                Optional.empty(),
-                COMBINE_FUNCTION,
-                outputFunction,
-                ImmutableList.of(new AccumulatorStateDescriptor<>(
-                        HistogramState.class,
-                        stateSerializer,
-                        new HistogramStateFactory(keyType, keyEqual, keyHashCode, EXPECTED_SIZE_FOR_HASHING))));
-    }
-
-    public static void input(Type type, HistogramState state, Block key, int position)
-    {
-        TypedHistogram typedHistogram = state.get();
-        long startSize = typedHistogram.getEstimatedSize();
-        typedHistogram.add(position, key, 1L);
-        state.addMemoryUsage(typedHistogram.getEstimatedSize() - startSize);
-    }
-
-    public static void combine(HistogramState state, HistogramState otherState)
-    {
-        // NOTE: state = current merged state; otherState = scratchState (new data to be added)
-        // for grouped histograms and single histograms, we have a single histogram object. In neither case, can otherState.get() return null.
-        // Semantically, a histogram object will be returned even if the group is empty.
-        // In that case, the histogram object will represent an empty histogram until we call add() on
-        // it.
-        requireNonNull(otherState.get(), "scratch state should always be non-null");
-        TypedHistogram typedHistogram = state.get();
-        long startSize = typedHistogram.getEstimatedSize();
-        typedHistogram.addAll(otherState.get());
-        state.addMemoryUsage(typedHistogram.getEstimatedSize() - startSize);
-    }
-
-    public static void output(Type type, HistogramState state, BlockBuilder out)
-    {
-        TypedHistogram typedHistogram = state.get();
-        typedHistogram.serialize(out);
+        state.writeAll((MapBlockBuilder) out);
     }
 }

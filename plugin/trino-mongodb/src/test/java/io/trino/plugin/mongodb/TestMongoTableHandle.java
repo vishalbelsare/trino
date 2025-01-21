@@ -13,24 +13,124 @@
  */
 package io.trino.plugin.mongodb;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.airlift.json.JsonCodec;
+import io.airlift.json.JsonCodecFactory;
+import io.airlift.json.ObjectMapperProvider;
 import io.trino.spi.connector.SchemaTableName;
-import org.testng.annotations.Test;
+import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.RowType;
+import io.trino.spi.type.Type;
+import io.trino.type.TypeDeserializer;
+import org.junit.jupiter.api.Test;
 
-import static org.testng.Assert.assertEquals;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
+
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestMongoTableHandle
 {
-    private final JsonCodec<MongoTableHandle> codec = JsonCodec.jsonCodec(MongoTableHandle.class);
+    private final JsonCodec<MongoTableHandle> codec;
+
+    public TestMongoTableHandle()
+    {
+        ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
+        objectMapperProvider.setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
+        codec = new JsonCodecFactory(objectMapperProvider).jsonCodec(MongoTableHandle.class);
+    }
 
     @Test
-    public void testRoundTrip()
+    public void testRoundTripWithoutQuery()
     {
-        MongoTableHandle expected = new MongoTableHandle(new SchemaTableName("schema", "table"));
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoTableHandle expected = new MongoTableHandle(schemaTableName, remoteTableName, Optional.empty());
 
         String json = codec.toJson(expected);
         MongoTableHandle actual = codec.fromJson(json);
 
-        assertEquals(actual.getSchemaTableName(), expected.getSchemaTableName());
+        assertThat(actual.schemaTableName())
+                .isEqualTo(expected.schemaTableName());
+    }
+
+    @Test
+    public void testRoundTripNonLowercaseWithoutQuery()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("Schema", "Table");
+        MongoTableHandle expected = new MongoTableHandle(schemaTableName, remoteTableName, Optional.empty());
+
+        String json = codec.toJson(expected);
+        MongoTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual.schemaTableName())
+                .isEqualTo(expected.schemaTableName());
+    }
+
+    @Test
+    public void testRoundTripWithQuery()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoTableHandle expected = new MongoTableHandle(schemaTableName, remoteTableName, Optional.of("{\"key\": \"value\"}"));
+
+        String json = codec.toJson(expected);
+        MongoTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual.schemaTableName())
+                .isEqualTo(expected.schemaTableName());
+    }
+
+    @Test
+    public void testRoundTripWithQueryHavingHelperFunction()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoTableHandle expected = new MongoTableHandle(schemaTableName, remoteTableName, Optional.of("{timestamp: ISODate(\"2023-03-20T01:02:03.000Z\")}"));
+
+        String json = codec.toJson(expected);
+        MongoTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual.schemaTableName())
+                .isEqualTo(expected.schemaTableName());
+    }
+
+    @Test
+    public void testRoundTripWithProjectedColumns()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("Schema", "Table");
+        Set<MongoColumnHandle> projectedColumns = ImmutableSet.of(
+                new MongoColumnHandle("id", ImmutableList.of(), INTEGER, false, false, Optional.empty()),
+                new MongoColumnHandle("address", ImmutableList.of("street"), VARCHAR, false, false, Optional.empty()),
+                new MongoColumnHandle(
+                        "user",
+                        ImmutableList.of(),
+                        RowType.from(ImmutableList.of(new RowType.Field(Optional.of("first"), VARCHAR), new RowType.Field(Optional.of("last"), VARCHAR))),
+                        false,
+                        false,
+                        Optional.empty()),
+                new MongoColumnHandle("creator", ImmutableList.of("databasename"), VARCHAR, false, true, Optional.empty()));
+
+        MongoTableHandle expected = new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                Optional.empty(),
+                TupleDomain.all(),
+                projectedColumns,
+                OptionalInt.empty());
+
+        String json = codec.toJson(expected);
+        MongoTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual)
+                .isEqualTo(expected);
     }
 }

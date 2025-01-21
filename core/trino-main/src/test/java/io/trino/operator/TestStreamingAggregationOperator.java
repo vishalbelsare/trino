@@ -20,16 +20,15 @@ import io.trino.operator.aggregation.TestingAggregationFunction;
 import io.trino.spi.Page;
 import io.trino.spi.type.TypeOperators;
 import io.trino.sql.gen.JoinCompiler;
-import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.PlanNodeId;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.testing.MaterializedResult;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.util.List;
-import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -41,25 +40,27 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.lang.String.format;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestStreamingAggregationOperator
 {
     private static final TestingFunctionResolution FUNCTION_RESOLUTION = new TestingFunctionResolution();
-    private static final TestingAggregationFunction LONG_SUM = FUNCTION_RESOLUTION.getAggregateFunction(QualifiedName.of("sum"), fromTypes(BIGINT));
-    private static final TestingAggregationFunction COUNT = FUNCTION_RESOLUTION.getAggregateFunction(QualifiedName.of("count"), ImmutableList.of());
+    private static final TestingAggregationFunction LONG_SUM = FUNCTION_RESOLUTION.getAggregateFunction("sum", fromTypes(BIGINT));
+    private static final TestingAggregationFunction COUNT = FUNCTION_RESOLUTION.getAggregateFunction("count", ImmutableList.of());
 
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
     private OperatorFactory operatorFactory;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
@@ -75,13 +76,12 @@ public class TestStreamingAggregationOperator
                 ImmutableList.of(BOOLEAN, VARCHAR, BIGINT),
                 ImmutableList.of(VARCHAR),
                 ImmutableList.of(1),
-                AggregationNode.Step.SINGLE,
-                ImmutableList.of(COUNT.bind(ImmutableList.of(0), Optional.empty()),
-                        LONG_SUM.bind(ImmutableList.of(2), Optional.empty())),
+                ImmutableList.of(COUNT.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty()),
+                        LONG_SUM.createAggregatorFactory(SINGLE, ImmutableList.of(2), OptionalInt.empty())),
                 new JoinCompiler(new TypeOperators()));
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         executor.shutdownNow();
@@ -97,9 +97,8 @@ public class TestStreamingAggregationOperator
                 ImmutableList.of(BOOLEAN, DOUBLE, BIGINT),
                 ImmutableList.of(DOUBLE),
                 ImmutableList.of(1),
-                AggregationNode.Step.SINGLE,
-                ImmutableList.of(COUNT.bind(ImmutableList.of(0), Optional.empty()),
-                        LONG_SUM.bind(ImmutableList.of(2), Optional.empty())),
+                ImmutableList.of(COUNT.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty()),
+                        LONG_SUM.createAggregatorFactory(SINGLE, ImmutableList.of(2), OptionalInt.empty())),
                 new JoinCompiler(new TypeOperators()));
 
         RowPagesBuilder rowPagesBuilder = RowPagesBuilder.rowPagesBuilder(BOOLEAN, DOUBLE, BIGINT);
@@ -149,11 +148,11 @@ public class TestStreamingAggregationOperator
     {
         RowPagesBuilder rowPagesBuilder = RowPagesBuilder.rowPagesBuilder(BOOLEAN, VARCHAR, BIGINT);
         List<Page> input = rowPagesBuilder
-                .addSequencePage(1_000_000, 0, 0, 1)
+                .addSequencePage(50_000, 0, 0, 1)
                 .build();
 
         MaterializedResult.Builder expectedBuilder = resultBuilder(driverContext.getSession(), VARCHAR, BIGINT, BIGINT);
-        for (int i = 0; i < 1_000_000; ++i) {
+        for (int i = 0; i < 50_000; ++i) {
             expectedBuilder.row(String.valueOf(i), 1L, i + 1L);
         }
 

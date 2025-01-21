@@ -23,20 +23,21 @@ import io.trino.testing.MaterializedResult;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.sql.TestTable;
 import io.trino.testing.sql.TestView;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static io.trino.plugin.oracle.TestingOracleServer.TEST_USER;
+import static io.trino.spi.connector.ConnectorMetadata.MODIFYING_ROWS_MESSAGE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.MaterializedResult.resultBuilder;
-import static io.trino.testing.assertions.Assert.assertEquals;
-import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public abstract class BaseOracleConnectorTest
         extends BaseJdbcConnectorTest
@@ -44,37 +45,23 @@ public abstract class BaseOracleConnectorTest
     @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
-        switch (connectorBehavior) {
-            case SUPPORTS_LIMIT_PUSHDOWN:
-                return false;
-
-            case SUPPORTS_TOPN_PUSHDOWN:
-                return false;
-
-            case SUPPORTS_AGGREGATION_PUSHDOWN:
-                return false;
-
-            case SUPPORTS_JOIN_PUSHDOWN:
-                return true;
-
-            case SUPPORTS_JOIN_PUSHDOWN_WITH_DISTINCT_FROM:
-                return false;
-
-            case SUPPORTS_COMMENT_ON_TABLE:
-                return false;
-
-            case SUPPORTS_ARRAY:
-                return false;
-
-            case SUPPORTS_CREATE_SCHEMA:
-                return false;
-
-            case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
-                return false;
-
-            default:
-                return super.hasBehavior(connectorBehavior);
-        }
+        return switch (connectorBehavior) {
+            case SUPPORTS_JOIN_PUSHDOWN -> true;
+            case SUPPORTS_ADD_COLUMN_WITH_COMMENT,
+                 SUPPORTS_AGGREGATION_PUSHDOWN_CORRELATION,
+                 SUPPORTS_AGGREGATION_PUSHDOWN_REGRESSION,
+                 SUPPORTS_ARRAY,
+                 SUPPORTS_CREATE_SCHEMA,
+                 SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT,
+                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT,
+                 SUPPORTS_JOIN_PUSHDOWN_WITH_DISTINCT_FROM,
+                 SUPPORTS_MAP_TYPE,
+                 SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS,
+                 SUPPORTS_ROW_TYPE,
+                 SUPPORTS_SET_COLUMN_TYPE,
+                 SUPPORTS_TOPN_PUSHDOWN -> false;
+            default -> super.hasBehavior(connectorBehavior);
+        };
     }
 
     @Override
@@ -87,8 +74,16 @@ public abstract class BaseOracleConnectorTest
     protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
         String typeName = dataMappingTestSetup.getTrinoTypeName();
-        if (typeName.equals("time")) {
-            return Optional.empty();
+        if (typeName.equals("date")) {
+            // Oracle TO_DATE function returns +10 days during julian and gregorian calendar switch
+            if (dataMappingTestSetup.getSampleValueLiteral().equals("DATE '1582-10-05'")) {
+                return Optional.empty();
+            }
+        }
+        if (typeName.equals("time") ||
+                typeName.equals("time(6)") ||
+                typeName.equals("timestamp(6) with time zone")) {
+            return Optional.of(dataMappingTestSetup.asUnsupported());
         }
         if (typeName.equals("boolean")) {
             // Oracle does not have native support for boolean however usually it is represented as number(1)
@@ -124,39 +119,10 @@ public abstract class BaseOracleConnectorTest
     @Override
     public void testShowColumns()
     {
-        MaterializedResult actual = computeActual("SHOW COLUMNS FROM orders");
-        MaterializedResult expected = resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
-                .row("orderkey", "decimal(19,0)", "", "")
-                .row("custkey", "decimal(19,0)", "", "")
-                .row("orderstatus", "varchar(1)", "", "")
-                .row("totalprice", "double", "", "")
-                .row("orderdate", "timestamp(3)", "", "")
-                .row("orderpriority", "varchar(15)", "", "")
-                .row("clerk", "varchar(15)", "", "")
-                .row("shippriority", "decimal(10,0)", "", "")
-                .row("comment", "varchar(79)", "", "")
-                .build();
-        assertEquals(actual, expected);
+        assertThat(query("SHOW COLUMNS FROM orders")).result().matches(getDescribeOrdersResult());
     }
 
-    /**
-     * Test showing that column comment cannot be read. See {@link TestOraclePoolRemarksReportingConnectorSmokeTest#testCommentColumn()} for test
-     * showing this works, when enabled.
-     */
     @Test
-    @Override
-    public void testCommentColumn()
-    {
-        String tableName = "test_comment_column_" + randomTableSuffix();
-
-        assertUpdate("CREATE TABLE " + tableName + "(a integer)");
-
-        // comment set
-        assertUpdate("COMMENT ON COLUMN " + tableName + ".a IS 'new comment'");
-        // without remarksReporting Oracle does not return comments set
-        assertThat((String) computeActual("SHOW CREATE TABLE " + tableName).getOnlyValue()).doesNotContain("COMMENT 'new comment'");
-    }
-
     @Override
     public void testInformationSchemaFiltering()
     {
@@ -178,23 +144,20 @@ public abstract class BaseOracleConnectorTest
         return false;
     }
 
-    @Test
     @Override
-    public void testDescribeTable()
+    protected MaterializedResult getDescribeOrdersResult()
     {
-        MaterializedResult expectedColumns = resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+        return resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
                 .row("orderkey", "decimal(19,0)", "", "")
                 .row("custkey", "decimal(19,0)", "", "")
                 .row("orderstatus", "varchar(1)", "", "")
                 .row("totalprice", "double", "", "")
-                .row("orderdate", "timestamp(3)", "", "")
+                .row("orderdate", "timestamp(0)", "", "")
                 .row("orderpriority", "varchar(15)", "", "")
                 .row("clerk", "varchar(15)", "", "")
                 .row("shippriority", "decimal(10,0)", "", "")
                 .row("comment", "varchar(79)", "", "")
                 .build();
-        MaterializedResult actualColumns = computeActual("DESCRIBE orders");
-        assertEquals(actualColumns, expectedColumns);
     }
 
     @Test
@@ -208,7 +171,7 @@ public abstract class BaseOracleConnectorTest
                         "   custkey decimal(19, 0),\n" +
                         "   orderstatus varchar(1),\n" +
                         "   totalprice double,\n" +
-                        "   orderdate timestamp(3),\n" +
+                        "   orderdate timestamp(0),\n" +
                         "   orderpriority varchar(15),\n" +
                         "   clerk varchar(15),\n" +
                         "   shippriority decimal(10, 0),\n" +
@@ -216,13 +179,26 @@ public abstract class BaseOracleConnectorTest
                         ")");
     }
 
+    @Test
+    public void testTimestampOutOfPrecisionRounded()
+    {
+        String tableName = "test_timestamp_" + randomNameSuffix();
+
+        assertUpdate("CREATE TABLE " + tableName + " (t timestamp(12))");
+
+        assertThat(getColumnType(tableName, "t"))
+                .isEqualTo("timestamp(9)");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
     @Override
     public void testCharVarcharComparison()
     {
         // test overridden because super uses all-space char values ('  ') that are null-out by Oracle
 
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_char_varchar",
                 "(k, v) AS VALUES" +
                         "   (-1, CAST(NULL AS char(3))), " +
@@ -239,13 +215,13 @@ public abstract class BaseOracleConnectorTest
         }
     }
 
+    @Test
     @Override
     public void testVarcharCharComparison()
     {
         // test overridden because Oracle nulls-out '' varchar value, impacting results
 
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_varchar_char",
                 "(k, v) AS VALUES" +
                         "   (-1, CAST(NULL AS varchar(3))), " +
@@ -269,6 +245,7 @@ public abstract class BaseOracleConnectorTest
         }
     }
 
+    @Test
     @Override
     public void testAggregationWithUnsupportedResultType()
     {
@@ -285,15 +262,18 @@ public abstract class BaseOracleConnectorTest
         assertThat(query("SELECT approx_set(nationkey) FROM nation")).isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
     }
 
-    @Test
-    public void testDropTable()
+    @Override
+    protected TestTable createAggregationTestTable(String name, List<String> rows)
     {
-        String tableName = "test_drop" + randomTableSuffix();
-        assertUpdate(format("CREATE TABLE %s AS SELECT 1 test_drop", tableName), 1);
-        assertTrue(getQueryRunner().tableExists(getSession(), tableName));
+        return new TestTable(onRemoteDatabase(), name, "(short_decimal number(9, 3), long_decimal number(30, 10), a_bigint number(19), t_double binary_double)", rows);
+    }
 
-        assertUpdate("DROP TABLE " + tableName);
-        assertFalse(getQueryRunner().tableExists(getSession(), tableName));
+    @Test
+    @Override
+    public void testDeleteWithLike()
+    {
+        assertThatThrownBy(super::testDeleteWithLike)
+                .hasStackTraceContaining("TrinoException: " + MODIFYING_ROWS_MESSAGE);
     }
 
     @Test
@@ -338,12 +318,12 @@ public abstract class BaseOracleConnectorTest
         // predicate over aggregation key (likely to be optimized before being pushed down into the connector)
         assertThat(query("SELECT * FROM (SELECT regionkey, sum(nationkey) FROM nation GROUP BY regionkey) WHERE regionkey = 3"))
                 .matches("VALUES (CAST(3 AS decimal(19,0)), CAST(77 AS decimal(38,0)))")
-                .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
+                .isFullyPushedDown();
 
         // predicate over aggregation result
         assertThat(query("SELECT regionkey, sum(nationkey) FROM nation GROUP BY regionkey HAVING sum(nationkey) = 77"))
                 .matches("VALUES (CAST(3 AS decimal(19,0)), CAST(77 AS decimal(38,0)))")
-                .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
+                .isFullyPushedDown();
     }
 
     @Test
@@ -395,10 +375,112 @@ public abstract class BaseOracleConnectorTest
                 "SELECT * from nation", "Domain compaction threshold \\(10000\\) cannot exceed 1000");
     }
 
+    @Test
+    @Override
+    public void testNativeQuerySimple()
+    {
+        // override because Oracle requires the FROM clause, and it needs explicit type
+        assertQuery("SELECT * FROM TABLE(system.query(query => 'SELECT CAST(1 AS number(2, 1)) FROM DUAL'))", "VALUES 1");
+    }
+
+    @Test
+    @Override
+    public void testNativeQueryParameters()
+    {
+        // override because Oracle requires the FROM clause, and it needs explicit type
+        Session session = Session.builder(getSession())
+                .addPreparedStatement("my_query_simple", "SELECT * FROM TABLE(system.query(query => ?))")
+                .addPreparedStatement("my_query", "SELECT * FROM TABLE(system.query(query => format('SELECT %s FROM %s', ?, ?)))")
+                .build();
+        assertQuery(session, "EXECUTE my_query_simple USING 'SELECT CAST(1 AS number(2, 1)) a FROM DUAL'", "VALUES 1");
+        assertQuery(session, "EXECUTE my_query USING 'a', '(SELECT CAST(2 AS number(2, 1)) a FROM DUAL) t'", "VALUES 2");
+    }
+
+    @Test
+    @Override
+    public void testNativeQueryInsertStatementTableDoesNotExist()
+    {
+        // override because Oracle succeeds in preparing query, and then fails because of no metadata available
+        assertThat(getQueryRunner().tableExists(getSession(), "non_existent_table")).isFalse();
+        assertThat(query("SELECT * FROM TABLE(system.query(query => 'INSERT INTO non_existent_table VALUES (1)'))"))
+                .failure().hasMessageContaining("Query not supported: ResultSetMetaData not available for query: INSERT INTO non_existent_table VALUES (1)");
+    }
+
+    @Test
+    @Override
+    public void testNativeQueryIncorrectSyntax()
+    {
+        // override because Oracle succeeds in preparing query, and then fails because of no metadata available
+        assertThat(query("SELECT * FROM TABLE(system.query(query => 'some wrong syntax'))"))
+                .failure().hasMessageContaining("Query not supported: ResultSetMetaData not available for query: some wrong syntax");
+    }
+
+    @Override
+    protected TestTable simpleTable()
+    {
+        // override because Oracle does not support type bigint
+        return new TestTable(onRemoteDatabase(), format("%s.simple_table", getSession().getSchema().orElseThrow()), "(col decimal(2, 1))", ImmutableList.of("1", "2"));
+    }
+
     @Override
     protected String errorMessageForInsertIntoNotNullColumn(String columnName)
     {
-        return format("ORA-01400: cannot insert NULL into \\(.*\"%s\"\\)\n", columnName.toUpperCase(ENGLISH));
+        return format("ORA-01400: cannot insert NULL into \\(.*\"%s\"\\)\n\nhttps://docs.oracle.com/error-help/db/ora-01400/", columnName.toUpperCase(ENGLISH));
+    }
+
+    @Override
+    protected void verifyAddNotNullColumnToNonEmptyTableFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageContaining("ORA-01758: table must be empty to add mandatory (NOT NULL) column");
+    }
+
+    @Override
+    protected void verifyConcurrentAddColumnFailurePermissible(Exception e)
+    {
+        assertThat(e)
+                .hasMessageContaining("ORA-14411: The DDL cannot be run concurrently with other DDLs");
+    }
+
+    @Override
+    protected OptionalInt maxSchemaNameLength()
+    {
+        return OptionalInt.of(30);
+    }
+
+    @Override
+    protected void verifySchemaNameLengthFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageContaining("ORA-00972: identifier is too long");
+    }
+
+    @Override
+    protected OptionalInt maxTableNameLength()
+    {
+        return OptionalInt.of(30);
+    }
+
+    @Override
+    protected void verifyTableNameLengthFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageContaining("ORA-00972: identifier is too long");
+    }
+
+    @Override
+    protected OptionalInt maxColumnNameLength()
+    {
+        return OptionalInt.of(30);
+    }
+
+    @Override
+    protected void verifyColumnNameLengthFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageContaining("ORA-00972: identifier is too long");
+    }
+
+    @Override
+    protected String sumDistinctAggregationPushdownExpectedResult()
+    {
+        return "VALUES (BIGINT '4', DECIMAL '8')";
     }
 
     private void predicatePushdownTest(String oracleType, String oracleLiteral, String operator, String filterLiteral)
@@ -410,6 +492,39 @@ public abstract class BaseOracleConnectorTest
 
             assertThat(query(format("SELECT * FROM %s WHERE c %s %s", table.getName(), operator, filterLiteral)))
                     .isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testJoinPushdownWithImplicitCast()
+    {
+        try (TestTable leftTable = newTrinoTable("left_table", "(id int, varchar_50 varchar(50))", ImmutableList.of("(1, 'India')", "(2, 'Poland')"));
+                TestTable rightTable = newTrinoTable("right_table_", "(varchar_100 varchar(100), varchar_unbounded varchar)", ImmutableList.of("('India', 'Japan')", "('France', 'Poland')"))) {
+            String leftTableName = leftTable.getName();
+            String rightTableName = rightTable.getName();
+            Session session = joinPushdownEnabled(getSession());
+
+            // Implicit cast between bounded varchar
+            String joinWithBoundedVarchar = "SELECT id FROM %s l %s %s r ON l.varchar_50 = r.varchar_100".formatted(leftTableName, "%s", rightTableName);
+            assertThat(query(session, joinWithBoundedVarchar.formatted("LEFT JOIN")))
+                    .isFullyPushedDown();
+            assertThat(query(session, joinWithBoundedVarchar.formatted("RIGHT JOIN")))
+                    .isFullyPushedDown();
+            assertThat(query(session, joinWithBoundedVarchar.formatted("INNER JOIN")))
+                    .isFullyPushedDown();
+            assertThat(query(session, joinWithBoundedVarchar.formatted("FULL JOIN")))
+                    .isFullyPushedDown();
+
+            // Implicit cast between bounded and unbounded varchar
+            String joinWithUnboundedVarchar = "SELECT id FROM %s l %s %s r ON l.varchar_50 = r.varchar_unbounded".formatted(leftTableName, "%s", rightTableName);
+            assertThat(query(session, joinWithUnboundedVarchar.formatted("LEFT JOIN")))
+                    .joinIsNotFullyPushedDown();
+            assertThat(query(session, joinWithUnboundedVarchar.formatted("RIGHT JOIN")))
+                    .joinIsNotFullyPushedDown();
+            assertThat(query(session, joinWithUnboundedVarchar.formatted("INNER JOIN")))
+                    .joinIsNotFullyPushedDown();
+            assertThat(query(session, joinWithUnboundedVarchar.formatted("FULL JOIN")))
+                    .joinIsNotFullyPushedDown();
         }
     }
 

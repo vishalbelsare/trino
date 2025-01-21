@@ -21,21 +21,19 @@ import com.google.cloud.bigquery.QueryJobConfiguration;
 import com.google.cloud.bigquery.Table;
 import com.google.cloud.bigquery.TableId;
 import com.google.cloud.bigquery.TableInfo;
-import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
-import io.trino.spi.TrinoException;
+import io.trino.cache.NonEvictableCache;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 
-import javax.inject.Inject;
-
 import java.util.Optional;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
+import java.util.function.Supplier;
 
-import static io.trino.plugin.bigquery.BigQueryErrorCode.BIGQUERY_VIEW_DESTINATION_TABLE_CREATION_FAILED;
+import static io.trino.cache.CacheUtils.uncheckedCacheGet;
+import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.plugin.bigquery.BigQueryUtil.convertToBigQueryException;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
@@ -47,43 +45,39 @@ public class ViewMaterializationCache
 {
     private static final Logger log = Logger.get(ViewMaterializationCache.class);
 
-    private final Cache<String, TableInfo> destinationTableCache;
+    public static final String TEMP_TABLE_PREFIX = "_pbc_";
+
+    private final NonEvictableCache<String, TableInfo> destinationTableCache;
     private final Optional<String> viewMaterializationProject;
     private final Optional<String> viewMaterializationDataset;
 
     @Inject
     public ViewMaterializationCache(BigQueryConfig config)
     {
-        requireNonNull(config, "config is null");
-        this.destinationTableCache = CacheBuilder.newBuilder()
-                .expireAfterWrite(config.getViewsCacheTtl().toMillis(), MILLISECONDS)
-                .maximumSize(1000)
-                .build();
+        this.destinationTableCache = buildNonEvictableCache(
+                CacheBuilder.newBuilder()
+                        .expireAfterWrite(config.getViewsCacheTtl().toMillis(), MILLISECONDS)
+                        .maximumSize(1000));
         this.viewMaterializationProject = config.getViewMaterializationProject();
         this.viewMaterializationDataset = config.getViewMaterializationDataset();
     }
 
     public TableInfo getCachedTable(BigQueryClient client, String query, Duration viewExpiration, TableInfo remoteTableId)
     {
-        try {
-            return destinationTableCache.get(query, new DestinationTableBuilder(client, viewExpiration, query, createDestinationTable(remoteTableId.getTableId())));
-        }
-        catch (ExecutionException e) {
-            throw new TrinoException(BIGQUERY_VIEW_DESTINATION_TABLE_CREATION_FAILED, "Error creating destination table", e);
-        }
+        return uncheckedCacheGet(destinationTableCache, query, new DestinationTableBuilder(client, viewExpiration, query, buildDestinationTable(remoteTableId.getTableId())));
     }
 
-    private TableId createDestinationTable(TableId remoteTableId)
+    private TableId buildDestinationTable(TableId remoteTableId)
     {
-        String project = viewMaterializationProject.orElse(remoteTableId.getProject());
-        String dataset = viewMaterializationDataset.orElse(remoteTableId.getDataset());
+        String project = viewMaterializationProject.orElseGet(remoteTableId::getProject);
+        String dataset = viewMaterializationDataset.orElseGet(remoteTableId::getDataset);
 
-        String name = format("_pbc_%s", randomUUID().toString().toLowerCase(ENGLISH).replace("-", ""));
+        String name = format("%s%s", TEMP_TABLE_PREFIX, randomUUID().toString().toLowerCase(ENGLISH).replace("-", ""));
         return TableId.of(project, dataset, name);
     }
 
-    private static class DestinationTableBuilder
-            implements Callable<TableInfo>
+    public static class DestinationTableBuilder
+            implements Supplier<TableInfo>
     {
         private final BigQueryClient bigQueryClient;
         private final Duration viewExpiration;
@@ -99,7 +93,7 @@ public class ViewMaterializationCache
         }
 
         @Override
-        public TableInfo call()
+        public TableInfo get()
         {
             return createTableFromQuery();
         }

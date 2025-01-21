@@ -13,16 +13,16 @@
  */
 package io.trino.plugin.oracle;
 
-import com.google.common.collect.ImmutableMap;
 import io.airlift.testing.Closeables;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.AfterClass;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.TestInstance;
 
-import java.io.IOException;
+import java.util.Map;
 
-import static io.trino.plugin.oracle.TestingOracleServer.TEST_PASS;
-import static io.trino.plugin.oracle.TestingOracleServer.TEST_USER;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestOraclePoolConnectorSmokeTest
         extends BaseOracleConnectorSmokeTest
 {
@@ -33,23 +33,15 @@ public class TestOraclePoolConnectorSmokeTest
             throws Exception
     {
         oracleServer = new TestingOracleServer();
-        return OracleQueryRunner.createOracleQueryRunner(
-                oracleServer,
-                ImmutableMap.of(),
-                ImmutableMap.<String, String>builder()
-                        .put("connection-url", oracleServer.getJdbcUrl())
-                        .put("connection-user", TEST_USER)
-                        .put("connection-password", TEST_PASS)
-                        .put("allow-drop-table", "true")
-                        .put("oracle.connection-pool.enabled", "true")
-                        .put("oracle.remarks-reporting.enabled", "false")
-                        .build(),
-                REQUIRED_TPCH_TABLES);
+        return OracleQueryRunner.builder(oracleServer)
+                .addConnectorProperties(Map.of("oracle.connection-pool.enabled", "true"))
+                .setInitialTables(REQUIRED_TPCH_TABLES)
+                .build();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public final void destroy()
-            throws IOException
+            throws Exception
     {
         Closeables.closeAll(oracleServer);
         oracleServer = null;

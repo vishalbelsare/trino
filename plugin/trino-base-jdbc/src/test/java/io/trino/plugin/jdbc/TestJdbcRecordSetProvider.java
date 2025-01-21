@@ -15,6 +15,7 @@ package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import dev.failsafe.RetryPolicy;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitSource;
@@ -27,9 +28,11 @@ import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.testing.TestingConnectorSession;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -43,13 +46,15 @@ import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorS
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.testing.Closeables.closeAll;
-import static io.trino.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestJdbcRecordSetProvider
 {
     private static final ConnectorSession SESSION = TestingConnectorSession.builder()
@@ -67,7 +72,7 @@ public class TestJdbcRecordSetProvider
 
     private ExecutorService executor;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
             throws Exception
     {
@@ -84,39 +89,41 @@ public class TestJdbcRecordSetProvider
         executor = newDirectExecutorService();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
             throws Exception
     {
         closeAll(
                 database,
                 () -> executor.shutdownNow());
+        database = null;
+        executor = null;
     }
 
     @Test
     public void testGetRecordSet()
     {
         ConnectorTransactionHandle transaction = new JdbcTransactionHandle();
-        JdbcRecordSetProvider recordSetProvider = new JdbcRecordSetProvider(jdbcClient, executor);
+        JdbcRecordSetProvider recordSetProvider = new JdbcRecordSetProvider(jdbcClient, executor, RetryPolicy.ofDefaults());
         RecordSet recordSet = recordSetProvider.getRecordSet(transaction, SESSION, split, table, ImmutableList.of(textColumn, textShortColumn, valueColumn));
-        assertNotNull(recordSet, "recordSet is null");
+        assertThat(recordSet).withFailMessage("recordSet is null").isNotNull();
 
         RecordCursor cursor = recordSet.cursor();
-        assertNotNull(cursor, "cursor is null");
+        assertThat(cursor).withFailMessage("cursor is null").isNotNull();
 
         Map<String, Long> data = new LinkedHashMap<>();
         while (cursor.advanceNextPosition()) {
             data.put(cursor.getSlice(0).toStringUtf8(), cursor.getLong(2));
-            assertEquals(cursor.getSlice(0), cursor.getSlice(1));
+            assertThat(cursor.getSlice(0)).isEqualTo(cursor.getSlice(1));
         }
-        assertEquals(data, ImmutableMap.<String, Long>builder()
+        assertThat(data).isEqualTo(ImmutableMap.<String, Long>builder()
                 .put("one", 1L)
                 .put("two", 2L)
                 .put("three", 3L)
                 .put("ten", 10L)
                 .put("eleven", 11L)
                 .put("twelve", 12L)
-                .build());
+                .buildOrThrow());
     }
 
     @Test
@@ -195,17 +202,20 @@ public class TestJdbcRecordSetProvider
         jdbcTableHandle = new JdbcTableHandle(
                 jdbcTableHandle.getRelationHandle(),
                 domain,
+                ImmutableList.of(),
                 Optional.empty(),
                 OptionalLong.empty(),
                 Optional.empty(),
                 jdbcTableHandle.getOtherReferencedTables(),
-                jdbcTableHandle.getNextSyntheticColumnId());
+                jdbcTableHandle.getNextSyntheticColumnId(),
+                Optional.empty(),
+                ImmutableList.of());
 
         ConnectorSplitSource splits = jdbcClient.getSplits(SESSION, jdbcTableHandle);
-        JdbcSplit split = (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(NOT_PARTITIONED, 1000)).getSplits());
+        JdbcSplit split = (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(1000)).getSplits());
 
         ConnectorTransactionHandle transaction = new JdbcTransactionHandle();
-        JdbcRecordSetProvider recordSetProvider = new JdbcRecordSetProvider(jdbcClient, executor);
+        JdbcRecordSetProvider recordSetProvider = new JdbcRecordSetProvider(jdbcClient, executor, RetryPolicy.ofDefaults());
         RecordSet recordSet = recordSetProvider.getRecordSet(transaction, SESSION, split, jdbcTableHandle, columns);
 
         return recordSet.cursor();

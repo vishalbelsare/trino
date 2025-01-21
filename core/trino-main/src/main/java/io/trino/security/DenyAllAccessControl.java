@@ -14,11 +14,16 @@
 package io.trino.security;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.spi.QueryId;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.CatalogSchemaTableName;
+import io.trino.spi.connector.EntityKindAndName;
+import io.trino.spi.connector.EntityPrivilege;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
@@ -30,8 +35,12 @@ import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.spi.security.AccessDeniedException.denyAddColumn;
+import static io.trino.spi.security.AccessDeniedException.denyAlterColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentTable;
+import static io.trino.spi.security.AccessDeniedException.denyCommentView;
+import static io.trino.spi.security.AccessDeniedException.denyCreateCatalog;
+import static io.trino.spi.security.AccessDeniedException.denyCreateFunction;
 import static io.trino.spi.security.AccessDeniedException.denyCreateMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateRole;
 import static io.trino.spi.security.AccessDeniedException.denyCreateSchema;
@@ -39,17 +48,21 @@ import static io.trino.spi.security.AccessDeniedException.denyCreateTable;
 import static io.trino.spi.security.AccessDeniedException.denyCreateView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateViewWithSelect;
 import static io.trino.spi.security.AccessDeniedException.denyDeleteTable;
+import static io.trino.spi.security.AccessDeniedException.denyDenyEntityPrivilege;
+import static io.trino.spi.security.AccessDeniedException.denyDenySchemaPrivilege;
+import static io.trino.spi.security.AccessDeniedException.denyDenyTablePrivilege;
+import static io.trino.spi.security.AccessDeniedException.denyDropCatalog;
 import static io.trino.spi.security.AccessDeniedException.denyDropColumn;
+import static io.trino.spi.security.AccessDeniedException.denyDropFunction;
 import static io.trino.spi.security.AccessDeniedException.denyDropMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyDropRole;
 import static io.trino.spi.security.AccessDeniedException.denyDropSchema;
 import static io.trino.spi.security.AccessDeniedException.denyDropTable;
 import static io.trino.spi.security.AccessDeniedException.denyDropView;
-import static io.trino.spi.security.AccessDeniedException.denyExecuteFunction;
 import static io.trino.spi.security.AccessDeniedException.denyExecuteProcedure;
 import static io.trino.spi.security.AccessDeniedException.denyExecuteQuery;
 import static io.trino.spi.security.AccessDeniedException.denyExecuteTableProcedure;
-import static io.trino.spi.security.AccessDeniedException.denyGrantExecuteFunctionPrivilege;
+import static io.trino.spi.security.AccessDeniedException.denyGrantEntityPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyGrantRoles;
 import static io.trino.spi.security.AccessDeniedException.denyGrantSchemaPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyGrantTablePrivilege;
@@ -63,11 +76,13 @@ import static io.trino.spi.security.AccessDeniedException.denyRenameMaterialized
 import static io.trino.spi.security.AccessDeniedException.denyRenameSchema;
 import static io.trino.spi.security.AccessDeniedException.denyRenameTable;
 import static io.trino.spi.security.AccessDeniedException.denyRenameView;
+import static io.trino.spi.security.AccessDeniedException.denyRevokeEntityPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyRevokeRoles;
 import static io.trino.spi.security.AccessDeniedException.denyRevokeSchemaPrivilege;
 import static io.trino.spi.security.AccessDeniedException.denyRevokeTablePrivilege;
 import static io.trino.spi.security.AccessDeniedException.denySelectColumns;
 import static io.trino.spi.security.AccessDeniedException.denySetCatalogSessionProperty;
+import static io.trino.spi.security.AccessDeniedException.denySetMaterializedViewProperties;
 import static io.trino.spi.security.AccessDeniedException.denySetRole;
 import static io.trino.spi.security.AccessDeniedException.denySetSchemaAuthorization;
 import static io.trino.spi.security.AccessDeniedException.denySetSystemSessionProperty;
@@ -76,10 +91,11 @@ import static io.trino.spi.security.AccessDeniedException.denySetTableProperties
 import static io.trino.spi.security.AccessDeniedException.denySetUser;
 import static io.trino.spi.security.AccessDeniedException.denySetViewAuthorization;
 import static io.trino.spi.security.AccessDeniedException.denyShowColumns;
+import static io.trino.spi.security.AccessDeniedException.denyShowCreateFunction;
 import static io.trino.spi.security.AccessDeniedException.denyShowCreateSchema;
 import static io.trino.spi.security.AccessDeniedException.denyShowCreateTable;
 import static io.trino.spi.security.AccessDeniedException.denyShowCurrentRoles;
-import static io.trino.spi.security.AccessDeniedException.denyShowRoleAuthorizationDescriptors;
+import static io.trino.spi.security.AccessDeniedException.denyShowFunctions;
 import static io.trino.spi.security.AccessDeniedException.denyShowRoleGrants;
 import static io.trino.spi.security.AccessDeniedException.denyShowRoles;
 import static io.trino.spi.security.AccessDeniedException.denyShowSchemas;
@@ -117,7 +133,7 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public void checkCanExecuteQuery(Identity identity)
+    public void checkCanExecuteQuery(Identity identity, QueryId queryId)
     {
         denyExecuteQuery();
     }
@@ -141,13 +157,25 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public Set<String> filterCatalogs(Identity identity, Set<String> catalogs)
+    public void checkCanCreateCatalog(SecurityContext context, String catalog)
+    {
+        denyCreateCatalog(catalog);
+    }
+
+    @Override
+    public void checkCanDropCatalog(SecurityContext context, String catalog)
+    {
+        denyDropCatalog(catalog);
+    }
+
+    @Override
+    public Set<String> filterCatalogs(SecurityContext context, Set<String> catalogs)
     {
         return ImmutableSet.of();
     }
 
     @Override
-    public void checkCanCreateSchema(SecurityContext context, CatalogSchemaName schemaName)
+    public void checkCanCreateSchema(SecurityContext context, CatalogSchemaName schemaName, Map<String, Object> properties)
     {
         denyCreateSchema(schemaName.toString());
     }
@@ -183,12 +211,6 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public void checkCanCreateTable(SecurityContext context, QualifiedObjectName tableName)
-    {
-        denyCreateTable(tableName.toString());
-    }
-
-    @Override
     public void checkCanCreateTable(SecurityContext context, QualifiedObjectName tableName, Map<String, Object> properties)
     {
         denyCreateTable(tableName.toString());
@@ -207,7 +229,7 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public void checkCanSetTableProperties(SecurityContext context, QualifiedObjectName tableName, Map<String, Object> properties)
+    public void checkCanSetTableProperties(SecurityContext context, QualifiedObjectName tableName, Map<String, Optional<Object>> properties)
     {
         denySetTableProperties(tableName.toString());
     }
@@ -216,6 +238,12 @@ public class DenyAllAccessControl
     public void checkCanSetTableComment(SecurityContext context, QualifiedObjectName tableName)
     {
         denyCommentTable(tableName.toString());
+    }
+
+    @Override
+    public void checkCanSetViewComment(SecurityContext context, QualifiedObjectName viewName)
+    {
+        denyCommentView(viewName.toString());
     }
 
     @Override
@@ -243,9 +271,9 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public Set<String> filterColumns(SecurityContext context, CatalogSchemaTableName tableName, Set<String> columns)
+    public Map<SchemaTableName, Set<String>> filterColumns(SecurityContext context, String catalogName, Map<SchemaTableName, Set<String>> tableColumns)
     {
-        return ImmutableSet.of();
+        return ImmutableMap.of();
     }
 
     @Override
@@ -264,6 +292,12 @@ public class DenyAllAccessControl
     public void checkCanAddColumns(SecurityContext context, QualifiedObjectName tableName)
     {
         denyAddColumn(tableName.toString());
+    }
+
+    @Override
+    public void checkCanAlterColumn(SecurityContext context, QualifiedObjectName tableName)
+    {
+        denyAlterColumn(tableName.toString());
     }
 
     @Override
@@ -339,7 +373,7 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public void checkCanCreateMaterializedView(SecurityContext context, QualifiedObjectName materializedViewName)
+    public void checkCanCreateMaterializedView(SecurityContext context, QualifiedObjectName materializedViewName, Map<String, Object> properties)
     {
         denyCreateMaterializedView(materializedViewName.toString());
     }
@@ -363,15 +397,21 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public void checkCanGrantExecuteFunctionPrivilege(SecurityContext context, String functionName, Identity grantee, boolean grantOption)
+    public void checkCanSetMaterializedViewProperties(SecurityContext context, QualifiedObjectName materializedViewName, Map<String, Optional<Object>> properties)
     {
-        denyGrantExecuteFunctionPrivilege(functionName, context.getIdentity(), grantee);
+        denySetMaterializedViewProperties(materializedViewName.toString());
     }
 
     @Override
     public void checkCanGrantSchemaPrivilege(SecurityContext context, Privilege privilege, CatalogSchemaName schemaName, TrinoPrincipal grantee, boolean grantOption)
     {
         denyGrantSchemaPrivilege(privilege.name(), schemaName.toString());
+    }
+
+    @Override
+    public void checkCanDenySchemaPrivilege(SecurityContext context, Privilege privilege, CatalogSchemaName schemaName, TrinoPrincipal grantee)
+    {
+        denyDenySchemaPrivilege(privilege.name(), schemaName.toString());
     }
 
     @Override
@@ -387,13 +427,37 @@ public class DenyAllAccessControl
     }
 
     @Override
+    public void checkCanDenyTablePrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, TrinoPrincipal grantee)
+    {
+        denyDenyTablePrivilege(privilege.name(), tableName.toString());
+    }
+
+    @Override
     public void checkCanRevokeTablePrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, TrinoPrincipal revokee, boolean grantOption)
     {
         denyRevokeTablePrivilege(privilege.name(), tableName.toString());
     }
 
     @Override
-    public void checkCanSetSystemSessionProperty(Identity identity, String propertyName)
+    public void checkCanGrantEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee, boolean grantOption)
+    {
+        denyGrantEntityPrivilege(privilege.name(), entity);
+    }
+
+    @Override
+    public void checkCanDenyEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee)
+    {
+        denyDenyEntityPrivilege(privilege.name(), entity);
+    }
+
+    @Override
+    public void checkCanRevokeEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal revokee, boolean grantOption)
+    {
+        denyRevokeEntityPrivilege(privilege.name(), entity);
+    }
+
+    @Override
+    public void checkCanSetSystemSessionProperty(Identity identity, QueryId queryId, String propertyName)
     {
         denySetSystemSessionProperty(propertyName);
     }
@@ -441,12 +505,6 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public void checkCanShowRoleAuthorizationDescriptors(SecurityContext context, Optional<String> catalogName)
-    {
-        denyShowRoleAuthorizationDescriptors();
-    }
-
-    @Override
     public void checkCanShowRoles(SecurityContext context, Optional<String> catalogName)
     {
         denyShowRoles();
@@ -471,14 +529,50 @@ public class DenyAllAccessControl
     }
 
     @Override
-    public void checkCanExecuteFunction(SecurityContext context, String functionName)
+    public boolean canExecuteFunction(SecurityContext context, QualifiedObjectName functionName)
     {
-        denyExecuteFunction(functionName);
+        return false;
+    }
+
+    @Override
+    public boolean canCreateViewWithExecuteFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        return false;
     }
 
     @Override
     public void checkCanExecuteTableProcedure(SecurityContext context, QualifiedObjectName tableName, String procedureName)
     {
-        denyExecuteTableProcedure(tableName.toString(), procedureName.toString());
+        denyExecuteTableProcedure(tableName.toString(), procedureName);
+    }
+
+    @Override
+    public void checkCanShowFunctions(SecurityContext context, CatalogSchemaName schema)
+    {
+        denyShowFunctions(schema.toString());
+    }
+
+    @Override
+    public Set<SchemaFunctionName> filterFunctions(SecurityContext context, String catalogName, Set<SchemaFunctionName> functionNames)
+    {
+        return ImmutableSet.of();
+    }
+
+    @Override
+    public void checkCanCreateFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        denyCreateFunction(functionName.toString());
+    }
+
+    @Override
+    public void checkCanDropFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        denyDropFunction(functionName.toString());
+    }
+
+    @Override
+    public void checkCanShowCreateFunction(SecurityContext context, QualifiedObjectName functionName)
+    {
+        denyShowCreateFunction(functionName.toString());
     }
 }

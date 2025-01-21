@@ -17,15 +17,13 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.SqlExecutor;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 
-import static io.trino.plugin.sqlserver.SqlServerQueryRunner.createSqlServerQueryRunner;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.tpch.TpchTable.NATION;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public abstract class BaseSqlServerTransactionIsolationTest
         extends AbstractTestQueryFramework
@@ -35,11 +33,9 @@ public abstract class BaseSqlServerTransactionIsolationTest
             throws Exception
     {
         TestingSqlServer sqlServer = closeAfterClass(new TestingSqlServer(this::configureDatabase));
-        return createSqlServerQueryRunner(
-                sqlServer,
-                Map.of(),
-                Map.of(),
-                List.of(NATION));
+        return SqlServerQueryRunner.builder(sqlServer)
+                .setInitialTables(List.of(NATION))
+                .build();
     }
 
     protected abstract void configureDatabase(SqlExecutor executor, String databaseName);

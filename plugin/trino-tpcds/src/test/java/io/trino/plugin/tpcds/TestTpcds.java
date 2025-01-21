@@ -17,15 +17,18 @@ import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.LocalTime;
 
+import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_DAY;
+import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_SECOND;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingSession.testSessionBuilder;
-import static io.trino.testing.assertions.Assert.assertEquals;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTpcds
         extends AbstractTestQueryFramework
@@ -34,7 +37,7 @@ public class TestTpcds
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return TpcdsQueryRunner.createQueryRunner();
+        return TpcdsQueryRunner.builder().build();
     }
 
     @Test
@@ -49,7 +52,7 @@ public class TestTpcds
                 // are padded with whitespace
                 .row("James               ", "Brown                         ", 4L, new BigDecimal("-7.00"))
                 .build();
-        assertEquals(expected, actual);
+        assertThat(actual).containsExactlyElementsOf(expected);
 
         actual = computeActual(
                 "SELECT c_first_name, c_last_name " +
@@ -58,7 +61,18 @@ public class TestTpcds
         expected = resultBuilder(getSession(), actual.getTypes())
                 .row("James               ", "Brown                         ")
                 .build();
-        assertEquals(expected, actual);
+        assertThat(actual).containsExactlyElementsOf(expected);
+    }
+
+    @Test
+    public void testTimeRepresentation()
+    {
+        LocalTime timeNow = LocalTime.now();
+        LocalTime readTime = (LocalTime) computeScalar("SELECT dv_create_time FROM dbgen_version");
+        long differenceNanos = (NANOSECONDS_PER_DAY + readTime.toNanoOfDay() - timeNow.toNanoOfDay()) % NANOSECONDS_PER_DAY;
+        differenceNanos = Math.min(differenceNanos, NANOSECONDS_PER_DAY - differenceNanos);
+        assertThat(differenceNanos)
+                .isBetween(0L, 10 * NANOSECONDS_PER_SECOND);
     }
 
     @Test
@@ -66,6 +80,7 @@ public class TestTpcds
     {
         // TODO add a test with long decimal
         String longValues = range(0, 5000)
+                .map(value -> value * 2) // Make the values discontinuous to avoid getting optimized to a BETWEEN filter
                 .mapToObj(Integer::toString)
                 .collect(joining(", "));
 
@@ -84,6 +99,13 @@ public class TestTpcds
         assertQuerySucceeds("SHOW TABLES FROM sf1");
         assertQuerySucceeds("SHOW TABLES FROM \"sf1.0\"");
         assertQueryFails("SHOW TABLES FROM sf0", "line 1:1: Schema 'sf0' does not exist");
+    }
+
+    @Test
+    public void testDateColumnValuesCorrectness()
+    {
+        // make sure date values are correct regardless of the system timezone selected (test are executed with the system timezone set to America/Bahia_Banderas)
+        assertQuery("SELECT d_date FROM date_dim WHERE d_date_id = 'AAAAAAAAOKJNECAA'", "SELECT DATE '1900-01-02'");
     }
 
     private Session createSession(String schemaName)

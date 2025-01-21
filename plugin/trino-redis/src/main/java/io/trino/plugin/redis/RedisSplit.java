@@ -16,13 +16,21 @@ package io.trino.plugin.redis;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.HostAddress;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSplit;
+import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
+import java.util.Map;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
+import static java.util.stream.Collectors.joining;
 
 /**
  * Represents a Redis specific {@link ConnectorSplit}.
@@ -30,6 +38,8 @@ import static java.util.Objects.requireNonNull;
 public final class RedisSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(RedisSplit.class);
+
     private final String schemaName;
     private final String tableName;
     private final String keyDataFormat;
@@ -44,6 +54,8 @@ public final class RedisSplit
     private final long start;
     private final long end;
 
+    private final TupleDomain<ColumnHandle> constraint;
+
     @JsonCreator
     public RedisSplit(
             @JsonProperty("schemaName") String schemaName,
@@ -51,6 +63,7 @@ public final class RedisSplit
             @JsonProperty("keyDataFormat") String keyDataFormat,
             @JsonProperty("valueDataFormat") String valueDataFormat,
             @JsonProperty("keyName") String keyName,
+            @JsonProperty("constraint") TupleDomain<ColumnHandle> constraint,
             @JsonProperty("start") long start,
             @JsonProperty("end") long end,
             @JsonProperty("nodes") List<HostAddress> nodes)
@@ -60,6 +73,7 @@ public final class RedisSplit
         this.keyDataFormat = requireNonNull(keyDataFormat, "keyDataFormat is null");
         this.valueDataFormat = requireNonNull(valueDataFormat, "valueDataFormat is null");
         this.keyName = keyName;
+        this.constraint = requireNonNull(constraint, "constraint is null");
         this.nodes = ImmutableList.copyOf(requireNonNull(nodes, "nodes is null"));
         this.start = start;
         this.end = end;
@@ -98,6 +112,12 @@ public final class RedisSplit
     }
 
     @JsonProperty
+    public TupleDomain<ColumnHandle> getConstraint()
+    {
+        return constraint;
+    }
+
+    @JsonProperty
     public List<HostAddress> getNodes()
     {
         return nodes;
@@ -126,33 +146,40 @@ public final class RedisSplit
     }
 
     @Override
-    public boolean isRemotelyAccessible()
-    {
-        return true;
-    }
-
-    @Override
     public List<HostAddress> getAddresses()
     {
         return nodes;
     }
 
     @Override
-    public Object getInfo()
+    public Map<String, String> getSplitInfo()
     {
-        return this;
+        return ImmutableMap.of(
+                "addresses", nodes.stream().map(HostAddress::toString).collect(joining(",")),
+                "keyName", requireNonNullElse(keyName, ""),
+                "constraint", constraint.toString());
     }
 
-    private static RedisDataType toRedisDataType(String dataFormat)
+    @Override
+    public long getRetainedSizeInBytes()
     {
-        switch (dataFormat) {
-            case "hash":
-                return RedisDataType.HASH;
-            case "zset":
-                return RedisDataType.ZSET;
-            default:
-                return RedisDataType.STRING;
-        }
+        return INSTANCE_SIZE
+                + estimatedSizeOf(schemaName)
+                + estimatedSizeOf(tableName)
+                + estimatedSizeOf(keyDataFormat)
+                + estimatedSizeOf(keyName)
+                + estimatedSizeOf(valueDataFormat)
+                + estimatedSizeOf(nodes, HostAddress::getRetainedSizeInBytes)
+                + constraint.getRetainedSizeInBytes(columnHandle -> ((RedisColumnHandle) columnHandle).getRetainedSizeInBytes());
+    }
+
+    public static RedisDataType toRedisDataType(String dataFormat)
+    {
+        return switch (dataFormat) {
+            case "hash" -> RedisDataType.HASH;
+            case "zset" -> RedisDataType.ZSET;
+            default -> RedisDataType.STRING;
+        };
     }
 
     @Override
@@ -167,6 +194,7 @@ public final class RedisSplit
                 .add("start", start)
                 .add("end", end)
                 .add("nodes", nodes)
+                .add("constraint", constraint)
                 .toString();
     }
 }

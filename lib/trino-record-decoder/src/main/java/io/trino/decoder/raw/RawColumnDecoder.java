@@ -149,8 +149,9 @@ public class RawColumnDecoder
                 checkArgument(end.isEmpty() || end.getAsInt() - start == fieldType.getSize(),
                         "Bytes mapping for column '%s' does not match dataFormat '%s'; expected %s bytes but got %s",
                         columnName,
-                        fieldType.getSize(),
-                        end.getAsInt() - start);
+                        fieldType.name(),
+                        end.getAsInt() - start,
+                        fieldType.getSize());
             }
         }
         catch (IllegalArgumentException e) {
@@ -235,50 +236,37 @@ public class RawColumnDecoder
         public boolean getBoolean()
         {
             checkEnoughBytes();
-            switch (fieldType) {
-                case BYTE:
-                    return value.get(start) != 0;
-                case SHORT:
-                    return value.getShort(start) != 0;
-                case INT:
-                    return value.getInt(start) != 0;
-                case LONG:
-                    return value.getLong(start) != 0;
-                default:
-                    throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("conversion '%s' to boolean not supported", fieldType));
-            }
+            return switch (fieldType) {
+                case BYTE -> value.get(start) != 0;
+                case SHORT -> value.getShort(start) != 0;
+                case INT -> value.getInt(start) != 0;
+                case LONG -> value.getLong(start) != 0;
+                default -> throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("conversion '%s' to boolean not supported", fieldType));
+            };
         }
 
         @Override
         public long getLong()
         {
             checkEnoughBytes();
-            switch (fieldType) {
-                case BYTE:
-                    return value.get(start);
-                case SHORT:
-                    return value.getShort(start);
-                case INT:
-                    return value.getInt(start);
-                case LONG:
-                    return value.getLong(start);
-                default:
-                    throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("conversion '%s' to long not supported", fieldType));
-            }
+            return switch (fieldType) {
+                case BYTE -> value.get(start);
+                case SHORT -> value.getShort(start);
+                case INT -> value.getInt(start);
+                case LONG -> value.getLong(start);
+                default -> throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("conversion '%s' to long not supported", fieldType));
+            };
         }
 
         @Override
         public double getDouble()
         {
             checkEnoughBytes();
-            switch (fieldType) {
-                case FLOAT:
-                    return value.getFloat(start);
-                case DOUBLE:
-                    return value.getDouble(start);
-                default:
-                    throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("conversion '%s' to double not supported", fieldType));
-            }
+            return switch (fieldType) {
+                case FLOAT -> value.getFloat(start);
+                case DOUBLE -> value.getDouble(start);
+                default -> throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("conversion '%s' to double not supported", fieldType));
+            };
         }
 
         private void checkEnoughBytes()
@@ -289,7 +277,7 @@ public class RawColumnDecoder
         @Override
         public Slice getSlice()
         {
-            Slice slice = Slices.wrappedBuffer(value.slice());
+            Slice slice = Slices.wrappedHeapBuffer(value.slice());
             return Varchars.truncateToLength(slice, columnType);
         }
     }

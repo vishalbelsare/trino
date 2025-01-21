@@ -13,7 +13,6 @@
  */
 package io.trino.operator.scalar;
 
-import io.trino.operator.aggregation.TypedSet;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.Convention;
@@ -23,15 +22,13 @@ import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
 import io.trino.spi.type.Type;
-import io.trino.type.BlockTypeOperators.BlockPositionEqual;
 import io.trino.type.BlockTypeOperators.BlockPositionHashCode;
+import io.trino.type.BlockTypeOperators.BlockPositionIsIdentical;
 
-import static io.trino.operator.aggregation.TypedSet.createEqualityTypedSet;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
-import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
-import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 
 @ScalarFunction("array_except")
 @Description("Returns an array of elements that are in the first array but not the second, without duplicates.")
@@ -44,9 +41,9 @@ public final class ArrayExceptFunction
     public static Block except(
             @TypeParameter("E") Type type,
             @OperatorDependency(
-                    operator = EQUAL,
+                    operator = IDENTICAL,
                     argumentTypes = {"E", "E"},
-                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = NULLABLE_RETURN)) BlockPositionEqual elementEqual,
+                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = FAIL_ON_NULL)) BlockPositionIsIdentical identicalOperator,
             @OperatorDependency(
                     operator = HASH_CODE,
                     argumentTypes = "E",
@@ -61,13 +58,13 @@ public final class ArrayExceptFunction
             return leftArray;
         }
 
-        TypedSet typedSet = createEqualityTypedSet(type, elementEqual, elementHashCode, leftPositionCount, "array_except");
-        BlockBuilder distinctElementBlockBuilder = type.createBlockBuilder(null, leftPositionCount);
+        BlockSet set = new BlockSet(type, identicalOperator, elementHashCode, rightPositionCount + leftPositionCount);
         for (int i = 0; i < rightPositionCount; i++) {
-            typedSet.add(rightArray, i);
+            set.add(rightArray, i);
         }
+        BlockBuilder distinctElementBlockBuilder = type.createBlockBuilder(null, leftPositionCount);
         for (int i = 0; i < leftPositionCount; i++) {
-            if (typedSet.add(leftArray, i)) {
+            if (set.add(leftArray, i)) {
                 type.appendTo(leftArray, i, distinctElementBlockBuilder);
             }
         }

@@ -15,37 +15,15 @@ package io.trino.sql.relational;
 
 import io.trino.spi.type.Type;
 
-import java.util.Objects;
-
 import static java.util.Objects.requireNonNull;
 
-public final class VariableReferenceExpression
-        extends RowExpression
+public record VariableReferenceExpression(String name, Type type)
+        implements RowExpression
 {
-    private final String name;
-    private final Type type;
-
-    public VariableReferenceExpression(String name, Type type)
+    public VariableReferenceExpression
     {
-        this.name = requireNonNull(name, "name is null");
-        this.type = requireNonNull(type, "type is null");
-    }
-
-    public String getName()
-    {
-        return name;
-    }
-
-    @Override
-    public Type getType()
-    {
-        return type;
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(name, type);
+        requireNonNull(name, "name is null");
+        requireNonNull(type, "type is null");
     }
 
     @Override
@@ -58,18 +36,5 @@ public final class VariableReferenceExpression
     public <R, C> R accept(RowExpressionVisitor<R, C> visitor, C context)
     {
         return visitor.visitVariableReference(this, context);
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (this == obj) {
-            return true;
-        }
-        if (obj == null || getClass() != obj.getClass()) {
-            return false;
-        }
-        VariableReferenceExpression other = (VariableReferenceExpression) obj;
-        return Objects.equals(this.name, other.name) && Objects.equals(this.type, other.type);
     }
 }

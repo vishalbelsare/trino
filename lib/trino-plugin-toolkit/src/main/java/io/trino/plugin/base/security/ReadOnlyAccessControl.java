@@ -16,15 +16,18 @@ package io.trino.plugin.base.security;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSecurityContext;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.spi.security.AccessDeniedException.denyAddColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentColumn;
 import static io.trino.spi.security.AccessDeniedException.denyCommentTable;
+import static io.trino.spi.security.AccessDeniedException.denyCommentView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateMaterializedView;
 import static io.trino.spi.security.AccessDeniedException.denyCreateTable;
 import static io.trino.spi.security.AccessDeniedException.denyCreateView;
@@ -41,6 +44,7 @@ import static io.trino.spi.security.AccessDeniedException.denyRenameMaterialized
 import static io.trino.spi.security.AccessDeniedException.denyRenameTable;
 import static io.trino.spi.security.AccessDeniedException.denyRenameView;
 import static io.trino.spi.security.AccessDeniedException.denyRevokeTablePrivilege;
+import static io.trino.spi.security.AccessDeniedException.denySetMaterializedViewProperties;
 import static io.trino.spi.security.AccessDeniedException.denySetTableProperties;
 import static io.trino.spi.security.AccessDeniedException.denyUpdateTableColumns;
 
@@ -48,9 +52,7 @@ public class ReadOnlyAccessControl
         implements ConnectorAccessControl
 {
     @Override
-    public void checkCanShowSchemas(ConnectorSecurityContext context)
-    {
-    }
+    public void checkCanShowSchemas(ConnectorSecurityContext context) {}
 
     @Override
     public Set<String> filterSchemas(ConnectorSecurityContext context, Set<String> schemaNames)
@@ -71,20 +73,10 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanShowCreateSchema(ConnectorSecurityContext context, String schemaName)
-    {
-    }
+    public void checkCanShowCreateSchema(ConnectorSecurityContext context, String schemaName) {}
 
     @Override
-    public void checkCanShowCreateTable(ConnectorSecurityContext context, SchemaTableName tableName)
-    {
-    }
-
-    @Override
-    public void checkCanCreateTable(ConnectorSecurityContext context, SchemaTableName tableName)
-    {
-        denyCreateTable(tableName.toString());
-    }
+    public void checkCanShowCreateTable(ConnectorSecurityContext context, SchemaTableName tableName) {}
 
     @Override
     public void checkCanCreateTable(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Object> properties)
@@ -105,7 +97,7 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanSetTableProperties(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Object> properties)
+    public void checkCanSetTableProperties(ConnectorSecurityContext context, SchemaTableName tableName, Map<String, Optional<Object>> properties)
     {
         denySetTableProperties(tableName.toString());
     }
@@ -117,9 +109,13 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanShowTables(ConnectorSecurityContext context, String schemaName)
+    public void checkCanSetViewComment(ConnectorSecurityContext context, SchemaTableName viewName)
     {
+        denyCommentView(viewName.toString());
     }
+
+    @Override
+    public void checkCanShowTables(ConnectorSecurityContext context, String schemaName) {}
 
     @Override
     public void checkCanSetColumnComment(ConnectorSecurityContext context, SchemaTableName tableName)
@@ -140,9 +136,9 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public Set<String> filterColumns(ConnectorSecurityContext context, SchemaTableName tableName, Set<String> columns)
+    public Map<SchemaTableName, Set<String>> filterColumns(ConnectorSecurityContext context, Map<SchemaTableName, Set<String>> tableColumns)
     {
-        return columns;
+        return tableColumns;
     }
 
     @Override
@@ -200,7 +196,7 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanCreateMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName)
+    public void checkCanCreateMaterializedView(ConnectorSecurityContext context, SchemaTableName materializedViewName, Map<String, Object> properties)
     {
         denyCreateMaterializedView(materializedViewName.toString());
     }
@@ -224,6 +220,12 @@ public class ReadOnlyAccessControl
     }
 
     @Override
+    public void checkCanSetMaterializedViewProperties(ConnectorSecurityContext context, SchemaTableName materializedViewName, Map<String, Optional<Object>> properties)
+    {
+        denySetMaterializedViewProperties(materializedViewName.toString());
+    }
+
+    @Override
     public void checkCanSetCatalogSessionProperty(ConnectorSecurityContext context, String propertyName)
     {
         // allow
@@ -242,12 +244,6 @@ public class ReadOnlyAccessControl
     }
 
     @Override
-    public void checkCanShowRoleAuthorizationDescriptors(ConnectorSecurityContext context)
-    {
-        // allow
-    }
-
-    @Override
     public void checkCanShowRoles(ConnectorSecurityContext context)
     {
         // allow
@@ -263,5 +259,17 @@ public class ReadOnlyAccessControl
     public void checkCanShowRoleGrants(ConnectorSecurityContext context)
     {
         // allow
+    }
+
+    @Override
+    public void checkCanShowFunctions(ConnectorSecurityContext context, String schemaName)
+    {
+        // allow
+    }
+
+    @Override
+    public Set<SchemaFunctionName> filterFunctions(ConnectorSecurityContext context, Set<SchemaFunctionName> functionNames)
+    {
+        return functionNames;
     }
 }

@@ -15,24 +15,20 @@ package io.trino.sql.planner.sanity;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.connector.CatalogName;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
 import io.trino.metadata.TableHandle;
 import io.trino.plugin.tpch.TpchColumnHandle;
 import io.trino.plugin.tpch.TpchTableHandle;
 import io.trino.plugin.tpch.TpchTransactionHandle;
-import io.trino.spi.type.TypeOperators;
+import io.trino.spi.connector.CatalogHandle;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.PlanNodeIdAllocator;
-import io.trino.sql.planner.TypeAnalyzer;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.PlanNode;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
-import java.util.Optional;
 import java.util.function.Function;
 
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -42,24 +38,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class TestValidateStreamingAggregations
         extends BasePlanTest
 {
-    private Metadata metadata;
-    private TypeOperators typeOperators = new TypeOperators();
-    private TypeAnalyzer typeAnalyzer;
+    private PlannerContext plannerContext;
     private PlanNodeIdAllocator idAllocator = new PlanNodeIdAllocator();
     private TableHandle nationTableHandle;
 
-    @BeforeClass
+    @BeforeAll
     public void setup()
     {
-        metadata = getQueryRunner().getMetadata();
-        typeAnalyzer = new TypeAnalyzer(getQueryRunner().getSqlParser(), metadata);
+        plannerContext = getPlanTester().getPlannerContext();
 
-        CatalogName catalogName = getCurrentConnectorId();
+        CatalogHandle catalogHandle = getCurrentCatalogHandle();
         nationTableHandle = new TableHandle(
-                catalogName,
+                catalogHandle,
                 new TpchTableHandle("sf1", "nation", 1.0),
-                TpchTransactionHandle.INSTANCE,
-                Optional.empty());
+                TpchTransactionHandle.INSTANCE);
     }
 
     @Test
@@ -107,14 +99,13 @@ public class TestValidateStreamingAggregations
 
     private void validatePlan(Function<PlanBuilder, PlanNode> planProvider)
     {
-        getQueryRunner().inTransaction(session -> {
-            PlanBuilder builder = new PlanBuilder(idAllocator, metadata, session);
+        getPlanTester().inTransaction(session -> {
+            PlanBuilder builder = new PlanBuilder(idAllocator, plannerContext, session);
             PlanNode planNode = planProvider.apply(builder);
-            TypeProvider types = builder.getTypes();
 
             // metadata.getCatalogHandle() registers the catalog for the transaction
-            session.getCatalog().ifPresent(catalog -> metadata.getCatalogHandle(session, catalog));
-            new ValidateStreamingAggregations().validate(planNode, session, metadata, typeOperators, typeAnalyzer, types, WarningCollector.NOOP);
+            session.getCatalog().ifPresent(catalog -> plannerContext.getMetadata().getCatalogHandle(session, catalog));
+            new ValidateStreamingAggregations().validate(planNode, session, plannerContext, WarningCollector.NOOP);
             return null;
         });
     }

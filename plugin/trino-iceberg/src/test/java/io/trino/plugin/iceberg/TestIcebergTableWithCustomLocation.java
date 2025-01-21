@@ -13,56 +13,51 @@
  */
 package io.trino.plugin.iceberg;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import io.trino.plugin.hive.metastore.Table;
-import io.trino.plugin.hive.metastore.file.FileHiveMetastore;
+import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.Table;
 import io.trino.testing.AbstractTestQueryFramework;
-import io.trino.testing.DistributedQueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import io.trino.testing.MaterializedResult;
+import io.trino.testing.QueryRunner;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
-import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
+import java.util.Map;
 import java.util.Optional;
 
-import static com.google.common.io.MoreFiles.deleteRecursively;
-import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
-import static io.trino.plugin.hive.metastore.file.FileHiveMetastore.createTestingFileHiveMetastore;
-import static io.trino.plugin.iceberg.IcebergQueryRunner.createIcebergQueryRunner;
+import static io.trino.plugin.hive.TableType.EXTERNAL_TABLE;
+import static io.trino.plugin.iceberg.DataFileRecord.toDataFileRecord;
+import static io.trino.plugin.iceberg.IcebergTestUtils.getFileSystemFactory;
+import static io.trino.plugin.iceberg.IcebergTestUtils.getHiveMetastore;
+import static io.trino.testing.TestingConnectorSession.SESSION;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNotEquals;
-import static org.testng.Assert.assertTrue;
 
 public class TestIcebergTableWithCustomLocation
         extends AbstractTestQueryFramework
 {
-    private FileHiveMetastore metastore;
-    private File metastoreDir;
+    private HiveMetastore metastore;
+    private TrinoFileSystem fileSystem;
 
     @Override
-    protected DistributedQueryRunner createQueryRunner()
+    protected QueryRunner createQueryRunner()
             throws Exception
     {
-        metastoreDir = Files.createTempDirectory("test_iceberg").toFile();
-        metastore = createTestingFileHiveMetastore(metastoreDir);
+        QueryRunner queryRunner = IcebergQueryRunner.builder()
+                .setIcebergProperties(Map.of("iceberg.unique-table-location", "true"))
+                .build();
 
-        return createIcebergQueryRunner(
-                ImmutableMap.of(),
-                ImmutableMap.of("iceberg.unique-table-location", "true"),
-                ImmutableList.of(),
-                Optional.of(metastoreDir));
+        metastore = getHiveMetastore(queryRunner);
+
+        return queryRunner;
     }
 
-    @AfterClass(alwaysRun = true)
-    public void tearDown()
-            throws IOException
+    @BeforeAll
+    public void initFileSystem()
     {
-        deleteRecursively(metastoreDir.toPath(), ALLOW_INSECURE);
+        fileSystem = getFileSystemFactory(getDistributedQueryRunner()).create(SESSION);
     }
 
     @Test
@@ -70,22 +65,44 @@ public class TestIcebergTableWithCustomLocation
     {
         String tableName = "table_with_uuid";
         assertQuerySucceeds(format("CREATE TABLE %s as select 1 as val", tableName));
-        Optional<Table> table = metastore.getTable(null, "tpch", tableName);
-        assertTrue(table.isPresent(), "Table should exists");
+        Optional<Table> table = metastore.getTable("tpch", tableName);
+        assertThat(table).as("Table should exist").isPresent();
         String location = table.get().getStorage().getLocation();
         assertThat(location).matches(format(".*%s-[0-9a-f]{32}", tableName));
     }
 
     @Test
     public void testCreateAndDrop()
+            throws IOException
     {
         String tableName = "test_create_and_drop";
         assertQuerySucceeds(format("CREATE TABLE %s as select 1 as val", tableName));
-        Optional<Table> table = metastore.getTable(null, "tpch", tableName);
-        assertTrue(table.isPresent(), "Table should exist");
+        Table table = metastore.getTable("tpch", tableName).orElseThrow();
+        assertThat(table.getTableType()).isEqualTo(EXTERNAL_TABLE.name());
+
+        Location tableLocation = Location.of(table.getStorage().getLocation());
+        assertThat(fileSystem.newInputFile(tableLocation).exists())
+                .describedAs("The directory corresponding to the table storage location should exist")
+                .isTrue();
+
+        MaterializedResult materializedResult = computeActual("SELECT * FROM \"test_create_and_drop$files\"");
+        assertThat(materializedResult.getRowCount()).isEqualTo(1);
+        DataFileRecord dataFile = toDataFileRecord(materializedResult.getMaterializedRows().get(0));
+        Location dataFileLocation = Location.of(dataFile.getFilePath());
+        assertThat(fileSystem.newInputFile(dataFileLocation).exists())
+                .describedAs("The data file should exist")
+                .isTrue();
 
         assertQuerySucceeds(format("DROP TABLE %s", tableName));
-        assertFalse(metastore.getTable(null, "tpch", tableName).isPresent(), "Table should be dropped");
+        assertThat(metastore.getTable("tpch", tableName).isPresent())
+                .describedAs("Table should be dropped")
+                .isFalse();
+        assertThat(fileSystem.newInputFile(dataFileLocation).exists())
+                .describedAs("The data file should have been removed")
+                .isFalse();
+        assertThat(fileSystem.newInputFile(tableLocation).exists())
+                .describedAs("The directory corresponding to the dropped Iceberg table should not be removed because it may be shared with other tables")
+                .isFalse();
     }
 
     @Test
@@ -94,19 +111,21 @@ public class TestIcebergTableWithCustomLocation
         String tableName = "test_create_rename_drop";
         String renamedName = "test_create_rename_drop_renamed";
         assertQuerySucceeds(format("CREATE TABLE %s as select 1 as val", tableName));
-        Optional<Table> table = metastore.getTable(null, "tpch", tableName);
-        assertTrue(table.isPresent(), "Table should exist");
+        Optional<Table> table = metastore.getTable("tpch", tableName);
+        assertThat(table).as("Table should exist").isPresent();
         String tableInitialLocation = table.get().getStorage().getLocation();
 
         assertQuerySucceeds(format("ALTER TABLE %s RENAME TO %s", tableName, renamedName));
-        Optional<Table> renamedTable = metastore.getTable(null, "tpch", renamedName);
-        assertTrue(renamedTable.isPresent(), "Table should exist");
+        Optional<Table> renamedTable = metastore.getTable("tpch", renamedName);
+        assertThat(renamedTable).as("Table should exist").isPresent();
         String renamedTableLocation = renamedTable.get().getStorage().getLocation();
-        assertEquals(renamedTableLocation, tableInitialLocation, "Location should not be changed");
+        assertThat(renamedTableLocation)
+                .describedAs("Location should not be changed")
+                .isEqualTo(tableInitialLocation);
 
         assertQuerySucceeds(format("DROP TABLE %s", renamedName));
-        assertFalse(metastore.getTable(null, "tpch", tableName).isPresent(), "Initial table should not exists");
-        assertFalse(metastore.getTable(null, "tpch", renamedName).isPresent(), "Renamed table should be dropped");
+        assertThat(metastore.getTable("tpch", tableName)).as("Initial table should not exist").isEmpty();
+        assertThat(metastore.getTable("tpch", renamedName)).as("Renamed table should be dropped").isEmpty();
     }
 
     @Test
@@ -115,20 +134,24 @@ public class TestIcebergTableWithCustomLocation
         String tableName = "test_create_rename_create";
         String renamedName = "test_create_rename_create_renamed";
         assertQuerySucceeds(format("CREATE TABLE %s as select 1 as val", tableName));
-        Optional<Table> table = metastore.getTable(null, "tpch", tableName);
-        assertTrue(table.isPresent(), "Table should exist");
+        Optional<Table> table = metastore.getTable("tpch", tableName);
+        assertThat(table).as("Table should exist").isPresent();
         String tableInitialLocation = table.get().getStorage().getLocation();
 
         assertQuerySucceeds(format("ALTER TABLE %s RENAME TO %s", tableName, renamedName));
-        Optional<Table> renamedTable = metastore.getTable(null, "tpch", renamedName);
-        assertTrue(renamedTable.isPresent(), "Table should exist");
+        Optional<Table> renamedTable = metastore.getTable("tpch", renamedName);
+        assertThat(renamedTable).as("Table should exist").isPresent();
         String renamedTableLocation = renamedTable.get().getStorage().getLocation();
-        assertEquals(renamedTableLocation, tableInitialLocation, "Location should not be changed");
+        assertThat(renamedTableLocation)
+                .describedAs("Location should not be changed")
+                .isEqualTo(tableInitialLocation);
 
         assertQuerySucceeds(format("CREATE TABLE %s as select 1 as val", tableName));
-        Optional<Table> recreatedTableWithInitialName = metastore.getTable(null, "tpch", tableName);
-        assertTrue(recreatedTableWithInitialName.isPresent(), "Table should exist");
+        Optional<Table> recreatedTableWithInitialName = metastore.getTable("tpch", tableName);
+        assertThat(recreatedTableWithInitialName).as("Table should exist").isPresent();
         String recreatedTableLocation = recreatedTableWithInitialName.get().getStorage().getLocation();
-        assertNotEquals(tableInitialLocation, recreatedTableLocation, "Location should be different");
+        assertThat(tableInitialLocation)
+                .describedAs("Location should be different")
+                .isNotEqualTo(recreatedTableLocation);
     }
 }

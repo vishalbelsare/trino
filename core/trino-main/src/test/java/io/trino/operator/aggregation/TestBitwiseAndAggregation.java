@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableList;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.Type;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.stream.LongStream;
@@ -31,7 +31,7 @@ public class TestBitwiseAndAggregation
     @Override
     protected Block[] getSequenceBlocks(int start, int length)
     {
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, length);
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(length);
 
         for (int i = start; i < start + length; i++) {
             BIGINT.writeLong(blockBuilder, i);
@@ -65,5 +65,7 @@ public class TestBitwiseAndAggregation
     {
         testAggregation(1L, createLongsBlock(1L, null));
         testAggregation(1L, createLongsBlock(null, 1L));
+        testAggregation(null, createLongsBlock(ImmutableList.of()));
+        testAggregation(null, createLongsBlock(null, null, null));
     }
 }

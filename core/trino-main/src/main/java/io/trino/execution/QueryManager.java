@@ -17,6 +17,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import io.trino.Session;
 import io.trino.execution.StateMachine.StateChangeListener;
 import io.trino.server.BasicQueryInfo;
+import io.trino.server.ResultQueryInfo;
 import io.trino.server.protocol.Slug;
 import io.trino.spi.QueryId;
 
@@ -33,8 +34,18 @@ public interface QueryManager
      *
      * @throws NoSuchElementException if query does not exist
      */
-    void addOutputInfoListener(QueryId queryId, Consumer<QueryExecution.QueryOutputInfo> listener)
+    void setOutputInfoListener(QueryId queryId, Consumer<QueryExecution.QueryOutputInfo> listener)
             throws NoSuchElementException;
+
+    /**
+     * Notify that one of the output tasks failed for a given query
+     */
+    void outputTaskFailed(TaskId taskId, Throwable failure);
+
+    /**
+     * Notify that the query results for a query have been fully consumed by the client
+     */
+    void resultsConsumed(QueryId queryId);
 
     /**
      * Add a listener that fires each time the query state changes.
@@ -69,6 +80,12 @@ public interface QueryManager
     /**
      * @throws NoSuchElementException if query does not exist
      */
+    ResultQueryInfo getResultQueryInfo(QueryId queryId)
+            throws NoSuchElementException;
+
+    /**
+     * @throws NoSuchElementException if query does not exist
+     */
     Session getQuerySession(QueryId queryId);
 
     /**
@@ -81,6 +98,8 @@ public interface QueryManager
      */
     QueryState getQueryState(QueryId queryId)
             throws NoSuchElementException;
+
+    boolean hasQuery(QueryId queryId);
 
     /**
      * Updates the client heartbeat time, to prevent the query from be automatically purged.

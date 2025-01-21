@@ -18,8 +18,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.SetMultimap;
-import com.google.common.collect.Sets;
 import com.google.common.collect.Sets.SetView;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.google.inject.Inject;
 import io.airlift.discovery.client.ServiceDescriptor;
 import io.airlift.discovery.client.ServiceSelector;
 import io.airlift.discovery.client.ServiceType;
@@ -27,20 +29,16 @@ import io.airlift.http.client.HttpClient;
 import io.airlift.log.Logger;
 import io.airlift.node.NodeInfo;
 import io.trino.client.NodeVersion;
-import io.trino.connector.CatalogName;
-import io.trino.connector.system.GlobalSystemConnector;
+import io.trino.connector.CatalogManagerConfig;
+import io.trino.connector.CatalogManagerConfig.CatalogMangerKind;
 import io.trino.failuredetector.FailureDetector;
 import io.trino.server.InternalCommunicationConfig;
+import io.trino.spi.connector.CatalogHandle;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.Managed;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
-import javax.inject.Inject;
-
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -54,9 +52,9 @@ import java.util.function.Consumer;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Sets.difference;
-import static io.airlift.concurrent.Threads.threadsNamed;
+import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
-import static io.trino.metadata.NodeState.ACTIVE;
+import static io.trino.connector.system.GlobalSystemConnector.CATALOG_HANDLE;
 import static io.trino.metadata.NodeState.INACTIVE;
 import static io.trino.metadata.NodeState.SHUTTING_DOWN;
 import static java.util.Locale.ENGLISH;
@@ -70,7 +68,7 @@ public final class DiscoveryNodeManager
 {
     private static final Logger log = Logger.get(DiscoveryNodeManager.class);
 
-    private static final Splitter CONNECTOR_ID_SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
+    private static final Splitter CATALOG_HANDLE_ID_SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
     private final ServiceSelector serviceSelector;
     private final FailureDetector failureDetector;
     private final NodeVersion expectedNodeVersion;
@@ -80,9 +78,10 @@ public final class DiscoveryNodeManager
     private final ExecutorService nodeStateEventExecutor;
     private final boolean httpsRequired;
     private final InternalNode currentNode;
+    private final boolean allCatalogsOnAllNodes;
 
     @GuardedBy("this")
-    private SetMultimap<CatalogName, InternalNode> activeNodesByCatalogName;
+    private Optional<SetMultimap<CatalogHandle, InternalNode>> activeNodesByCatalogHandle = Optional.empty();
 
     @GuardedBy("this")
     private AllNodes allNodes;
@@ -100,19 +99,21 @@ public final class DiscoveryNodeManager
             FailureDetector failureDetector,
             NodeVersion expectedNodeVersion,
             @ForNodeManager HttpClient httpClient,
-            InternalCommunicationConfig internalCommunicationConfig)
+            InternalCommunicationConfig internalCommunicationConfig,
+            CatalogManagerConfig catalogManagerConfig)
     {
         this.serviceSelector = requireNonNull(serviceSelector, "serviceSelector is null");
         this.failureDetector = requireNonNull(failureDetector, "failureDetector is null");
         this.expectedNodeVersion = requireNonNull(expectedNodeVersion, "expectedNodeVersion is null");
         this.httpClient = requireNonNull(httpClient, "httpClient is null");
-        this.nodeStateUpdateExecutor = newSingleThreadScheduledExecutor(threadsNamed("node-state-poller-%s"));
-        this.nodeStateEventExecutor = newCachedThreadPool(threadsNamed("node-state-events-%s"));
+        this.nodeStateUpdateExecutor = newSingleThreadScheduledExecutor(daemonThreadsNamed("node-state-poller-%s"));
+        this.nodeStateEventExecutor = newCachedThreadPool(daemonThreadsNamed("node-state-events-%s"));
         this.httpsRequired = internalCommunicationConfig.isHttpsRequired();
+        this.allCatalogsOnAllNodes = catalogManagerConfig.getCatalogMangerKind() != CatalogMangerKind.STATIC;
 
         this.currentNode = findCurrentNode(
                 serviceSelector.selectAllServices(),
-                requireNonNull(nodeInfo, "nodeInfo is null").getNodeId(),
+                nodeInfo.getNodeId(),
                 expectedNodeVersion,
                 httpsRequired);
 
@@ -154,15 +155,24 @@ public final class DiscoveryNodeManager
         pollWorkers();
     }
 
+    @PreDestroy
+    public void destroy()
+    {
+        nodeStateUpdateExecutor.shutdown();
+        nodeStateEventExecutor.shutdown();
+    }
+
     private void pollWorkers()
     {
         AllNodes allNodes = getAllNodes();
         Set<InternalNode> aliveNodes = ImmutableSet.<InternalNode>builder()
                 .addAll(allNodes.getActiveNodes())
+                .addAll(allNodes.getDrainingNodes())
+                .addAll(allNodes.getDrainedNodes())
                 .addAll(allNodes.getShuttingDownNodes())
                 .build();
 
-        ImmutableSet<String> aliveNodeIds = aliveNodes.stream()
+        Set<String> aliveNodeIds = aliveNodes.stream()
                 .map(InternalNode::getNodeIdentifier)
                 .collect(toImmutableSet());
 
@@ -199,15 +209,18 @@ public final class DiscoveryNodeManager
     private synchronized void refreshNodesInternal()
     {
         // This is a deny-list.
+        Set<ServiceDescriptor> failed = failureDetector.getFailed();
         Set<ServiceDescriptor> services = serviceSelector.selectAllServices().stream()
-                .filter(service -> !failureDetector.getFailed().contains(service))
+                .filter(service -> !failed.contains(service))
                 .collect(toImmutableSet());
 
         ImmutableSet.Builder<InternalNode> activeNodesBuilder = ImmutableSet.builder();
         ImmutableSet.Builder<InternalNode> inactiveNodesBuilder = ImmutableSet.builder();
+        ImmutableSet.Builder<InternalNode> drainingNodesBuilder = ImmutableSet.builder();
+        ImmutableSet.Builder<InternalNode> drainedNodesBuilder = ImmutableSet.builder();
         ImmutableSet.Builder<InternalNode> shuttingDownNodesBuilder = ImmutableSet.builder();
         ImmutableSet.Builder<InternalNode> coordinatorsBuilder = ImmutableSet.builder();
-        ImmutableSetMultimap.Builder<CatalogName, InternalNode> byConnectorIdBuilder = ImmutableSetMultimap.builder();
+        ImmutableSetMultimap.Builder<CatalogHandle, InternalNode> byCatalogHandleBuilder = ImmutableSetMultimap.builder();
 
         for (ServiceDescriptor service : services) {
             URI uri = getHttpUri(service, httpsRequired);
@@ -224,20 +237,26 @@ public final class DiscoveryNodeManager
                             coordinatorsBuilder.add(node);
                         }
 
-                        // record available active nodes organized by connector id
-                        String connectorIds = service.getProperties().get("connectorIds");
-                        if (connectorIds != null) {
-                            connectorIds = connectorIds.toLowerCase(ENGLISH);
-                            for (String connectorId : CONNECTOR_ID_SPLITTER.split(connectorIds)) {
-                                byConnectorIdBuilder.put(new CatalogName(connectorId), node);
+                        // record available active nodes organized by catalog handle
+                        String catalogHandleIds = service.getProperties().get("catalogHandleIds");
+                        if (catalogHandleIds != null) {
+                            catalogHandleIds = catalogHandleIds.toLowerCase(ENGLISH);
+                            for (String catalogHandleId : CATALOG_HANDLE_ID_SPLITTER.split(catalogHandleIds)) {
+                                byCatalogHandleBuilder.put(CatalogHandle.fromId(catalogHandleId), node);
                             }
                         }
 
                         // always add system connector
-                        byConnectorIdBuilder.put(new CatalogName(GlobalSystemConnector.NAME), node);
+                        byCatalogHandleBuilder.put(CATALOG_HANDLE, node);
                         break;
                     case INACTIVE:
                         inactiveNodesBuilder.add(node);
+                        break;
+                    case DRAINING:
+                        drainingNodesBuilder.add(node);
+                        break;
+                    case DRAINED:
+                        drainedNodesBuilder.add(node);
                         break;
                     case SHUTTING_DOWN:
                         shuttingDownNodesBuilder.add(node);
@@ -248,23 +267,37 @@ public final class DiscoveryNodeManager
             }
         }
 
+        Set<InternalNode> activeNodes = activeNodesBuilder.build();
+        Set<InternalNode> drainingNodes = drainingNodesBuilder.build();
+        Set<InternalNode> drainedNodes = drainedNodesBuilder.build();
+        Set<InternalNode> inactiveNodes = inactiveNodesBuilder.build();
+        Set<InternalNode> coordinators = coordinatorsBuilder.build();
+        Set<InternalNode> shuttingDownNodes = shuttingDownNodesBuilder.build();
         if (allNodes != null) {
             // log node that are no longer active (but not shutting down)
-            SetView<InternalNode> missingNodes = difference(allNodes.getActiveNodes(), Sets.union(activeNodesBuilder.build(), shuttingDownNodesBuilder.build()));
+            Set<InternalNode> aliveNodes = ImmutableSet.<InternalNode>builder()
+                    .addAll(activeNodes)
+                    .addAll(drainingNodes)
+                    .addAll(drainedNodes)
+                    .addAll(shuttingDownNodes)
+                    .build();
+            SetView<InternalNode> missingNodes = difference(allNodes.getActiveNodes(), aliveNodes);
             for (InternalNode missingNode : missingNodes) {
                 log.info("Previously active node is missing: %s (last seen at %s)", missingNode.getNodeIdentifier(), missingNode.getHost());
             }
         }
 
-        // nodes by connector id changes anytime a node adds or removes a connector (note: this is not part of the listener system)
-        activeNodesByCatalogName = byConnectorIdBuilder.build();
+        // nodes by catalog handle changes anytime a node adds or removes a catalog (note: this is not part of the listener system)
+        if (!allCatalogsOnAllNodes) {
+            activeNodesByCatalogHandle = Optional.of(byCatalogHandleBuilder.build());
+        }
 
-        AllNodes allNodes = new AllNodes(activeNodesBuilder.build(), inactiveNodesBuilder.build(), shuttingDownNodesBuilder.build(), coordinatorsBuilder.build());
+        AllNodes allNodes = new AllNodes(activeNodes, inactiveNodes, drainingNodes, drainedNodes, shuttingDownNodes, coordinators);
         // only update if all nodes actually changed (note: this does not include the connectors registered with the nodes)
         if (!allNodes.equals(this.allNodes)) {
             // assign allNodes to a local variable for use in the callback below
             this.allNodes = allNodes;
-            coordinators = coordinatorsBuilder.build();
+            this.coordinators = coordinators;
 
             // notify listeners
             List<Consumer<AllNodes>> listeners = ImmutableList.copyOf(this.listeners);
@@ -275,24 +308,15 @@ public final class DiscoveryNodeManager
     private NodeState getNodeState(InternalNode node)
     {
         if (expectedNodeVersion.equals(node.getNodeVersion())) {
-            if (isNodeShuttingDown(node.getNodeIdentifier())) {
-                return SHUTTING_DOWN;
-            }
-            else {
-                return ACTIVE;
-            }
+            String nodeId = node.getNodeIdentifier();
+            // The empty case that is being set to a default value of ACTIVE is limited to the case where a node
+            // has announced itself but no state has yet been successfully retrieved. RemoteNodeState will retain
+            // the previously known state if any has been reported.
+            return Optional.ofNullable(nodeStates.get(nodeId))
+                    .flatMap(RemoteNodeState::getNodeState)
+                    .orElse(NodeState.ACTIVE);
         }
-        else {
-            return INACTIVE;
-        }
-    }
-
-    private boolean isNodeShuttingDown(String nodeId)
-    {
-        Optional<NodeState> remoteNodeState = nodeStates.containsKey(nodeId)
-                ? nodeStates.get(nodeId).getNodeState()
-                : Optional.empty();
-        return remoteNodeState.isPresent() && remoteNodeState.get() == SHUTTING_DOWN;
+        return INACTIVE;
     }
 
     @Override
@@ -314,6 +338,18 @@ public final class DiscoveryNodeManager
     }
 
     @Managed
+    public int getDrainingNodeCount()
+    {
+        return getAllNodes().getDrainingNodes().size();
+    }
+
+    @Managed
+    public int getDrainedNodeCount()
+    {
+        return getAllNodes().getDrainedNodes().size();
+    }
+
+    @Managed
     public int getShuttingDownNodeCount()
     {
         return getAllNodes().getShuttingDownNodes().size();
@@ -322,22 +358,28 @@ public final class DiscoveryNodeManager
     @Override
     public Set<InternalNode> getNodes(NodeState state)
     {
-        switch (state) {
-            case ACTIVE:
-                return getAllNodes().getActiveNodes();
-            case INACTIVE:
-                return getAllNodes().getInactiveNodes();
-            case SHUTTING_DOWN:
-                return getAllNodes().getShuttingDownNodes();
-        }
-        throw new IllegalArgumentException("Unknown node state " + state);
+        return switch (state) {
+            case ACTIVE -> getAllNodes().getActiveNodes();
+            case INACTIVE -> getAllNodes().getInactiveNodes();
+            case DRAINING -> getAllNodes().getDrainingNodes();
+            case DRAINED -> getAllNodes().getDrainedNodes();
+            case SHUTTING_DOWN -> getAllNodes().getShuttingDownNodes();
+        };
     }
 
     @Override
-    public synchronized Set<InternalNode> getActiveConnectorNodes(CatalogName catalogName)
+    public synchronized Set<InternalNode> getActiveCatalogNodes(CatalogHandle catalogHandle)
     {
         // activeNodesByCatalogName is immutable
-        return activeNodesByCatalogName.get(catalogName);
+        return activeNodesByCatalogHandle
+                .map(map -> map.get(catalogHandle))
+                .orElseGet(() -> allNodes.getActiveNodes());
+    }
+
+    @Override
+    public synchronized NodesSnapshot getActiveNodesSnapshot()
+    {
+        return new NodesSnapshot(allNodes.getActiveNodes(), activeNodesByCatalogHandle);
     }
 
     @Override
@@ -370,11 +412,7 @@ public final class DiscoveryNodeManager
     {
         String url = descriptor.getProperties().get(httpsRequired ? "https" : "http");
         if (url != null) {
-            try {
-                return new URI(url);
-            }
-            catch (URISyntaxException ignored) {
-            }
+            return URI.create(url);
         }
         return null;
     }

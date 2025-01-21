@@ -13,9 +13,14 @@
  */
 package io.trino.jdbc;
 
+import io.trino.client.uri.HttpClientFactory;
+import okhttp3.Call;
+import okhttp3.ConnectionPool;
+import okhttp3.Dispatcher;
 import okhttp3.OkHttpClient;
 
 import java.io.Closeable;
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverPropertyInfo;
@@ -24,7 +29,6 @@ import java.sql.SQLFeatureNotSupportedException;
 import java.util.Properties;
 import java.util.logging.Logger;
 
-import static io.trino.client.OkHttpUtil.userAgent;
 import static io.trino.jdbc.DriverInfo.DRIVER_NAME;
 import static io.trino.jdbc.DriverInfo.DRIVER_VERSION;
 import static io.trino.jdbc.DriverInfo.DRIVER_VERSION_MAJOR;
@@ -33,13 +37,23 @@ import static io.trino.jdbc.DriverInfo.DRIVER_VERSION_MINOR;
 public class NonRegisteringTrinoDriver
         implements Driver, Closeable
 {
-    private final OkHttpClient httpClient = newHttpClient();
+    private static final String USER_AGENT = DRIVER_NAME + "/" + DRIVER_VERSION;
+    private final Dispatcher dispatcher;
+    private final ConnectionPool pool;
+
+    protected NonRegisteringTrinoDriver()
+    {
+        this.dispatcher = new Dispatcher();
+        this.pool = new ConnectionPool();
+    }
 
     @Override
     public void close()
+            throws IOException
     {
-        httpClient.dispatcher().executorService().shutdown();
-        httpClient.connectionPool().evictAll();
+        // Close dispatcher and pool shared between multiple clients
+        dispatcher.executorService().shutdown();
+        pool.evictAll();
     }
 
     @Override
@@ -50,12 +64,29 @@ public class NonRegisteringTrinoDriver
             return null;
         }
 
-        TrinoDriverUri uri = TrinoDriverUri.create(url, info);
+        try {
+            TrinoDriverUri uri = TrinoDriverUri.createDriverUri(url, info);
+            OkHttpClient.Builder httpClientBuilder = HttpClientFactory.toHttpClientBuilder(uri, USER_AGENT);
+            httpClientBuilder.connectionPool(pool);
+            httpClientBuilder.dispatcher(dispatcher);
 
-        OkHttpClient.Builder builder = httpClient.newBuilder();
-        uri.setupClient(builder);
+            OkHttpClient.Builder segmentHttpClientBuilder = HttpClientFactory.unauthenticatedClientBuilder(uri, USER_AGENT);
+            segmentHttpClientBuilder.connectionPool(pool);
+            segmentHttpClientBuilder.dispatcher(dispatcher);
 
-        return new TrinoConnection(uri, builder.build());
+            return new TrinoConnection(
+                    uri,
+                    wrapClient(httpClientBuilder.build()),
+                    wrapClient(segmentHttpClientBuilder.build()));
+        }
+        catch (RuntimeException e) {
+            throw new SQLException(e.getMessage(), e);
+        }
+    }
+
+    protected Call.Factory wrapClient(OkHttpClient client)
+    {
+        return client;
     }
 
     @Override
@@ -70,13 +101,8 @@ public class NonRegisteringTrinoDriver
 
     @Override
     public DriverPropertyInfo[] getPropertyInfo(String url, Properties info)
-            throws SQLException
     {
-        Properties properties = TrinoDriverUri.create(url, info).getProperties();
-
-        return ConnectionProperties.allProperties().stream()
-                .map(property -> property.getDriverPropertyInfo(properties))
-                .toArray(DriverPropertyInfo[]::new);
+        return TrinoDriverUri.getPropertyInfo(url, info);
     }
 
     @Override
@@ -104,12 +130,5 @@ public class NonRegisteringTrinoDriver
     {
         // TODO: support java.util.Logging
         throw new SQLFeatureNotSupportedException();
-    }
-
-    private static OkHttpClient newHttpClient()
-    {
-        OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                .addInterceptor(userAgent(DRIVER_NAME + "/" + DRIVER_VERSION));
-        return builder.build();
     }
 }

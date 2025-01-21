@@ -13,116 +13,129 @@
  */
 package io.trino.operator.aggregation;
 
-import com.google.common.collect.ImmutableList;
-import io.trino.metadata.AggregationFunctionMetadata;
-import io.trino.metadata.BoundSignature;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
-import io.trino.metadata.SqlAggregationFunction;
-import io.trino.operator.aggregation.AggregationMetadata.AccumulatorStateDescriptor;
+import io.trino.annotation.UsedByGeneratedCode;
 import io.trino.operator.aggregation.state.DoubleState;
 import io.trino.operator.aggregation.state.LongState;
-import io.trino.operator.aggregation.state.StateCompiler;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.function.AccumulatorStateSerializer;
+import io.trino.spi.function.AggregationFunction;
+import io.trino.spi.function.AggregationState;
+import io.trino.spi.function.CombineFunction;
+import io.trino.spi.function.Description;
+import io.trino.spi.function.InputFunction;
+import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlType;
+import io.trino.spi.function.WindowAccumulator;
+import io.trino.spi.function.WindowIndex;
 
-import java.lang.invoke.MethodHandle;
-import java.util.Optional;
-
-import static io.trino.metadata.FunctionKind.AGGREGATE;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.INPUT_CHANNEL;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.STATE;
-import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RealType.REAL;
-import static io.trino.util.Reflection.methodHandle;
-import static java.lang.Float.floatToIntBits;
+import static io.trino.type.Reals.toReal;
 import static java.lang.Float.intBitsToFloat;
 
-public class RealAverageAggregation
-        extends SqlAggregationFunction
+@AggregationFunction(value = "avg", windowAccumulator = RealAverageAggregation.RealAverageWindowAccumulator.class)
+@Description("Returns the average value of the argument")
+public final class RealAverageAggregation
 {
-    public static final RealAverageAggregation REAL_AVERAGE_AGGREGATION = new RealAverageAggregation();
-    private static final String NAME = "avg";
+    private RealAverageAggregation() {}
 
-    private static final MethodHandle INPUT_FUNCTION = methodHandle(RealAverageAggregation.class, "input", LongState.class, DoubleState.class, long.class);
-    private static final MethodHandle REMOVE_INPUT_FUNCTION = methodHandle(RealAverageAggregation.class, "removeInput", LongState.class, DoubleState.class, long.class);
-    private static final MethodHandle COMBINE_FUNCTION = methodHandle(RealAverageAggregation.class, "combine", LongState.class, DoubleState.class, LongState.class, DoubleState.class);
-    private static final MethodHandle OUTPUT_FUNCTION = methodHandle(RealAverageAggregation.class, "output", LongState.class, DoubleState.class, BlockBuilder.class);
-
-    protected RealAverageAggregation()
-    {
-        super(
-                new FunctionMetadata(
-                        new Signature(
-                                NAME,
-                                ImmutableList.of(),
-                                ImmutableList.of(),
-                                REAL.getTypeSignature(),
-                                ImmutableList.of(REAL.getTypeSignature()),
-                                false),
-                        new FunctionNullability(true, ImmutableList.of(false)),
-                        false,
-                        true,
-                        "Returns the average value of the argument",
-                        AGGREGATE),
-                new AggregationFunctionMetadata(
-                        false,
-                        BIGINT.getTypeSignature(),
-                        DOUBLE.getTypeSignature()));
-    }
-
-    @Override
-    public AggregationMetadata specialize(BoundSignature boundSignature)
-    {
-        Class<LongState> longStateInterface = LongState.class;
-        Class<DoubleState> doubleStateInterface = DoubleState.class;
-        AccumulatorStateSerializer<LongState> longStateSerializer = StateCompiler.generateStateSerializer(longStateInterface);
-        AccumulatorStateSerializer<DoubleState> doubleStateSerializer = StateCompiler.generateStateSerializer(doubleStateInterface);
-
-        return new AggregationMetadata(
-                ImmutableList.of(STATE, STATE, INPUT_CHANNEL),
-                INPUT_FUNCTION,
-                Optional.of(REMOVE_INPUT_FUNCTION),
-                COMBINE_FUNCTION,
-                OUTPUT_FUNCTION,
-                ImmutableList.of(
-                        new AccumulatorStateDescriptor<>(
-                                longStateInterface,
-                                longStateSerializer,
-                                StateCompiler.generateStateFactory(longStateInterface)),
-                        new AccumulatorStateDescriptor<>(
-                                doubleStateInterface,
-                                doubleStateSerializer,
-                                StateCompiler.generateStateFactory(doubleStateInterface))));
-    }
-
-    public static void input(LongState count, DoubleState sum, long value)
+    @InputFunction
+    public static void input(
+            @AggregationState LongState count,
+            @AggregationState DoubleState sum,
+            @SqlType("REAL") long value)
     {
         count.setValue(count.getValue() + 1);
         sum.setValue(sum.getValue() + intBitsToFloat((int) value));
     }
 
-    public static void removeInput(LongState count, DoubleState sum, long value)
-    {
-        count.setValue(count.getValue() - 1);
-        sum.setValue(sum.getValue() - intBitsToFloat((int) value));
-    }
-
-    public static void combine(LongState count, DoubleState sum, LongState otherCount, DoubleState otherSum)
+    @CombineFunction
+    public static void combine(
+            @AggregationState LongState count,
+            @AggregationState DoubleState sum,
+            @AggregationState LongState otherCount,
+            @AggregationState DoubleState otherSum)
     {
         count.setValue(count.getValue() + otherCount.getValue());
         sum.setValue(sum.getValue() + otherSum.getValue());
     }
 
-    public static void output(LongState count, DoubleState sum, BlockBuilder out)
+    @OutputFunction("REAL")
+    public static void output(
+            @AggregationState LongState count,
+            @AggregationState DoubleState sum,
+            BlockBuilder out)
     {
         if (count.getValue() == 0) {
             out.appendNull();
         }
         else {
-            REAL.writeLong(out, floatToIntBits((float) (sum.getValue() / count.getValue())));
+            REAL.writeLong(out, toReal((float) (sum.getValue() / count.getValue())));
+        }
+    }
+
+    public static class RealAverageWindowAccumulator
+            implements WindowAccumulator
+    {
+        private long count;
+        private double sum;
+
+        @UsedByGeneratedCode
+        public RealAverageWindowAccumulator() {}
+
+        private RealAverageWindowAccumulator(long count, double sum)
+        {
+            this.count = count;
+            this.sum = sum;
+        }
+
+        @Override
+        public long getEstimatedSize()
+        {
+            return Long.BYTES + Double.BYTES;
+        }
+
+        @Override
+        public WindowAccumulator copy()
+        {
+            return new RealAverageWindowAccumulator(count, sum);
+        }
+
+        @Override
+        public void addInput(WindowIndex index, int startPosition, int endPosition)
+        {
+            for (int i = startPosition; i <= endPosition; i++) {
+                if (!index.isNull(0, i)) {
+                    sum += intBitsToFloat((int) index.getLong(0, i));
+                    count++;
+                }
+            }
+        }
+
+        @Override
+        public boolean removeInput(WindowIndex index, int startPosition, int endPosition)
+        {
+            // If sum is finite, all value to be removed are finite
+            if (!Double.isFinite(sum)) {
+                return false;
+            }
+
+            for (int i = startPosition; i <= endPosition; i++) {
+                if (!index.isNull(0, i)) {
+                    sum -= intBitsToFloat((int) index.getLong(0, i));
+                    count--;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public void output(BlockBuilder blockBuilder)
+        {
+            if (count == 0) {
+                blockBuilder.appendNull();
+            }
+            else {
+                REAL.writeLong(blockBuilder, toReal((float) (sum / count)));
+            }
         }
     }
 }

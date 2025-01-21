@@ -16,12 +16,14 @@ package io.trino.spi.type;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorSession;
 
+import java.util.Optional;
+
 //
 // A date is stored as days from 1970-01-01.
 //
 // Note: when dealing with a java.sql.Date it is important to remember that the value is stored
 // as the number of milliseconds from 1970-01-01T00:00:00 in UTC but time must be midnight in
-// the local time zone.  This mean when converting between a java.sql.Date and this
+// the local time zone.  This means when converting between a java.sql.Date and this
 // type, the time zone offset must be added or removed to keep the time at midnight in UTC.
 //
 public final class DateType
@@ -41,8 +43,36 @@ public final class DateType
             return null;
         }
 
-        int days = block.getInt(position, 0);
+        int days = getInt(block, position);
         return new SqlDate(days);
+    }
+
+    @Override
+    public Optional<Range> getRange()
+    {
+        return Optional.of(new Range((long) Integer.MIN_VALUE, (long) Integer.MAX_VALUE));
+    }
+
+    @Override
+    public Optional<Object> getPreviousValue(Object object)
+    {
+        long value = (long) object;
+        checkValueValid(value);
+        if (value == Integer.MIN_VALUE) {
+            return Optional.empty();
+        }
+        return Optional.of(value - 1);
+    }
+
+    @Override
+    public Optional<Object> getNextValue(Object object)
+    {
+        long value = (long) object;
+        checkValueValid(value);
+        if (value == Integer.MAX_VALUE) {
+            return Optional.empty();
+        }
+        return Optional.of(value + 1);
     }
 
     @Override

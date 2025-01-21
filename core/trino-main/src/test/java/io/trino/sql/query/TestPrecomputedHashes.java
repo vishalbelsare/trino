@@ -14,20 +14,24 @@
 package io.trino.sql.query;
 
 import io.trino.Session;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static io.trino.SystemSessionProperties.OPTIMIZE_HASH_GENERATION;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestPrecomputedHashes
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions;
 
-    @BeforeClass
-    public void init()
+    public TestPrecomputedHashes()
     {
         Session session = testSessionBuilder()
                 .setSystemProperty(OPTIMIZE_HASH_GENERATION, "true")
@@ -36,11 +40,10 @@ public class TestPrecomputedHashes
         assertions = new QueryAssertions(session);
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test

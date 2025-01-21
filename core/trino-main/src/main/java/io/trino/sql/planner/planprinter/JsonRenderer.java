@@ -14,10 +14,14 @@
 package io.trino.sql.planner.planprinter;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
 import io.airlift.json.JsonCodec;
-import io.trino.sql.planner.plan.PlanFragmentId;
+import io.trino.cost.PlanNodeStatsAndCostSummary;
+import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -31,46 +35,61 @@ public class JsonRenderer
     @Override
     public String render(PlanRepresentation plan)
     {
-        return CODEC.toJson(renderJson(plan, plan.getRoot()));
+        return CODEC.toJson(renderJson(plan, plan.getRoot(), false));
     }
 
-    private JsonRenderedNode renderJson(PlanRepresentation plan, NodeRepresentation node)
+    protected JsonRenderedNode renderJson(PlanRepresentation plan, NodeRepresentation node, boolean isAdaptivePlanInitialNode)
     {
-        List<JsonRenderedNode> children = node.getChildren().stream()
-                .map(plan::getNode)
-                .filter(Optional::isPresent)
-                .map(Optional::get)
-                .map(n -> renderJson(plan, n))
-                .collect(toImmutableList());
-
+        ImmutableList.Builder<JsonRenderedNode> children = ImmutableList.builder();
+        // Add initial children first
+        children.addAll(renderChildren(plan, node.getInitialChildren(), true));
+        children.addAll(renderChildren(plan, node.getChildren(), isAdaptivePlanInitialNode));
         return new JsonRenderedNode(
                 node.getId().toString(),
                 node.getName(),
-                node.getIdentifier(),
+                node.getDescriptor(),
+                node.getOutputs(),
                 node.getDetails(),
-                children,
-                node.getRemoteSources().stream()
-                        .map(PlanFragmentId::toString)
-                        .collect(toImmutableList()));
+                node.getEstimates(),
+                children.build());
+    }
+
+    private List<JsonRenderedNode> renderChildren(PlanRepresentation plan, List<PlanNodeId> children, boolean isAdaptivePlanInitialNode)
+    {
+        return children.stream()
+                .map(isAdaptivePlanInitialNode ? plan::getInitialNode : plan::getNode)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .map(n -> renderJson(plan, n, isAdaptivePlanInitialNode))
+                .collect(toImmutableList());
     }
 
     public static class JsonRenderedNode
     {
         private final String id;
         private final String name;
-        private final String identifier;
-        private final String details;
+        private final Map<String, String> descriptor;
+        private final List<Symbol> outputs;
+        private final List<String> details;
+        private final List<PlanNodeStatsAndCostSummary> estimates;
         private final List<JsonRenderedNode> children;
-        private final List<String> remoteSources;
 
-        public JsonRenderedNode(String id, String name, String identifier, String details, List<JsonRenderedNode> children, List<String> remoteSources)
+        public JsonRenderedNode(
+                String id,
+                String name,
+                Map<String, String> descriptor,
+                List<Symbol> outputs,
+                List<String> details,
+                List<PlanNodeStatsAndCostSummary> estimates,
+                List<JsonRenderedNode> children)
         {
             this.id = requireNonNull(id, "id is null");
             this.name = requireNonNull(name, "name is null");
-            this.identifier = requireNonNull(identifier, "identifier is null");
+            this.descriptor = requireNonNull(descriptor, "descriptor is null");
+            this.outputs = requireNonNull(outputs, "outputs is null");
             this.details = requireNonNull(details, "details is null");
+            this.estimates = requireNonNull(estimates, "estimates is null");
             this.children = requireNonNull(children, "children is null");
-            this.remoteSources = requireNonNull(remoteSources, "remoteSources is null");
         }
 
         @JsonProperty
@@ -86,27 +105,33 @@ public class JsonRenderer
         }
 
         @JsonProperty
-        public String getIdentifier()
+        public Map<String, String> getDescriptor()
         {
-            return identifier;
+            return descriptor;
         }
 
         @JsonProperty
-        public String getDetails()
+        public List<Symbol> getOutputs()
+        {
+            return outputs;
+        }
+
+        @JsonProperty
+        public List<String> getDetails()
         {
             return details;
+        }
+
+        @JsonProperty
+        public List<PlanNodeStatsAndCostSummary> getEstimates()
+        {
+            return estimates;
         }
 
         @JsonProperty
         public List<JsonRenderedNode> getChildren()
         {
             return children;
-        }
-
-        @JsonProperty
-        public List<String> getRemoteSources()
-        {
-            return remoteSources;
         }
     }
 }

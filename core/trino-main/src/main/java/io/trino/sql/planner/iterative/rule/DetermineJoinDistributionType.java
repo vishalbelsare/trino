@@ -14,10 +14,8 @@
 
 package io.trino.sql.planner.iterative.rule;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Ordering;
 import io.airlift.units.DataSize;
-import io.trino.FeaturesConfig.JoinDistributionType;
 import io.trino.cost.CostComparator;
 import io.trino.cost.LocalCostEstimate;
 import io.trino.cost.PlanNodeStatsEstimate;
@@ -25,38 +23,36 @@ import io.trino.cost.StatsProvider;
 import io.trino.cost.TaskCountEstimator;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.planner.iterative.Lookup;
+import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.iterative.Rule;
-import io.trino.sql.planner.optimizations.PlanNodeSearcher;
 import io.trino.sql.planner.plan.JoinNode;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.PlanNode;
-import io.trino.sql.planner.plan.TableScanNode;
-import io.trino.sql.planner.plan.ValuesNode;
-import io.trino.sql.tree.Unnest;
 
 import java.util.ArrayList;
 import java.util.List;
 
-import static io.trino.FeaturesConfig.JoinDistributionType.AUTOMATIC;
 import static io.trino.SystemSessionProperties.getJoinDistributionType;
 import static io.trino.SystemSessionProperties.getJoinMaxBroadcastTableSize;
 import static io.trino.cost.CostCalculatorWithEstimatedExchanges.calculateJoinCostWithoutOutput;
+import static io.trino.cost.PlanNodeStatsEstimateMath.getFirstKnownOutputSizeInBytes;
+import static io.trino.cost.PlanNodeStatsEstimateMath.getSourceTablesSizeInBytes;
+import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.AUTOMATIC;
 import static io.trino.sql.planner.optimizations.QueryCardinalityUtil.isAtMostScalar;
 import static io.trino.sql.planner.plan.JoinNode.DistributionType.PARTITIONED;
 import static io.trino.sql.planner.plan.JoinNode.DistributionType.REPLICATED;
-import static io.trino.sql.planner.plan.JoinNode.Type.FULL;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
-import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
-import static io.trino.sql.planner.plan.JoinNode.Type.RIGHT;
+import static io.trino.sql.planner.plan.JoinType.FULL;
+import static io.trino.sql.planner.plan.JoinType.INNER;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
+import static io.trino.sql.planner.plan.JoinType.RIGHT;
 import static io.trino.sql.planner.plan.Patterns.join;
-import static io.trino.util.MorePredicates.isInstanceOfAny;
 import static java.util.Objects.requireNonNull;
 
 public class DetermineJoinDistributionType
         implements Rule<JoinNode>
 {
     private static final Pattern<JoinNode> PATTERN = join().matching(joinNode -> joinNode.getDistributionType().isEmpty());
+    private static final double SIZE_DIFFERENCE_THRESHOLD = 8;
 
     private final CostComparator costComparator;
     private final TaskCountEstimator taskCountEstimator;
@@ -94,33 +90,9 @@ public class DetermineJoinDistributionType
 
         PlanNode buildSide = joinNode.getRight();
         PlanNodeStatsEstimate buildSideStatsEstimate = context.getStatsProvider().getStats(buildSide);
-        double buildSideSizeInBytes = buildSideStatsEstimate.getOutputSizeInBytes(buildSide.getOutputSymbols(), context.getSymbolAllocator().getTypes());
+        double buildSideSizeInBytes = buildSideStatsEstimate.getOutputSizeInBytes(buildSide.getOutputSymbols());
         return buildSideSizeInBytes <= joinMaxBroadcastTableSize.toBytes()
-                || getSourceTablesSizeInBytes(buildSide, context) <= joinMaxBroadcastTableSize.toBytes();
-    }
-
-    public static double getSourceTablesSizeInBytes(PlanNode node, Context context)
-    {
-        return getSourceTablesSizeInBytes(node, context.getLookup(), context.getStatsProvider(), context.getSymbolAllocator().getTypes());
-    }
-
-    @VisibleForTesting
-    static double getSourceTablesSizeInBytes(PlanNode node, Lookup lookup, StatsProvider statsProvider, TypeProvider typeProvider)
-    {
-        boolean hasExpandingNodes = PlanNodeSearcher.searchFrom(node, lookup)
-                .where(isInstanceOfAny(JoinNode.class, Unnest.class))
-                .matches();
-        if (hasExpandingNodes) {
-            return Double.NaN;
-        }
-
-        List<PlanNode> sourceNodes = PlanNodeSearcher.searchFrom(node, lookup)
-                .where(isInstanceOfAny(TableScanNode.class, ValuesNode.class))
-                .findAll();
-
-        return sourceNodes.stream()
-                .mapToDouble(sourceNode -> statsProvider.getStats(sourceNode).getOutputSizeInBytes(sourceNode.getOutputSymbols(), typeProvider))
-                .sum();
+                || getSourceTablesSizeInBytes(buildSide, context.getLookup(), context.getStatsProvider()) <= joinMaxBroadcastTableSize.toBytes();
     }
 
     private PlanNode getCostBasedJoin(JoinNode joinNode, Context context)
@@ -143,16 +115,17 @@ public class DetermineJoinDistributionType
     {
         DataSize joinMaxBroadcastTableSize = getJoinMaxBroadcastTableSize(context.getSession());
 
-        boolean isRightSideSmall = getSourceTablesSizeInBytes(joinNode.getRight(), context) <= joinMaxBroadcastTableSize.toBytes();
+        boolean isRightSideSmall = getSourceTablesSizeInBytes(joinNode.getRight(), context.getLookup(), context.getStatsProvider()) <= joinMaxBroadcastTableSize.toBytes();
         if (isRightSideSmall && !mustPartition(joinNode)) {
             // choose right join side with small source tables as replicated build side
             return joinNode.withDistributionType(REPLICATED);
         }
 
-        boolean isLeftSideSmall = getSourceTablesSizeInBytes(joinNode.getLeft(), context) <= joinMaxBroadcastTableSize.toBytes();
-        if (isLeftSideSmall && !mustPartition(joinNode.flipChildren())) {
+        boolean isLeftSideSmall = getSourceTablesSizeInBytes(joinNode.getLeft(), context.getLookup(), context.getStatsProvider()) <= joinMaxBroadcastTableSize.toBytes();
+        JoinNode flippedJoin = joinNode.flipChildren();
+        if (isLeftSideSmall && !mustPartition(flippedJoin)) {
             // choose join left side with small source tables as replicated build side
-            return joinNode.flipChildren().withDistributionType(REPLICATED);
+            return flippedJoin.withDistributionType(REPLICATED);
         }
 
         if (isRightSideSmall) {
@@ -162,7 +135,23 @@ public class DetermineJoinDistributionType
 
         if (isLeftSideSmall) {
             // left side is small enough, but must be partitioned
-            return joinNode.flipChildren().withDistributionType(PARTITIONED);
+            return flippedJoin.withDistributionType(PARTITIONED);
+        }
+
+        // Flip join sides if one side is smaller than the other by more than SIZE_DIFFERENCE_THRESHOLD times.
+        // We use 8x factor because getFirstKnownOutputSizeInBytes may not have accounted for the reduction in the size of
+        // the output from a filter or aggregation due to lack of estimates.
+        // We use getFirstKnownOutputSizeInBytes instead of getSourceTablesSizeInBytes to account for the reduction in
+        // output size from the operators between the join and the table scan as much as possible when comparing the sizes of the join sides.
+        double leftOutputSizeInBytes = getFirstKnownOutputSizeInBytes(joinNode.getLeft(), context.getLookup(), context.getStatsProvider());
+        double rightOutputSizeInBytes = getFirstKnownOutputSizeInBytes(joinNode.getRight(), context.getLookup(), context.getStatsProvider());
+        // All the REPLICATED cases were handled in the code above, so now we only consider PARTITIONED cases here
+        if (rightOutputSizeInBytes * SIZE_DIFFERENCE_THRESHOLD < leftOutputSizeInBytes && !mustReplicate(joinNode, context)) {
+            return joinNode.withDistributionType(PARTITIONED);
+        }
+
+        if (leftOutputSizeInBytes * SIZE_DIFFERENCE_THRESHOLD < rightOutputSizeInBytes && !mustReplicate(flippedJoin, context)) {
+            return flippedJoin.withDistributionType(PARTITIONED);
         }
 
         // neither side is small enough, choose syntactic join order
@@ -195,14 +184,14 @@ public class DetermineJoinDistributionType
 
     private static boolean mustPartition(JoinNode joinNode)
     {
-        JoinNode.Type type = joinNode.getType();
+        JoinType type = joinNode.getType();
         // With REPLICATED, the unmatched rows from right-side would be duplicated.
         return type == RIGHT || type == FULL;
     }
 
     private static boolean mustReplicate(JoinNode joinNode, Context context)
     {
-        JoinNode.Type type = joinNode.getType();
+        JoinType type = joinNode.getType();
         if (joinNode.getCriteria().isEmpty() && (type == INNER || type == LEFT)) {
             // There is nothing to partition on
             return true;
@@ -212,7 +201,6 @@ public class DetermineJoinDistributionType
 
     private PlanNodeWithCost getJoinNodeWithCost(Context context, JoinNode possibleJoinNode)
     {
-        TypeProvider types = context.getSymbolAllocator().getTypes();
         StatsProvider stats = context.getStatsProvider();
         boolean replicated = possibleJoinNode.getDistributionType().get() == REPLICATED;
         /*
@@ -243,7 +231,6 @@ public class DetermineJoinDistributionType
                 possibleJoinNode.getLeft(),
                 possibleJoinNode.getRight(),
                 stats,
-                types,
                 replicated,
                 estimatedSourceDistributedTaskCount);
         return new PlanNodeWithCost(cost.toPlanCost(), possibleJoinNode);

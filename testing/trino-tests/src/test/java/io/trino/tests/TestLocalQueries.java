@@ -15,12 +15,12 @@ package io.trino.tests;
 
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
-import io.trino.plugin.tpch.TpchConnectorFactory;
+import io.trino.plugin.memory.MemoryPlugin;
+import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.AbstractTestQueries;
-import io.trino.testing.LocalQueryRunner;
-import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.Test;
+import io.trino.testing.StandaloneQueryRunner;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.SystemSessionProperties.PUSH_PARTIAL_AGGREGATION_THROUGH_JOIN;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
@@ -28,7 +28,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingSession.testSessionBuilder;
-import static io.trino.testing.assertions.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestLocalQueries
         extends AbstractTestQueries
@@ -36,10 +36,10 @@ public class TestLocalQueries
     @Override
     protected QueryRunner createQueryRunner()
     {
-        return createLocalQueryRunner();
+        return createTestQueryRunner();
     }
 
-    public static LocalQueryRunner createLocalQueryRunner()
+    public static QueryRunner createTestQueryRunner()
     {
         Session defaultSession = testSessionBuilder()
                 .setCatalog("local")
@@ -47,37 +47,37 @@ public class TestLocalQueries
                 .setSystemProperty(PUSH_PARTIAL_AGGREGATION_THROUGH_JOIN, "true")
                 .build();
 
-        LocalQueryRunner localQueryRunner = LocalQueryRunner.builder(defaultSession)
-                .build();
+        QueryRunner queryRunner = new StandaloneQueryRunner(defaultSession);
+        queryRunner.installPlugin(new TpchPlugin());
+        queryRunner.createCatalog(defaultSession.getCatalog().get(), "tpch", ImmutableMap.of("tpch.splits-per-node", "1"));
+        queryRunner.installPlugin(new MemoryPlugin());
+        queryRunner.createCatalog("memory", "memory");
 
-        // add the tpch catalog
-        // local queries run directly against the generator
-        localQueryRunner.createCatalog(
-                defaultSession.getCatalog().get(),
-                new TpchConnectorFactory(1),
-                ImmutableMap.of());
+        return queryRunner;
+    }
 
-        localQueryRunner.getMetadata().addFunctions(CUSTOM_FUNCTIONS);
-
-        return localQueryRunner;
+    @Test
+    public void testDDL()
+    {
+        assertQuerySucceeds("CREATE SCHEMA memory.test_schema");
+        assertQuerySucceeds("CREATE TABLE memory.test_schema.test_table (c) AS VALUES 1");
+        assertQuerySucceeds("SELECT count(*) FROM memory.test_schema.test_table");
+        assertQuerySucceeds("DROP TABLE memory.test_schema.test_table");
+        assertQuerySucceeds("DROP SCHEMA memory.test_schema");
     }
 
     @Test
     public void testShowColumnStats()
     {
         // FIXME Add tests for more complex scenario with more stats
-        MaterializedResult result = computeActual("SHOW STATS FOR nation");
-
-        MaterializedResult expectedStatistics =
-                resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+        assertThat(query("SHOW STATS FOR nation"))
+                .result().matches(resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("nationkey", null, 25.0, 0.0, null, "0", "24")
                         .row("name", 177.0, 25.0, 0.0, null, null, null)
                         .row("regionkey", null, 5.0, 0.0, null, "0", "4")
                         .row("comment", 1857.0, 25.0, 0.0, null, null, null)
                         .row(null, null, null, null, 25.0, null, null)
-                        .build();
-
-        assertEquals(result, expectedStatistics);
+                        .build());
     }
 
     @Test
@@ -90,12 +90,12 @@ public class TestLocalQueries
     @Test
     public void testDecimal()
     {
-        assertQuery("SELECT DECIMAL '1.0'", "SELECT CAST('1.0' AS DECIMAL)");
-        assertQuery("SELECT DECIMAL '1.'", "SELECT CAST('1.0' AS DECIMAL)");
-        assertQuery("SELECT DECIMAL '0.1'", "SELECT CAST('0.1' AS DECIMAL)");
-        assertQuery("SELECT 1.0", "SELECT CAST('1.0' AS DECIMAL)");
-        assertQuery("SELECT 1.", "SELECT CAST('1.0' AS DECIMAL)");
-        assertQuery("SELECT 0.1", "SELECT CAST('0.1' AS DECIMAL)");
+        assertQuery("SELECT DECIMAL '1.0'", "SELECT CAST('1.0' AS DECIMAL(10, 1))");
+        assertQuery("SELECT DECIMAL '1.'", "SELECT CAST('1.0' AS DECIMAL(10, 1))");
+        assertQuery("SELECT DECIMAL '0.1'", "SELECT CAST('0.1' AS DECIMAL(10, 1))");
+        assertQuery("SELECT 1.0");
+        assertQuery("SELECT 1.");
+        assertQuery("SELECT 0.1");
     }
 
     @Test

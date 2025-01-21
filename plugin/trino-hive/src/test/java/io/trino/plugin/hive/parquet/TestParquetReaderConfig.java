@@ -15,7 +15,7 @@ package io.trino.plugin.hive.parquet;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -33,28 +33,40 @@ public class TestParquetReaderConfig
         assertRecordedDefaults(recordDefaults(ParquetReaderConfig.class)
                 .setIgnoreStatistics(false)
                 .setMaxReadBlockSize(DataSize.of(16, MEGABYTE))
+                .setMaxReadBlockRowCount(8 * 1024)
                 .setMaxMergeDistance(DataSize.of(1, MEGABYTE))
                 .setMaxBufferSize(DataSize.of(8, MEGABYTE))
-                .setUseColumnIndex(true));
+                .setUseColumnIndex(true)
+                .setUseBloomFilter(true)
+                .setSmallFileThreshold(DataSize.of(3, MEGABYTE))
+                .setVectorizedDecodingEnabled(true));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("parquet.ignore-statistics", "true")
                 .put("parquet.max-read-block-size", "66kB")
+                .put("parquet.max-read-block-row-count", "500")
                 .put("parquet.max-buffer-size", "1431kB")
                 .put("parquet.max-merge-distance", "342kB")
                 .put("parquet.use-column-index", "false")
-                .build();
+                .put("parquet.use-bloom-filter", "false")
+                .put("parquet.small-file-threshold", "1kB")
+                .put("parquet.experimental.vectorized-decoding.enabled", "false")
+                .buildOrThrow();
 
         ParquetReaderConfig expected = new ParquetReaderConfig()
                 .setIgnoreStatistics(true)
                 .setMaxReadBlockSize(DataSize.of(66, KILOBYTE))
+                .setMaxReadBlockRowCount(500)
                 .setMaxBufferSize(DataSize.of(1431, KILOBYTE))
                 .setMaxMergeDistance(DataSize.of(342, KILOBYTE))
-                .setUseColumnIndex(false);
+                .setUseColumnIndex(false)
+                .setUseBloomFilter(false)
+                .setSmallFileThreshold(DataSize.of(1, KILOBYTE))
+                .setVectorizedDecodingEnabled(false);
 
         assertFullMapping(properties, expected);
     }

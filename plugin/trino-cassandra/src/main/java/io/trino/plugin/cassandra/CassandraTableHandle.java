@@ -13,98 +13,36 @@
  */
 package io.trino.plugin.cassandra;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableList;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.trino.spi.connector.ConnectorTableHandle;
-import io.trino.spi.connector.SchemaTableName;
 
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
 
-public class CassandraTableHandle
+public record CassandraTableHandle(CassandraRelationHandle relationHandle)
         implements ConnectorTableHandle
 {
-    private final String schemaName;
-    private final String tableName;
-    private final Optional<List<CassandraPartition>> partitions;
-    private final String clusteringKeyPredicates;
-
-    public CassandraTableHandle(String schemaName, String tableName)
+    public CassandraTableHandle
     {
-        this(schemaName, tableName, Optional.empty(), "");
+        requireNonNull(relationHandle, "relationHandle is null");
     }
 
-    @JsonCreator
-    public CassandraTableHandle(
-            @JsonProperty("schemaName") String schemaName,
-            @JsonProperty("tableName") String tableName,
-            @JsonProperty("partitions") Optional<List<CassandraPartition>> partitions,
-            @JsonProperty("clusteringKeyPredicates") String clusteringKeyPredicates)
+    @JsonIgnore
+    public CassandraNamedRelationHandle getRequiredNamedRelation()
     {
-        this.schemaName = requireNonNull(schemaName, "schemaName is null");
-        this.tableName = requireNonNull(tableName, "tableName is null");
-        this.partitions = requireNonNull(partitions, "partitions is null").map(ImmutableList::copyOf);
-        this.clusteringKeyPredicates = requireNonNull(clusteringKeyPredicates, "clusteringKeyPredicates is null");
+        checkState(isNamedRelation(), "The table handle does not represent a named relation: %s", this);
+        return (CassandraNamedRelationHandle) relationHandle;
     }
 
-    @JsonProperty
-    public String getSchemaName()
+    @JsonIgnore
+    public boolean isSynthetic()
     {
-        return schemaName;
+        return !isNamedRelation();
     }
 
-    @JsonProperty
-    public String getTableName()
+    @JsonIgnore
+    public boolean isNamedRelation()
     {
-        return tableName;
-    }
-
-    @JsonProperty
-    public Optional<List<CassandraPartition>> getPartitions()
-    {
-        return partitions;
-    }
-
-    @JsonProperty
-    public String getClusteringKeyPredicates()
-    {
-        return clusteringKeyPredicates;
-    }
-
-    public SchemaTableName getSchemaTableName()
-    {
-        return new SchemaTableName(schemaName, tableName);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(schemaName, tableName, partitions, clusteringKeyPredicates);
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (this == obj) {
-            return true;
-        }
-        if (obj == null || getClass() != obj.getClass()) {
-            return false;
-        }
-        CassandraTableHandle other = (CassandraTableHandle) obj;
-        return Objects.equals(this.schemaName, other.schemaName) &&
-                Objects.equals(this.tableName, other.tableName) &&
-                Objects.equals(this.partitions, other.partitions) &&
-                Objects.equals(this.clusteringKeyPredicates, other.clusteringKeyPredicates);
-    }
-
-    @Override
-    public String toString()
-    {
-        return schemaName + ":" + tableName;
+        return relationHandle instanceof CassandraNamedRelationHandle;
     }
 }

@@ -14,20 +14,20 @@
 package io.trino.server.ui;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.execution.QueryState;
+import io.trino.operator.RetryPolicy;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.BasicQueryStats;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorType;
 import io.trino.spi.QueryId;
-import io.trino.spi.memory.MemoryPoolId;
 import io.trino.spi.resourcegroups.QueryType;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 
-import javax.annotation.concurrent.Immutable;
-
 import java.net.URI;
 import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -42,8 +42,8 @@ public class TrimmedBasicQueryInfo
     private final Optional<String> sessionPrincipal;
     private final Optional<String> sessionSource;
     private final Optional<ResourceGroupId> resourceGroupId;
+    private final Optional<String> queryDataEncoding;
     private final QueryState state;
-    private final MemoryPoolId memoryPool;
     private final boolean scheduled;
     private final URI self;
     private final String queryTextPreview;
@@ -53,6 +53,8 @@ public class TrimmedBasicQueryInfo
     private final Optional<ErrorType> errorType;
     private final Optional<ErrorCode> errorCode;
     private final Optional<QueryType> queryType;
+    private final RetryPolicy retryPolicy;
+    private final Optional<Set<String>> clientTags;
 
     public TrimmedBasicQueryInfo(BasicQueryInfo queryInfo)
     {
@@ -61,8 +63,8 @@ public class TrimmedBasicQueryInfo
         this.sessionPrincipal = requireNonNull(queryInfo.getSession().getPrincipal(), "principal is null");
         this.sessionSource = requireNonNull(queryInfo.getSession().getSource(), "source is null");
         this.resourceGroupId = requireNonNull(queryInfo.getResourceGroupId(), "resourceGroupId is null");
+        this.queryDataEncoding = requireNonNull(queryInfo.getSession().getQueryDataEncoding(), "queryDataEncoding is null");
         this.state = requireNonNull(queryInfo.getState(), "state is null");
-        this.memoryPool = requireNonNull(queryInfo.getMemoryPool(), "memoryPool is null");
         this.errorType = Optional.ofNullable(queryInfo.getErrorType());
         this.errorCode = Optional.ofNullable(queryInfo.getErrorCode());
         this.scheduled = queryInfo.isScheduled();
@@ -78,6 +80,8 @@ public class TrimmedBasicQueryInfo
         this.preparedQuery = requireNonNull(queryInfo.getPreparedQuery(), "preparedQuery is null");
         this.queryStats = requireNonNull(queryInfo.getQueryStats(), "queryStats is null");
         this.queryType = requireNonNull(queryInfo.getQueryType(), "queryType is null");
+        this.retryPolicy = requireNonNull(queryInfo.getRetryPolicy(), "retryPolicy is null");
+        this.clientTags = Optional.ofNullable(queryInfo.getSession().getClientTags());
     }
 
     @JsonProperty
@@ -111,15 +115,15 @@ public class TrimmedBasicQueryInfo
     }
 
     @JsonProperty
-    public QueryState getState()
+    public Optional<String> getQueryDataEncoding()
     {
-        return state;
+        return queryDataEncoding;
     }
 
     @JsonProperty
-    public MemoryPoolId getMemoryPool()
+    public QueryState getState()
     {
-        return memoryPool;
+        return state;
     }
 
     @JsonProperty
@@ -174,6 +178,18 @@ public class TrimmedBasicQueryInfo
     public Optional<QueryType> getQueryType()
     {
         return queryType;
+    }
+
+    @JsonProperty
+    public RetryPolicy getRetryPolicy()
+    {
+        return retryPolicy;
+    }
+
+    @JsonProperty
+    public Optional<Set<String>> getClientTags()
+    {
+        return clientTags;
     }
 
     @Override

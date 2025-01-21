@@ -18,6 +18,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.primitives.Ints;
 import io.airlift.units.Duration;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
+import io.confluent.kafka.schemaregistry.client.rest.entities.Metadata;
+import io.confluent.kafka.schemaregistry.client.rest.entities.RuleSet;
+import io.confluent.kafka.schemaregistry.client.rest.entities.SchemaEntity;
 import io.confluent.kafka.schemaregistry.client.rest.entities.SchemaReference;
 import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
 import io.trino.tempto.ProductTest;
@@ -46,20 +49,21 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
 import static io.trino.tempto.context.ThreadLocalTestContextHolder.testContext;
 import static io.trino.tempto.fulfillment.table.TableHandle.tableHandle;
 import static io.trino.tempto.fulfillment.table.kafka.KafkaMessageContentsBuilder.contentsBuilder;
-import static io.trino.tempto.query.QueryExecutor.query;
 import static io.trino.tests.product.TestGroups.KAFKA;
 import static io.trino.tests.product.TestGroups.PROFILE_SPECIFIC_TESTS;
 import static io.trino.tests.product.utils.QueryAssertions.assertEventually;
+import static io.trino.tests.product.utils.QueryExecutors.onTrino;
 import static io.trino.tests.product.utils.SchemaRegistryClientUtils.getSchemaRegistryClient;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @Test(singleThreaded = true)
 public class TestKafkaAvroReadsSmokeTest
@@ -68,18 +72,18 @@ public class TestKafkaAvroReadsSmokeTest
     private static final String KAFKA_SCHEMA = "product_tests";
 
     private static final String ALL_DATATYPES_AVRO_TOPIC_NAME = "read_all_datatypes_avro";
-    private static final String ALL_DATATYPE_SCHEMA_PATH = "/docker/presto-product-tests/conf/presto/etc/catalog/kafka/all_datatypes_avro_schema.avsc";
+    private static final String ALL_DATATYPE_SCHEMA_PATH = "/docker/trino-product-tests/conf/trino/etc/catalog/kafka/all_datatypes_avro_schema.avsc";
 
     private static final String ALL_NULL_AVRO_TOPIC_NAME = "read_all_null_avro";
 
     private static final String STRUCTURAL_AVRO_TOPIC_NAME = "read_structural_datatype_avro";
-    private static final String STRUCTURAL_SCHEMA_PATH = "/docker/presto-product-tests/conf/presto/etc/catalog/kafka/structural_datatype_avro_schema.avsc";
+    private static final String STRUCTURAL_SCHEMA_PATH = "/docker/trino-product-tests/conf/trino/etc/catalog/kafka/structural_datatype_avro_schema.avsc";
 
     private static final String AVRO_SCHEMA_WITH_REFERENCES_TOPIC_NAME = "schema_with_references_avro";
-    private static final String AVRO_SCHEMA_WITH_REFERENCES_SCHEMA_PATH = "/docker/presto-product-tests/conf/presto/etc/catalog/kafka/schema_with_references.avsc";
+    private static final String AVRO_SCHEMA_WITH_REFERENCES_SCHEMA_PATH = "/docker/trino-product-tests/conf/trino/etc/catalog/kafka/schema_with_references.avsc";
 
     @Test(groups = {KAFKA, PROFILE_SPECIFIC_TESTS}, dataProvider = "catalogs")
-    public void testSelectPrimitiveDataType(KafkaCatalog kafkaCatalog, MessageSerializer messageSerializer)
+    public void testSelectPrimitiveDataType(KafkaCatalog kafkaCatalog)
             throws Exception
     {
         ImmutableMap<String, Object> record = ImmutableMap.of(
@@ -87,12 +91,12 @@ public class TestKafkaAvroReadsSmokeTest
                 "a_bigint", 127L,
                 "a_double", 234.567,
                 "a_boolean", true);
-        String topicName = ALL_DATATYPES_AVRO_TOPIC_NAME + kafkaCatalog.getTopicNameSuffix();
-        createAvroTable(ALL_DATATYPE_SCHEMA_PATH, ALL_DATATYPES_AVRO_TOPIC_NAME, topicName, record, messageSerializer);
+        String topicName = ALL_DATATYPES_AVRO_TOPIC_NAME + kafkaCatalog.topicNameSuffix();
+        createAvroTable(ALL_DATATYPE_SCHEMA_PATH, ALL_DATATYPES_AVRO_TOPIC_NAME, topicName, record, kafkaCatalog.messageSerializer());
         assertEventually(
                 new Duration(30, SECONDS),
                 () -> {
-                    QueryResult queryResult = query(format("select * from %s.%s", kafkaCatalog.getCatalogName(), KAFKA_SCHEMA + "." + topicName));
+                    QueryResult queryResult = onTrino().executeQuery(format("select * from %s.%s", kafkaCatalog.catalogName(), KAFKA_SCHEMA + "." + topicName));
                     assertThat(queryResult).containsOnly(row(
                             "foobar",
                             127,
@@ -102,15 +106,15 @@ public class TestKafkaAvroReadsSmokeTest
     }
 
     @Test(groups = {KAFKA, PROFILE_SPECIFIC_TESTS}, dataProvider = "catalogs")
-    public void testNullType(KafkaCatalog kafkaCatalog, MessageSerializer messageSerializer)
+    public void testNullType(KafkaCatalog kafkaCatalog)
             throws Exception
     {
-        String topicName = ALL_NULL_AVRO_TOPIC_NAME + kafkaCatalog.getTopicNameSuffix();
-        createAvroTable(ALL_DATATYPE_SCHEMA_PATH, ALL_NULL_AVRO_TOPIC_NAME, topicName, ImmutableMap.of(), messageSerializer);
+        String topicName = ALL_NULL_AVRO_TOPIC_NAME + kafkaCatalog.topicNameSuffix();
+        createAvroTable(ALL_DATATYPE_SCHEMA_PATH, ALL_NULL_AVRO_TOPIC_NAME, topicName, ImmutableMap.of(), kafkaCatalog.messageSerializer());
         assertEventually(
                 new Duration(30, SECONDS),
                 () -> {
-                    QueryResult queryResult = query(format("select * from %s.%s", kafkaCatalog.getCatalogName(), KAFKA_SCHEMA + "." + topicName));
+                    QueryResult queryResult = onTrino().executeQuery(format("select * from %s.%s", kafkaCatalog.catalogName(), KAFKA_SCHEMA + "." + topicName));
                     assertThat(queryResult).containsOnly(row(
                             null,
                             null,
@@ -120,22 +124,22 @@ public class TestKafkaAvroReadsSmokeTest
     }
 
     @Test(groups = {KAFKA, PROFILE_SPECIFIC_TESTS}, dataProvider = "catalogs")
-    public void testSelectStructuralDataType(KafkaCatalog kafkaCatalog, MessageSerializer messageSerializer)
+    public void testSelectStructuralDataType(KafkaCatalog kafkaCatalog)
             throws Exception
     {
         ImmutableMap<String, Object> record = ImmutableMap.of(
                 "a_array", ImmutableList.of(100L, 102L),
                 "a_map", ImmutableMap.of("key1", "value1"));
-        String topicName = STRUCTURAL_AVRO_TOPIC_NAME + kafkaCatalog.getTopicNameSuffix();
-        createAvroTable(STRUCTURAL_SCHEMA_PATH, STRUCTURAL_AVRO_TOPIC_NAME, topicName, record, messageSerializer);
+        String topicName = STRUCTURAL_AVRO_TOPIC_NAME + kafkaCatalog.topicNameSuffix();
+        createAvroTable(STRUCTURAL_SCHEMA_PATH, STRUCTURAL_AVRO_TOPIC_NAME, topicName, record, kafkaCatalog.messageSerializer());
         assertEventually(
                 new Duration(30, SECONDS),
                 () -> {
-                    QueryResult queryResult = query(format(
+                    QueryResult queryResult = onTrino().executeQuery(format(
                             "SELECT a[1], a[2], m['key1'] FROM (SELECT %s as a, %s as m FROM %s.%s) t",
-                            kafkaCatalog.isColumnMappingSupported() ? "c_array" : "a_array",
-                            kafkaCatalog.isColumnMappingSupported() ? "c_map" : "a_map",
-                            kafkaCatalog.getCatalogName(),
+                            kafkaCatalog.columnMappingSupported() ? "c_array" : "a_array",
+                            kafkaCatalog.columnMappingSupported() ? "c_map" : "a_map",
+                            kafkaCatalog.catalogName(),
                             KAFKA_SCHEMA + "." + topicName));
                     assertThat(queryResult).containsOnly(row(100, 102, "value1"));
                 });
@@ -146,40 +150,22 @@ public class TestKafkaAvroReadsSmokeTest
     {
         return new Object[][] {
                 {
-                        new KafkaCatalog("kafka", "", true), new AvroMessageSerializer(),
+                        new KafkaCatalog("kafka", "", true, new AvroMessageSerializer()),
                 },
                 {
-                        new KafkaCatalog("kafka_schema_registry", "_schema_registry", false), new SchemaRegistryAvroMessageSerializer(),
+                        new KafkaCatalog("kafka_schema_registry", "_schema_registry", false, new SchemaRegistryAvroMessageSerializer()),
                 },
         };
     }
 
-    private static final class KafkaCatalog
+    private record KafkaCatalog(String catalogName, String topicNameSuffix, boolean columnMappingSupported, MessageSerializer messageSerializer)
     {
-        private final String catalogName;
-        private final String topicNameSuffix;
-        private final boolean columnMappingSupported;
-
-        private KafkaCatalog(String catalogName, String topicNameSuffix, boolean columnMappingSupported)
+        private KafkaCatalog(String catalogName, String topicNameSuffix, boolean columnMappingSupported, MessageSerializer messageSerializer)
         {
             this.catalogName = requireNonNull(catalogName, "catalogName is null");
             this.topicNameSuffix = requireNonNull(topicNameSuffix, "topicNameSuffix is null");
             this.columnMappingSupported = columnMappingSupported;
-        }
-
-        public String getCatalogName()
-        {
-            return catalogName;
-        }
-
-        public String getTopicNameSuffix()
-        {
-            return topicNameSuffix;
-        }
-
-        public boolean isColumnMappingSupported()
-        {
-            return columnMappingSupported;
+            this.messageSerializer = requireNonNull(messageSerializer, "messageSerializer is null");
         }
 
         @Override
@@ -219,7 +205,7 @@ public class TestKafkaAvroReadsSmokeTest
         assertEventually(
                 new Duration(30, SECONDS),
                 () -> {
-                    QueryResult queryResult = query(format("select reference.a_varchar, reference.a_double from kafka_schema_registry.%s.%s", KAFKA_SCHEMA, AVRO_SCHEMA_WITH_REFERENCES_TOPIC_NAME));
+                    QueryResult queryResult = onTrino().executeQuery(format("select reference.a_varchar, reference.a_double from kafka_schema_registry.%s.%s", KAFKA_SCHEMA, AVRO_SCHEMA_WITH_REFERENCES_TOPIC_NAME));
                     assertThat(queryResult).containsOnly(row(
                             "foobar",
                             234.567));
@@ -350,15 +336,57 @@ public class TestKafkaAvroReadsSmokeTest
         }
 
         @Override
+        public Integer version()
+        {
+            return 1;
+        }
+
+        @Override
         public List<SchemaReference> references()
         {
             return schemaReferences;
         }
 
         @Override
-        public boolean isBackwardCompatible(ParsedSchema parsedSchema)
+        public Metadata metadata()
         {
-            return false;
+            return new Metadata(null, null, Set.of());
+        }
+
+        @Override
+        public RuleSet ruleSet()
+        {
+            return new RuleSet(null, null);
+        }
+
+        @Override
+        public ParsedSchema copy()
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ParsedSchema copy(Integer version)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ParsedSchema copy(Metadata metadata, RuleSet ruleSet)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public ParsedSchema copy(Map<SchemaEntity, Set<String>> tagsToAdd, Map<SchemaEntity, Set<String>> tagsToRemove)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<String> isBackwardCompatible(ParsedSchema parsedSchema)
+        {
+            return ImmutableList.of("Is not backward compatible");
         }
 
         @Override

@@ -27,16 +27,18 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.ObjectMapperProvider;
 import io.airlift.log.Logger;
-import io.airlift.security.pem.PemReader;
 import io.airlift.stats.TimeStat;
 import io.airlift.units.Duration;
 import io.trino.plugin.elasticsearch.AwsSecurityConfig;
 import io.trino.plugin.elasticsearch.ElasticsearchConfig;
 import io.trino.plugin.elasticsearch.PasswordConfig;
 import io.trino.spi.TrinoException;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
@@ -60,33 +62,18 @@ import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.client.RestClientBuilder;
-import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-import javax.inject.Inject;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509TrustManager;
-import javax.security.auth.x500.X500Principal;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.GeneralSecurityException;
-import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateExpiredException;
-import java.security.cert.CertificateNotYetValidException;
-import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
@@ -105,6 +92,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.json.JsonCodec.jsonCodec;
+import static io.trino.plugin.base.ssl.SslUtils.createSSLContext;
 import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH_CONNECTION_ERROR;
 import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH_INVALID_METADATA;
 import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH_INVALID_RESPONSE;
@@ -113,8 +101,6 @@ import static io.trino.plugin.elasticsearch.ElasticsearchErrorCode.ELASTICSEARCH
 import static java.lang.StrictMath.toIntExact;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.Collections.list;
-import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.elasticsearch.action.search.SearchType.QUERY_THEN_FETCH;
@@ -153,8 +139,6 @@ public class ElasticsearchClient
             Optional<AwsSecurityConfig> awsSecurityConfig,
             Optional<PasswordConfig> passwordConfig)
     {
-        requireNonNull(config, "config is null");
-
         client = createClient(config, awsSecurityConfig, passwordConfig, backpressureStats);
 
         this.ignorePublishAddress = config.isIgnorePublishAddress();
@@ -190,7 +174,7 @@ public class ElasticsearchClient
             Set<ElasticsearchNode> nodes = fetchNodes();
 
             HttpHost[] hosts = nodes.stream()
-                    .map(ElasticsearchNode::getAddress)
+                    .map(ElasticsearchNode::address)
                     .filter(Optional::isPresent)
                     .map(Optional::get)
                     .map(address -> HttpHost.create(format("%s://%s", tlsEnabled ? "https" : "http", address)))
@@ -216,10 +200,11 @@ public class ElasticsearchClient
             TimeStat backpressureStats)
     {
         RestClientBuilder builder = RestClient.builder(
-                new HttpHost(config.getHost(), config.getPort(), config.isTlsEnabled() ? "https" : "http"))
-                .setMaxRetryTimeoutMillis(toIntExact(config.getMaxRetryTime().toMillis()));
+                config.getHosts().stream()
+                        .map(httpHost -> new HttpHost(httpHost, config.getPort(), config.isTlsEnabled() ? "https" : "http"))
+                        .toArray(HttpHost[]::new));
 
-        builder.setHttpClientConfigCallback(ignored -> {
+        builder.setHttpClientConfigCallback(_ -> {
             RequestConfig requestConfig = RequestConfig.custom()
                     .setConnectTimeout(toIntExact(config.getConnectTimeout().toMillis()))
                     .setSocketTimeout(toIntExact(config.getRequestTimeout().toMillis()))
@@ -240,7 +225,7 @@ public class ElasticsearchClient
                 buildSslContext(config.getKeystorePath(), config.getKeystorePassword(), config.getTrustStorePath(), config.getTruststorePassword())
                         .ifPresent(clientBuilder::setSSLContext);
 
-                if (config.isVerifyHostnames()) {
+                if (!config.isVerifyHostnames()) {
                     clientBuilder.setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE);
                 }
             }
@@ -295,102 +280,10 @@ public class ElasticsearchClient
         }
 
         try {
-            // load KeyStore if configured and get KeyManagers
-            KeyStore keyStore = null;
-            KeyManager[] keyManagers = null;
-            if (keyStorePath.isPresent()) {
-                char[] keyManagerPassword;
-                try {
-                    // attempt to read the key store as a PEM file
-                    keyStore = PemReader.loadKeyStore(keyStorePath.get(), keyStorePath.get(), keyStorePassword);
-                    // for PEM encoded keys, the password is used to decrypt the specific key (and does not protect the keystore itself)
-                    keyManagerPassword = new char[0];
-                }
-                catch (IOException | GeneralSecurityException ignored) {
-                    keyManagerPassword = keyStorePassword.map(String::toCharArray).orElse(null);
-
-                    keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
-                    try (InputStream in = new FileInputStream(keyStorePath.get())) {
-                        keyStore.load(in, keyManagerPassword);
-                    }
-                }
-                validateCertificates(keyStore);
-                KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-                keyManagerFactory.init(keyStore, keyManagerPassword);
-                keyManagers = keyManagerFactory.getKeyManagers();
-            }
-
-            // load TrustStore if configured, otherwise use KeyStore
-            KeyStore trustStore = keyStore;
-            if (trustStorePath.isPresent()) {
-                trustStore = loadTrustStore(trustStorePath.get(), trustStorePassword);
-            }
-
-            // create TrustManagerFactory
-            TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            trustManagerFactory.init(trustStore);
-
-            // get X509TrustManager
-            TrustManager[] trustManagers = trustManagerFactory.getTrustManagers();
-            if (trustManagers.length != 1 || !(trustManagers[0] instanceof X509TrustManager)) {
-                throw new RuntimeException("Unexpected default trust managers:" + Arrays.toString(trustManagers));
-            }
-            // create SSLContext
-            SSLContext result = SSLContext.getInstance("SSL");
-            result.init(keyManagers, trustManagers, null);
-            return Optional.of(result);
+            return Optional.of(createSSLContext(keyStorePath, keyStorePassword, trustStorePath, trustStorePassword));
         }
         catch (GeneralSecurityException | IOException e) {
             throw new TrinoException(ELASTICSEARCH_SSL_INITIALIZATION_FAILURE, e);
-        }
-    }
-
-    private static KeyStore loadTrustStore(File trustStorePath, Optional<String> trustStorePassword)
-            throws IOException, GeneralSecurityException
-    {
-        KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
-        try {
-            // attempt to read the trust store as a PEM file
-            List<X509Certificate> certificateChain = PemReader.readCertificateChain(trustStorePath);
-            if (!certificateChain.isEmpty()) {
-                trustStore.load(null, null);
-                for (X509Certificate certificate : certificateChain) {
-                    X500Principal principal = certificate.getSubjectX500Principal();
-                    trustStore.setCertificateEntry(principal.getName(), certificate);
-                }
-                return trustStore;
-            }
-        }
-        catch (IOException | GeneralSecurityException ignored) {
-        }
-
-        try (InputStream in = new FileInputStream(trustStorePath)) {
-            trustStore.load(in, trustStorePassword.map(String::toCharArray).orElse(null));
-        }
-        return trustStore;
-    }
-
-    private static void validateCertificates(KeyStore keyStore)
-            throws GeneralSecurityException
-    {
-        for (String alias : list(keyStore.aliases())) {
-            if (!keyStore.isKeyEntry(alias)) {
-                continue;
-            }
-            Certificate certificate = keyStore.getCertificate(alias);
-            if (!(certificate instanceof X509Certificate)) {
-                continue;
-            }
-
-            try {
-                ((X509Certificate) certificate).checkValidity();
-            }
-            catch (CertificateExpiredException e) {
-                throw new CertificateExpiredException("KeyStore certificate is expired: " + e.getMessage());
-            }
-            catch (CertificateNotYetValidException e) {
-                throw new CertificateNotYetValidException("KeyStore certificate is not yet valid: " + e.getMessage());
-            }
         }
     }
 
@@ -422,7 +315,7 @@ public class ElasticsearchClient
     public List<Shard> getSearchShards(String index)
     {
         Map<String, ElasticsearchNode> nodeById = getNodes().stream()
-                .collect(toImmutableMap(ElasticsearchNode::getId, Function.identity()));
+                .collect(toImmutableMap(ElasticsearchNode::id, Function.identity()));
 
         SearchShardsResponse shardsResponse = doRequest(format("/%s/_search_shards", index), SEARCH_SHARDS_RESPONSE_CODEC::fromJson);
 
@@ -448,7 +341,7 @@ public class ElasticsearchClient
                 node = nodeById.get(chosen.getNode());
             }
 
-            shards.add(new Shard(chosen.getIndex(), chosen.getShard(), node.getAddress()));
+            shards.add(new Shard(chosen.getIndex(), chosen.getShard(), node.address()));
         }
 
         return shards.build();
@@ -497,9 +390,20 @@ public class ElasticsearchClient
                     int docsCount = root.get(i).get("docs.count").asInt();
                     int deletedDocsCount = root.get(i).get("docs.deleted").asInt();
                     if (docsCount == 0 && deletedDocsCount == 0) {
-                        // without documents, the index won't have any dynamic mappings, but maybe there are some explicit ones
-                        if (getIndexMetadata(index).getSchema().getFields().isEmpty()) {
-                            continue;
+                        try {
+                            // without documents, the index won't have any dynamic mappings, but maybe there are some explicit ones
+                            if (getIndexMetadata(index).schema().fields().isEmpty()) {
+                                continue;
+                            }
+                        }
+                        catch (TrinoException e) {
+                            if (e.getErrorCode().equals(ELASTICSEARCH_INVALID_METADATA.toErrorCode())) {
+                                continue;
+                            }
+                            if (e.getCause() instanceof ResponseException cause && cause.getResponse().getStatusLine().getStatusCode() == 404) {
+                                continue;
+                            }
+                            throw e;
                         }
                     }
                     result.add(index);
@@ -528,7 +432,7 @@ public class ElasticsearchClient
                         result.put(element.getKey(), ImmutableList.copyOf(aliasNames));
                     }
                 }
-                return result.build();
+                return result.buildOrThrow();
             }
             catch (IOException e) {
                 throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
@@ -763,7 +667,7 @@ public class ElasticsearchClient
                                 "GET",
                                 format("/%s/_count?preference=_shards:%s", index, shard),
                                 ImmutableMap.of(),
-                                new StringEntity(sourceBuilder.toString()),
+                                new StringEntity(sourceBuilder.toString(), UTF_8),
                                 new BasicHeader("Content-Type", "application/json"));
             }
             catch (ResponseException e) {
@@ -774,7 +678,7 @@ public class ElasticsearchClient
             }
 
             try {
-                return COUNT_RESPONSE_CODEC.fromJson(EntityUtils.toByteArray(response.getEntity()))
+                return COUNT_RESPONSE_CODEC.fromJson(response.getEntity().getContent())
                         .getCount();
             }
             catch (IOException e) {
@@ -839,15 +743,12 @@ public class ElasticsearchClient
             throw new TrinoException(ELASTICSEARCH_CONNECTION_ERROR, e);
         }
 
-        String body;
-        try {
-            body = EntityUtils.toString(response.getEntity());
+        try (InputStream stream = response.getEntity().getContent()) {
+            return handler.process(stream);
         }
         catch (IOException e) {
             throw new TrinoException(ELASTICSEARCH_INVALID_RESPONSE, e);
         }
-
-        return handler.process(body);
     }
 
     private static TrinoException propagate(ResponseException exception)
@@ -897,6 +798,6 @@ public class ElasticsearchClient
 
     private interface ResponseHandler<T>
     {
-        T process(String body);
+        T process(InputStream stream);
     }
 }
