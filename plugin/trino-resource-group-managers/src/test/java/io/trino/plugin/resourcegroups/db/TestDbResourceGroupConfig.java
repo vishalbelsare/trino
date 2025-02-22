@@ -15,15 +15,19 @@ package io.trino.plugin.resourcegroups.db;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import jakarta.validation.constraints.AssertTrue;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDbResourceGroupConfig
 {
@@ -35,26 +39,40 @@ public class TestDbResourceGroupConfig
                 .setConfigDbUser(null)
                 .setConfigDbPassword(null)
                 .setMaxRefreshInterval(new Duration(1, HOURS))
+                .setRefreshInterval(new Duration(1, SECONDS))
                 .setExactMatchSelectorEnabled(false));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("resource-groups.config-db-url", "jdbc:mysql://localhost:3306/config")
                 .put("resource-groups.config-db-user", "trino_admin")
                 .put("resource-groups.config-db-password", "trino_admin_pass")
                 .put("resource-groups.max-refresh-interval", "1m")
+                .put("resource-groups.refresh-interval", "2s")
                 .put("resource-groups.exact-match-selector-enabled", "true")
-                .build();
+                .buildOrThrow();
         DbResourceGroupConfig expected = new DbResourceGroupConfig()
                 .setConfigDbUrl("jdbc:mysql://localhost:3306/config")
                 .setConfigDbUser("trino_admin")
                 .setConfigDbPassword("trino_admin_pass")
                 .setMaxRefreshInterval(new Duration(1, MINUTES))
+                .setRefreshInterval(new Duration(2, SECONDS))
                 .setExactMatchSelectorEnabled(true);
 
         assertFullMapping(properties, expected);
+        assertThat(expected.isRefreshIntervalValid()).isTrue();
+    }
+
+    @Test
+    public void testValidation()
+    {
+        assertFailsValidation(
+                new DbResourceGroupConfig().setRefreshInterval(new Duration(2, HOURS)),
+                "refreshIntervalValid",
+                "maxRefreshInterval must be greater than refreshInterval",
+                AssertTrue.class);
     }
 }

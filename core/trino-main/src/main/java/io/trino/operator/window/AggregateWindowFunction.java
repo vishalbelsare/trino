@@ -13,18 +13,12 @@
  */
 package io.trino.operator.window;
 
-import com.google.common.collect.ImmutableList;
-import io.trino.metadata.Signature;
-import io.trino.operator.aggregation.Accumulator;
-import io.trino.operator.aggregation.AccumulatorFactory;
-import io.trino.operator.aggregation.InternalAggregationFunction;
-import io.trino.operator.aggregation.LambdaProvider;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.function.WindowAccumulator;
 import io.trino.spi.function.WindowFunction;
 import io.trino.spi.function.WindowIndex;
 
-import java.util.List;
-import java.util.Optional;
+import java.util.function.Supplier;
 
 import static java.lang.Math.max;
 import static java.lang.Math.min;
@@ -33,32 +27,18 @@ import static java.util.Objects.requireNonNull;
 public class AggregateWindowFunction
         implements WindowFunction
 {
-    private final List<Integer> argumentChannels;
-    private final AccumulatorFactory accumulatorFactory;
-    private final boolean accumulatorHasRemoveInput;
+    private final Supplier<WindowAccumulator> accumulatorFactory;
+    private final boolean hasRemoveInput;
 
     private WindowIndex windowIndex;
-    private Accumulator accumulator;
+    private WindowAccumulator accumulator;
     private int currentStart;
     private int currentEnd;
 
-    private AggregateWindowFunction(InternalAggregationFunction function, List<Integer> argumentChannels, List<LambdaProvider> lambdaProviders)
+    public AggregateWindowFunction(Supplier<WindowAccumulator> accumulatorFactory, boolean hasRemoveInput)
     {
-        this.argumentChannels = ImmutableList.copyOf(argumentChannels);
-        this.accumulatorFactory = function.bind(
-                argumentChannels,
-                Optional.empty(),
-                ImmutableList.of(),
-                ImmutableList.of(),
-                ImmutableList.of(),
-                null,
-                false,
-                null,
-                null,
-                lambdaProviders,
-                null);
-
-        this.accumulatorHasRemoveInput = accumulatorFactory.hasRemoveInput();
+        this.accumulatorFactory = requireNonNull(accumulatorFactory, "accumulatorFactory is null");
+        this.hasRemoveInput = hasRemoveInput;
     }
 
     @Override
@@ -84,12 +64,12 @@ public class AggregateWindowFunction
             buildNewFrame(frameStart, frameEnd);
         }
 
-        accumulator.evaluateFinal(output);
+        accumulator.output(output);
     }
 
     private void buildNewFrame(int frameStart, int frameEnd)
     {
-        if (accumulatorHasRemoveInput) {
+        if (hasRemoveInput) {
             // Note that all the start/end intervals are inclusive on both ends!
             if (currentStart < 0) {
                 currentStart = 0;
@@ -102,11 +82,13 @@ public class AggregateWindowFunction
 
             if ((overlapEnd - overlapStart + 1) > (prefixRemoveLength + suffixRemoveLength)) {
                 // It's worth keeping the overlap, and removing the now-unused prefix
-                if (currentStart < frameStart) {
-                    remove(currentStart, frameStart - 1);
+                if (currentStart < frameStart && !remove(currentStart, frameStart - 1)) {
+                    resetNewFrame(frameStart, frameEnd);
+                    return;
                 }
-                if (frameEnd < currentEnd) {
-                    remove(frameEnd + 1, currentEnd);
+                if (frameEnd < currentEnd && !remove(frameEnd + 1, currentEnd)) {
+                    resetNewFrame(frameStart, frameEnd);
+                    return;
                 }
                 if (frameStart < currentStart) {
                     accumulate(frameStart, currentStart - 1);
@@ -121,6 +103,11 @@ public class AggregateWindowFunction
         }
 
         // We couldn't or didn't want to modify the accumulation: instead, discard the current accumulation and start fresh.
+        resetNewFrame(frameStart, frameEnd);
+    }
+
+    private void resetNewFrame(int frameStart, int frameEnd)
+    {
         resetAccumulator();
         accumulate(frameStart, frameEnd);
         currentStart = frameStart;
@@ -129,33 +116,20 @@ public class AggregateWindowFunction
 
     private void accumulate(int start, int end)
     {
-        accumulator.addInput(windowIndex, argumentChannels, start, end);
+        accumulator.addInput(windowIndex, start, end);
     }
 
-    private void remove(int start, int end)
+    private boolean remove(int start, int end)
     {
-        accumulator.removeInput(windowIndex, argumentChannels, start, end);
+        return accumulator.removeInput(windowIndex, start, end);
     }
 
     private void resetAccumulator()
     {
         if (currentStart >= 0) {
-            accumulator = accumulatorFactory.createAccumulator();
+            accumulator = accumulatorFactory.get();
             currentStart = -1;
             currentEnd = -1;
         }
-    }
-
-    public static WindowFunctionSupplier supplier(Signature signature, InternalAggregationFunction function)
-    {
-        requireNonNull(function, "function is null");
-        return new AbstractWindowFunctionSupplier(signature, null, function.getLambdaInterfaces())
-        {
-            @Override
-            protected WindowFunction newWindowFunction(List<Integer> inputs, boolean ignoreNulls, List<LambdaProvider> lambdaProviders)
-            {
-                return new AggregateWindowFunction(function, inputs, lambdaProviders);
-            }
-        };
     }
 }

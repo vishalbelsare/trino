@@ -22,10 +22,10 @@ import io.trino.metadata.ViewInfo;
 import io.trino.security.AccessControl;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
-import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.RelationType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.GrantInfo;
@@ -37,6 +37,7 @@ import java.util.ArrayDeque;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Queue;
@@ -49,16 +50,15 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.collect.Sets.union;
 import static io.trino.SystemSessionProperties.isOmitDateTimeTypePrecision;
 import static io.trino.connector.informationschema.InformationSchemaMetadata.defaultPrefixes;
 import static io.trino.connector.informationschema.InformationSchemaMetadata.isTablesEnumeratingTable;
+import static io.trino.metadata.MetadataListing.getRelationTypes;
 import static io.trino.metadata.MetadataListing.getViews;
 import static io.trino.metadata.MetadataListing.listSchemas;
 import static io.trino.metadata.MetadataListing.listTableColumns;
 import static io.trino.metadata.MetadataListing.listTablePrivileges;
 import static io.trino.metadata.MetadataListing.listTables;
-import static io.trino.metadata.MetadataListing.listViews;
 import static io.trino.spi.security.PrincipalType.USER;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.type.TypeUtils.getDisplayLabel;
@@ -73,6 +73,7 @@ public class InformationSchemaPageSource
 
     private final String catalogName;
     private final InformationSchemaTable table;
+    private final Set<String> requiredColumns;
     private final Supplier<Iterator<QualifiedTablePrefix>> prefixIterator;
     private final OptionalLong limit;
 
@@ -81,8 +82,6 @@ public class InformationSchemaPageSource
     private final PageBuilder pageBuilder;
     private final Function<Page, Page> projection;
 
-    private final Optional<Set<String>> roles;
-    private final Optional<Set<String>> grantees;
     private long recordCount;
     private long completedBytes;
     private long memoryUsageBytes;
@@ -101,11 +100,16 @@ public class InformationSchemaPageSource
         requireNonNull(tableHandle, "tableHandle is null");
         requireNonNull(columns, "columns is null");
 
-        catalogName = tableHandle.getCatalogName();
-        table = tableHandle.getTable();
+        requiredColumns = columns.stream()
+                .map(columnHandle -> (InformationSchemaColumnHandle) columnHandle)
+                .map(InformationSchemaColumnHandle::columnName)
+                .collect(toImmutableSet());
+
+        catalogName = tableHandle.catalogName();
+        table = tableHandle.table();
         prefixIterator = Suppliers.memoize(() -> {
-            Set<QualifiedTablePrefix> prefixes = tableHandle.getPrefixes();
-            if (tableHandle.getLimit().isEmpty()) {
+            Set<QualifiedTablePrefix> prefixes = tableHandle.prefixes();
+            if (tableHandle.limit().isEmpty()) {
                 // no limit is used, therefore it doesn't make sense to split information schema query into smaller ones
                 return prefixes.iterator();
             }
@@ -122,10 +126,7 @@ public class InformationSchemaPageSource
             }
             return prefixes.iterator();
         });
-        limit = tableHandle.getLimit();
-
-        roles = tableHandle.getRoles();
-        grantees = tableHandle.getGrantees();
+        limit = tableHandle.limit();
 
         List<ColumnMetadata> columnMetadata = table.getTableMetadata().getColumns();
 
@@ -139,18 +140,12 @@ public class InformationSchemaPageSource
                 .boxed()
                 .collect(toImmutableMap(i -> columnMetadata.get(i).getName(), Function.identity()));
 
-        List<Integer> channels = columns.stream()
+        int[] channels = columns.stream()
                 .map(columnHandle -> (InformationSchemaColumnHandle) columnHandle)
-                .map(columnHandle -> columnNameToChannel.get(columnHandle.getColumnName()))
-                .collect(toImmutableList());
+                .mapToInt(columnHandle -> columnNameToChannel.get(columnHandle.columnName()))
+                .toArray();
 
-        projection = page -> {
-            Block[] blocks = new Block[channels.size()];
-            for (int i = 0; i < blocks.length; i++) {
-                blocks[i] = page.getBlock(channels.get(i));
-            }
-            return new Page(page.getPositionCount(), blocks);
-        };
+        projection = page -> page.getColumns(channels);
     }
 
     @Override
@@ -196,7 +191,7 @@ public class InformationSchemaPageSource
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
         return memoryUsageBytes + pageBuilder.getRetainedSizeInBytes();
     }
@@ -236,9 +231,6 @@ public class InformationSchemaPageSource
                 case ENABLED_ROLES:
                     addEnabledRolesRecords();
                     break;
-                case ROLE_AUTHORIZATION_DESCRIPTORS:
-                    addRoleAuthorizationDescriptorRecords();
-                    break;
             }
         }
         if (!prefixIterator.get().hasNext() || isLimitExhausted()) {
@@ -248,7 +240,7 @@ public class InformationSchemaPageSource
 
     private void addColumnsRecords(QualifiedTablePrefix prefix)
     {
-        for (Map.Entry<SchemaTableName, List<ColumnMetadata>> entry : listTableColumns(session, metadata, accessControl, prefix).entrySet()) {
+        for (Entry<SchemaTableName, List<ColumnMetadata>> entry : listTableColumns(session, metadata, accessControl, prefix).entrySet()) {
             SchemaTableName tableName = entry.getKey();
             long ordinalPosition = 1;
 
@@ -263,7 +255,7 @@ public class InformationSchemaPageSource
                         column.getName(),
                         ordinalPosition,
                         null,
-                        "YES",
+                        column.isNullable() ? "YES" : "NO",
                         getDisplayLabel(column.getType(), isOmitDateTimeTypePrecision(session)),
                         column.getComment(),
                         column.getExtraInfo(),
@@ -278,13 +270,29 @@ public class InformationSchemaPageSource
 
     private void addTablesRecords(QualifiedTablePrefix prefix)
     {
-        Set<SchemaTableName> tables = listTables(session, metadata, accessControl, prefix);
-        Set<SchemaTableName> views = listViews(session, metadata, accessControl, prefix);
+        boolean needsTableType = requiredColumns.contains("table_type");
+        Set<SchemaTableName> relations;
+        Set<SchemaTableName> views;
+        if (needsTableType) {
+            Map<SchemaTableName, RelationType> relationTypes = getRelationTypes(session, metadata, accessControl, prefix);
+            relations = relationTypes.keySet();
+            views = relationTypes.entrySet().stream()
+                    .filter(entry -> entry.getValue() == RelationType.VIEW)
+                    .map(Entry::getKey)
+                    .collect(toImmutableSet());
+        }
+        else {
+            relations = listTables(session, metadata, accessControl, prefix);
+            views = Set.of();
+        }
         // TODO (https://github.com/trinodb/trino/issues/8207) define a type for materialized views
 
-        for (SchemaTableName name : union(tables, views)) {
-            // if table and view names overlap, the view wins
-            String type = views.contains(name) ? "VIEW" : "BASE TABLE";
+        for (SchemaTableName name : relations) {
+            String type = null;
+            if (needsTableType) {
+                // if table and view names overlap, the view wins
+                type = views.contains(name) ? "VIEW" : "BASE TABLE";
+            }
             addRecord(
                     prefix.getCatalogName(),
                     name.getSchemaName(),
@@ -299,7 +307,7 @@ public class InformationSchemaPageSource
 
     private void addViewsRecords(QualifiedTablePrefix prefix)
     {
-        for (Map.Entry<SchemaTableName, ViewInfo> entry : getViews(session, metadata, accessControl, prefix).entrySet()) {
+        for (Entry<SchemaTableName, ViewInfo> entry : getViews(session, metadata, accessControl, prefix).entrySet()) {
             addRecord(
                     prefix.getCatalogName(),
                     entry.getKey().getSchemaName(),
@@ -344,38 +352,16 @@ public class InformationSchemaPageSource
 
     private void addRolesRecords()
     {
+        Optional<String> catalogName = metadata.isCatalogManagedSecurity(session, this.catalogName) ? Optional.of(this.catalogName) : Optional.empty();
         try {
-            accessControl.checkCanShowRoles(session.toSecurityContext(), Optional.of(catalogName));
+            accessControl.checkCanShowRoles(session.toSecurityContext(), catalogName);
         }
         catch (AccessDeniedException exception) {
             return;
         }
 
-        for (String role : metadata.listRoles(session, Optional.of(catalogName))) {
+        for (String role : metadata.listRoles(session, catalogName)) {
             addRecord(role);
-            if (isLimitExhausted()) {
-                return;
-            }
-        }
-    }
-
-    private void addRoleAuthorizationDescriptorRecords()
-    {
-        try {
-            accessControl.checkCanShowRoleAuthorizationDescriptors(session.toSecurityContext(), Optional.of(catalogName));
-        }
-        catch (AccessDeniedException exception) {
-            return;
-        }
-
-        for (RoleGrant grant : metadata.listAllRoleGrants(session, Optional.of(catalogName), roles, grantees, limit)) {
-            addRecord(
-                    grant.getRoleName(),
-                    null, // grantor
-                    null, // grantor type
-                    grant.getGrantee().getName(),
-                    grant.getGrantee().getType().toString(),
-                    grant.isGrantable() ? "YES" : "NO");
             if (isLimitExhausted()) {
                 return;
             }
@@ -384,7 +370,8 @@ public class InformationSchemaPageSource
 
     private void addApplicableRolesRecords()
     {
-        for (RoleGrant grant : metadata.listApplicableRoles(session, new TrinoPrincipal(USER, session.getUser()), Optional.of(catalogName))) {
+        Optional<String> catalogName = metadata.isCatalogManagedSecurity(session, this.catalogName) ? Optional.of(this.catalogName) : Optional.empty();
+        for (RoleGrant grant : metadata.listApplicableRoles(session, new TrinoPrincipal(USER, session.getUser()), catalogName)) {
             addRecord(
                     grant.getGrantee().getName(),
                     grant.getGrantee().getType().toString(),

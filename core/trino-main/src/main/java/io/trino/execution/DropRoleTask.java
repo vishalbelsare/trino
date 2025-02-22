@@ -14,6 +14,7 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
@@ -21,8 +22,6 @@ import io.trino.security.AccessControl;
 import io.trino.sql.tree.DropRole;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Identifier;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
@@ -62,6 +61,9 @@ public class DropRoleTask
         Session session = stateMachine.getSession();
         Optional<String> catalog = processRoleCommandCatalog(metadata, session, statement, statement.getCatalog().map(Identifier::getValue));
         String role = statement.getName().getValue().toLowerCase(ENGLISH);
+        if (statement.isExists() && !metadata.roleExists(session, role, catalog)) {
+            return immediateVoidFuture();
+        }
         accessControl.checkCanDropRole(session.toSecurityContext(), role, catalog);
         checkRoleExists(session, statement, metadata, role, catalog);
         metadata.dropRole(session, role, catalog);

@@ -13,19 +13,28 @@
  */
 package io.trino.testing;
 
-import io.trino.connector.CatalogName;
 import io.trino.metadata.TableHandle;
+import io.trino.spi.catalog.CatalogName;
+import io.trino.spi.connector.CatalogHandle;
+import io.trino.spi.connector.CatalogHandle.CatalogVersion;
 import io.trino.testing.TestingMetadata.TestingTableHandle;
 
-import java.util.Optional;
+import static io.trino.spi.connector.CatalogHandle.createRootCatalogHandle;
 
 public final class TestingHandles
 {
     private TestingHandles() {}
 
+    private static final CatalogVersion TEST_CATALOG_VERSION = new CatalogVersion("test");
+    public static final String TEST_CATALOG_NAME = "test_catalog";
+    public static final CatalogHandle TEST_CATALOG_HANDLE = createTestCatalogHandle(TEST_CATALOG_NAME);
     public static final TableHandle TEST_TABLE_HANDLE = new TableHandle(
-            new CatalogName("test"),
+            TEST_CATALOG_HANDLE,
             new TestingTableHandle(),
-            TestingTransactionHandle.create(),
-            Optional.of(TestingHandle.INSTANCE));
+            TestingTransactionHandle.create());
+
+    public static CatalogHandle createTestCatalogHandle(String catalogName)
+    {
+        return createRootCatalogHandle(new CatalogName(catalogName), TEST_CATALOG_VERSION);
+    }
 }

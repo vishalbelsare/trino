@@ -13,7 +13,9 @@
  */
 package io.trino.plugin.memory;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.inject.Inject;
 import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
 import io.trino.spi.connector.ColumnHandle;
@@ -28,9 +30,8 @@ import io.trino.spi.connector.FixedPageSource;
 import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeUtils;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
@@ -39,7 +40,6 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 
 public final class MemoryPageSourceProvider
         implements ConnectorPageSourceProvider
@@ -64,23 +64,29 @@ public final class MemoryPageSourceProvider
             DynamicFilter dynamicFilter)
     {
         MemorySplit memorySplit = (MemorySplit) split;
-        long tableId = memorySplit.getTable();
-        int partNumber = memorySplit.getPartNumber();
-        int totalParts = memorySplit.getTotalPartsPerWorker();
-        long expectedRows = memorySplit.getExpectedRows();
+        long tableId = memorySplit.table();
+        int partNumber = memorySplit.partNumber();
+        int totalParts = memorySplit.totalPartsPerWorker();
+        long expectedRows = memorySplit.expectedRows();
         MemoryTableHandle memoryTable = (MemoryTableHandle) table;
-        OptionalDouble sampleRatio = memoryTable.getSampleRatio();
+        OptionalDouble sampleRatio = memoryTable.sampleRatio();
 
-        List<Integer> columnIndexes = columns.stream()
-                .map(MemoryColumnHandle.class::cast)
-                .map(MemoryColumnHandle::getColumnIndex).collect(toList());
+        int[] columnIndexes = new int[columns.size()];
+        ImmutableList.Builder<Type> columnTypes = ImmutableList.builder();
+        for (int i = 0; i < columns.size(); i++) {
+            MemoryColumnHandle column = (MemoryColumnHandle) columns.get(i);
+            columnIndexes[i] = column.columnIndex();
+            columnTypes.add(column.type());
+        }
+
         List<Page> pages = pagesStore.getPages(
                 tableId,
                 partNumber,
                 totalParts,
                 columnIndexes,
+                columnTypes.build(),
                 expectedRows,
-                memorySplit.getLimit(),
+                memorySplit.limit(),
                 sampleRatio);
 
         return new DynamicFilteringPageSource(new FixedPageSource(pages), columns, dynamicFilter, enableLazyDynamicFiltering);
@@ -163,9 +169,9 @@ public final class MemoryPageSourceProvider
         }
 
         @Override
-        public long getSystemMemoryUsage()
+        public long getMemoryUsage()
         {
-            return delegate.getSystemMemoryUsage();
+            return delegate.getMemoryUsage();
         }
 
         @Override

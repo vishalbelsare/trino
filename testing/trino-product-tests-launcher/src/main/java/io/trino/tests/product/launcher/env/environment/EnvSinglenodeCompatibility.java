@@ -14,6 +14,7 @@
 package io.trino.tests.product.launcher.env.environment;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.tests.product.launcher.docker.DockerFiles;
 import io.trino.tests.product.launcher.env.DockerContainer;
 import io.trino.tests.product.launcher.env.Environment;
@@ -25,14 +26,13 @@ import io.trino.tests.product.launcher.testcontainers.PortBinder;
 import org.testcontainers.containers.startupcheck.IsRunningStartupCheckStrategy;
 import org.testcontainers.utility.DockerImageName;
 
-import javax.inject.Inject;
-
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.TESTS;
 import static java.lang.Integer.parseInt;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static org.testcontainers.containers.wait.strategy.Wait.forHealthcheck;
 import static org.testcontainers.containers.wait.strategy.Wait.forLogMessage;
@@ -49,8 +49,6 @@ public class EnvSinglenodeCompatibility
     private final DockerFiles.ResourceProvider configDir;
     private final PortBinder portBinder;
 
-    private Config extraConfig;
-
     @Inject
     public EnvSinglenodeCompatibility(Standard standard, Hadoop hadoop, DockerFiles dockerFiles, PortBinder portBinder)
     {
@@ -61,21 +59,26 @@ public class EnvSinglenodeCompatibility
     }
 
     @Override
-    public void extendEnvironment(Environment.Builder builder)
+    public void extendEnvironment(Environment.Builder builder, Map<String, String> extraOptions)
     {
+        Config extraConfig = new Config(extraOptions);
         configureCompatibilityTestContainer(builder, extraConfig);
         configureTestsContainer(builder, extraConfig);
     }
 
     private void configureCompatibilityTestContainer(Environment.Builder builder, Config config)
     {
-        String containerConfigDir = getConfigurationDirectory(config.getCompatibilityTestDockerImage());
-        DockerContainer container = new DockerContainer(config.getCompatibilityTestDockerImage(), COMPATIBILTY_TEST_CONTAINER_NAME)
+        boolean initialJdk22 = config.getCompatibilityTestVersion() >= 447 && config.getCompatibilityTestVersion() <= 452;
+        String jvmConfig = initialJdk22 ? "conf/trino/etc/jvm.config-initial-jdk-22" : "conf/trino/etc/jvm.config";
+        String dockerImage = config.getCompatibilityTestDockerImage();
+        String containerConfigDir = getConfigurationDirectory(dockerImage);
+        DockerContainer container = new DockerContainer(dockerImage, COMPATIBILTY_TEST_CONTAINER_NAME)
                 .withExposedLogPaths("/var/trino/var/log", "/var/log/container-health.log")
-                .withCopyFileToContainer(forHostPath(dockerFiles.getDockerFilesHostPath("conf/presto/etc/jvm.config")), containerConfigDir + "jvm.config")
-                .withCopyFileToContainer(forHostPath(configDir.getPath("config.properties")), containerConfigDir + "config.properties")
-                .withCopyFileToContainer(forHostPath(configDir.getPath("hive.properties")), containerConfigDir + "catalog/hive.properties")
-                .withCopyFileToContainer(forHostPath(dockerFiles.getDockerFilesHostPath()), "/docker/presto-product-tests")
+                .withCopyFileToContainer(forHostPath(dockerFiles.getDockerFilesHostPath(jvmConfig)), containerConfigDir + "jvm.config")
+                .withCopyFileToContainer(forHostPath(configDir.getPath(getConfigFileFor(dockerImage))), containerConfigDir + "config.properties")
+                .withCopyFileToContainer(forHostPath(configDir.getPath(getHiveConfigFor(dockerImage))), containerConfigDir + "catalog/hive.properties")
+                .withCopyFileToContainer(forHostPath(configDir.getPath(getIcebergConfigFor(dockerImage))), containerConfigDir + "catalog/iceberg.properties")
+                .withCopyFileToContainer(forHostPath(dockerFiles.getDockerFilesHostPath()), "/docker/trino-product-tests")
                 .withStartupCheckStrategy(new IsRunningStartupCheckStrategy())
                 .waitingForAll(forLogMessage(".*======== SERVER STARTED ========.*", 1), forHealthcheck())
                 .withStartupTimeout(Duration.ofMinutes(5));
@@ -83,10 +86,10 @@ public class EnvSinglenodeCompatibility
         portBinder.exposePort(container, SERVER_PORT);
     }
 
-    protected String getConfigurationDirectory(String dockerImageName)
+    protected String getConfigurationDirectory(String dockerImage)
     {
         try {
-            int version = getVersionFromDockerImageName(dockerImageName);
+            int version = getVersionFromDockerImageName(dockerImage);
             if (version <= 350) {
                 return "/usr/lib/presto/default/etc/";
             }
@@ -97,18 +100,42 @@ public class EnvSinglenodeCompatibility
             return "/etc/trino/";
         }
         catch (NumberFormatException e) {
-            throw new RuntimeException("Failed to parse version from docker image name " + dockerImageName);
+            throw new RuntimeException("Failed to parse version from docker image name " + dockerImage);
         }
+    }
+
+    private String getConfigFileFor(String dockerImage)
+    {
+        if (getVersionFromDockerImageName(dockerImage) < 369) {
+            return "config-pre369.properties";
+        }
+        return "config.properties";
+    }
+
+    private String getHiveConfigFor(String dockerImage)
+    {
+        if (getVersionFromDockerImageName(dockerImage) < 359) {
+            return "hive-pre359.properties";
+        }
+        return "hive.properties";
+    }
+
+    private String getIcebergConfigFor(String dockerImage)
+    {
+        if (getVersionFromDockerImageName(dockerImage) < 359) {
+            return "iceberg-pre359.properties";
+        }
+        return "iceberg.properties";
     }
 
     private void configureTestsContainer(Environment.Builder builder, Config config)
     {
         int version = getVersionFromDockerImageName(config.getCompatibilityTestDockerImage());
-        String temptoConfig = version <= 350 ? "presto-tempto-configuration.yaml" : "trino-tempto-configuration.yaml";
+        String temptoConfig = version <= 350 ? "legacy-tempto-configuration.yaml" : "tempto-configuration.yaml";
         builder.configureContainer(TESTS, container -> container
                 .withCopyFileToContainer(
                         forHostPath(configDir.getPath(temptoConfig)),
-                        "/docker/presto-product-tests/conf/tempto/tempto-configuration-profile-config-file.yaml"));
+                        "/docker/trino-product-tests/conf/tempto/tempto-configuration-profile-config-file.yaml"));
     }
 
     protected int getVersionFromDockerImageName(String dockerImageName)
@@ -122,20 +149,22 @@ public class EnvSinglenodeCompatibility
         return Optional.of("compatibility.");
     }
 
-    @Override
-    public void setExtraOptions(Map<String, String> extraOptions)
+    private static class Config
     {
-        extraConfig = new Config(extraOptions);
-    }
-
-    public static class Config
-    {
+        private static final String TEST_DOCKER_VERSION = "testVersion";
         private static final String TEST_DOCKER_IMAGE = "testDockerImage";
+        private final int compatibilityTestVersion;
         private final String compatibilityTestDockerImage;
 
         public Config(Map<String, String> extraOptions)
         {
-            this.compatibilityTestDockerImage = requireNonNull(extraOptions.get(TEST_DOCKER_IMAGE), "Required extra option " + TEST_DOCKER_IMAGE + " is null");
+            this.compatibilityTestVersion = parseInt(requireNonNull(extraOptions.get(TEST_DOCKER_VERSION), () -> format("Required extra option %s is null", TEST_DOCKER_VERSION)));
+            this.compatibilityTestDockerImage = requireNonNull(extraOptions.get(TEST_DOCKER_IMAGE), () -> format("Required extra option %s is null", TEST_DOCKER_IMAGE));
+        }
+
+        public int getCompatibilityTestVersion()
+        {
+            return compatibilityTestVersion;
         }
 
         public String getCompatibilityTestDockerImage()

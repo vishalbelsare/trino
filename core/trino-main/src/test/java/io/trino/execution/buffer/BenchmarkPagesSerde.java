@@ -14,11 +14,13 @@
 package io.trino.execution.buffer;
 
 import com.google.common.collect.ImmutableList;
+import io.airlift.slice.Slice;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
-import io.trino.spiller.AesSpillCipher;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -32,7 +34,8 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.RunnerException;
-import org.testng.annotations.Test;
+
+import javax.crypto.SecretKey;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,10 +44,12 @@ import java.util.Optional;
 import java.util.Random;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.execution.buffer.CompressionCodec.LZ4;
+import static io.trino.execution.buffer.CompressionCodec.NONE;
 import static io.trino.jmh.Benchmarks.benchmark;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.util.Ciphers.createRandomAesEncryptionKey;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -60,23 +65,19 @@ public class BenchmarkPagesSerde
     public void serialize(BenchmarkData data, Blackhole blackhole)
     {
         Page[] pages = data.dataPages;
-        PagesSerde serde = data.serde;
-        try (PagesSerde.PagesSerdeContext context = serde.newContext()) {
-            for (int i = 0; i < pages.length; i++) {
-                blackhole.consume(serde.serialize(context, pages[i]));
-            }
+        PageSerializer serializer = data.serializer;
+        for (int i = 0; i < pages.length; i++) {
+            blackhole.consume(serializer.serialize(pages[i]));
         }
     }
 
     @Benchmark
     public void deserialize(BenchmarkData data, Blackhole blackhole)
     {
-        SerializedPage[] serializedPages = data.serializedPages;
-        PagesSerde serde = data.serde;
-        try (PagesSerde.PagesSerdeContext context = serde.newContext()) {
-            for (int i = 0; i < serializedPages.length; i++) {
-                blackhole.consume(serde.deserialize(context, serializedPages[i]));
-            }
+        Slice[] serializedPages = data.serializedPages;
+        PageDeserializer deserializer = data.deserializer;
+        for (int i = 0; i < serializedPages.length; i++) {
+            blackhole.consume(deserializer.deserialize(serializedPages[i]));
         }
     }
 
@@ -84,15 +85,13 @@ public class BenchmarkPagesSerde
     public void testBenchmarkData()
     {
         BenchmarkData data = new BenchmarkData();
-        data.compressed = true;
+        data.compressionCodec = LZ4;
         data.initialize();
-        SerializedPage[] serializedPages = data.serializedPages;
-        PagesSerde serde = data.serde;
-        try (PagesSerde.PagesSerdeContext context = serde.newContext()) {
-            // Sanity test by deserializing and checking against the original pages
-            for (int i = 0; i < serializedPages.length; i++) {
-                assertPageEquals(BenchmarkData.TYPES, serde.deserialize(context, serializedPages[i]), data.dataPages[i]);
-            }
+        Slice[] serializedPages = data.serializedPages;
+        PageDeserializer deserializer = data.deserializer;
+        // Sanity test by deserializing and checking against the original pages
+        for (int i = 0; i < serializedPages.length; i++) {
+            assertPageEquals(BenchmarkData.TYPES, deserializer.deserialize(serializedPages[i]), data.dataPages[i]);
         }
     }
 
@@ -103,19 +102,23 @@ public class BenchmarkPagesSerde
         private static final List<Type> TYPES = ImmutableList.of(VARCHAR);
         @Param({"true", "false"})
         private boolean encrypted;
-        @Param({"true", "false"})
-        private boolean compressed;
+        @Param({"LZ4", "NONE"})
+        private CompressionCodec compressionCodec = NONE;
         @Param("1000")
         private int randomSeed = 1000;
 
-        private PagesSerde serde;
+        private PageSerializer serializer;
+        private PageDeserializer deserializer;
         private Page[] dataPages;
-        private SerializedPage[] serializedPages;
+        private Slice[] serializedPages;
 
         @Setup
         public void initialize()
         {
-            serde = createPagesSerde();
+            PagesSerdeFactory serdeFactory = new PagesSerdeFactory(new TestingBlockEncodingSerde(), compressionCodec);
+            Optional<SecretKey> encryptionKey = encrypted ? Optional.of(createRandomAesEncryptionKey()) : Optional.empty();
+            serializer = serdeFactory.createSerializer(encryptionKey);
+            deserializer = serdeFactory.createDeserializer(encryptionKey);
             dataPages = createPages();
             serializedPages = createSerializedPages();
         }
@@ -125,19 +128,11 @@ public class BenchmarkPagesSerde
             return dataPages;
         }
 
-        private PagesSerde createPagesSerde()
+        private Slice[] createSerializedPages()
         {
-            PagesSerdeFactory serdeFactory = new PagesSerdeFactory(createTestMetadataManager().getBlockEncodingSerde(), compressed);
-            return encrypted ? serdeFactory.createPagesSerdeForSpill(Optional.of(new AesSpillCipher())) : serdeFactory.createPagesSerde();
-        }
-
-        private SerializedPage[] createSerializedPages()
-        {
-            SerializedPage[] result = new SerializedPage[dataPages.length];
-            try (PagesSerde.PagesSerdeContext context = serde.newContext()) {
-                for (int i = 0; i < result.length; i++) {
-                    result[i] = serde.serialize(context, dataPages[i]);
-                }
+            Slice[] result = new Slice[dataPages.length];
+            for (int i = 0; i < result.length; i++) {
+                result[i] = serializer.serialize(dataPages[i]);
             }
             return result;
         }
@@ -177,7 +172,6 @@ public class BenchmarkPagesSerde
             }
         }
 
-        // copied & modifed from TestRowBlock
         private List<Object>[] generateTestRows(Random random, List<Type> fieldTypes, int numRows)
         {
             @SuppressWarnings("unchecked")
@@ -214,14 +208,14 @@ public class BenchmarkPagesSerde
             throws RunnerException
     {
         BenchmarkData data = new BenchmarkData();
-        data.compressed = true; // Get usable stats on compressibility
+        data.compressionCodec = LZ4; // Get usable stats on compressibility
         data.initialize();
         System.out.println("Page Size Avg: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).average().getAsDouble());
         System.out.println("Page Size Min: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).min().getAsLong());
         System.out.println("Page Size Max: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).max().getAsLong());
         System.out.println("Page Size Sum: " + Arrays.stream(data.dataPages).mapToLong(Page::getSizeInBytes).sum());
         System.out.println("Page count: " + data.dataPages.length);
-        System.out.println("Compressed: " + Arrays.stream(data.serializedPages).filter(SerializedPage::isCompressed).count());
+        System.out.println("Compressed: " + Arrays.stream(data.serializedPages).filter(PagesSerdeUtil::isSerializedPageCompressed).count());
 
         benchmark(BenchmarkPagesSerde.class)
                 .withOptions(optionsBuilder -> optionsBuilder.jvmArgs("-Xms4g", "-Xmx4g"))

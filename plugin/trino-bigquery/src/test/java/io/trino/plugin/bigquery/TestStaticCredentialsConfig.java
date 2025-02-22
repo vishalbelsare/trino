@@ -16,7 +16,7 @@ package io.trino.plugin.bigquery;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.ConfigurationException;
 import io.airlift.configuration.ConfigurationFactory;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -26,9 +26,9 @@ import java.util.Optional;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Fail.fail;
 
 public class TestStaticCredentialsConfig
 {
@@ -43,15 +43,13 @@ public class TestStaticCredentialsConfig
     @Test
     public void testExplicitPropertyMappingsWithCredentialsKey()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("bigquery.credentials-key", "key")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("bigquery.credentials-key", "key");
 
         ConfigurationFactory configurationFactory = new ConfigurationFactory(properties);
         StaticCredentialsConfig config = configurationFactory.build(StaticCredentialsConfig.class);
 
-        assertEquals(config.getCredentialsKey(), Optional.of("key"));
-        assertEquals(config.getCredentialsFile(), Optional.empty());
+        assertThat(config.getCredentialsKey()).isEqualTo(Optional.of("key"));
+        assertThat(config.getCredentialsFile()).isEqualTo(Optional.empty());
     }
 
     @Test
@@ -60,15 +58,13 @@ public class TestStaticCredentialsConfig
         try {
             Path file = Files.createTempFile("config", ".json");
 
-            Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                    .put("bigquery.credentials-file", file.toString())
-                    .build();
+            Map<String, String> properties = ImmutableMap.of("bigquery.credentials-file", file.toString());
 
             ConfigurationFactory configurationFactory = new ConfigurationFactory(properties);
             StaticCredentialsConfig config = configurationFactory.build(StaticCredentialsConfig.class);
 
-            assertEquals(config.getCredentialsKey(), Optional.empty());
-            assertEquals(config.getCredentialsFile(), Optional.of(file.toString()));
+            assertThat(config.getCredentialsKey()).isEqualTo(Optional.empty());
+            assertThat(config.getCredentialsFile()).isEqualTo(Optional.of(file.toString()));
         }
         catch (IOException e) {
             fail(e.getMessage());
@@ -78,10 +74,10 @@ public class TestStaticCredentialsConfig
     @Test
     public void testExplicitPropertyMappingsValidation()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("bigquery.credentials-key", "key")
                 .put("bigquery.credentials-file", "file")
-                .build();
+                .buildOrThrow();
 
         ConfigurationFactory configurationFactory = new ConfigurationFactory(properties);
         assertThatThrownBy(() -> configurationFactory.build(StaticCredentialsConfig.class))

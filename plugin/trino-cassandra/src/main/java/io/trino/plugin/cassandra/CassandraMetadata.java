@@ -13,53 +13,72 @@
  */
 package io.trino.plugin.cassandra;
 
+import com.datastax.oss.driver.api.core.cql.ColumnDefinition;
+import com.datastax.oss.driver.api.core.cql.PreparedStatement;
+import com.datastax.oss.driver.api.core.cql.SimpleStatement;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.airlift.slice.Slice;
+import io.trino.plugin.cassandra.ptf.Query.QueryHandle;
 import io.trino.plugin.cassandra.util.CassandraCqlUtils;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
-import io.trino.spi.connector.ConnectorNewTableLayout;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorTableProperties;
+import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.NotFoundException;
+import io.trino.spi.connector.RelationColumnsMetadata;
+import io.trino.spi.connector.RelationCommentMetadata;
+import io.trino.spi.connector.RetryMode;
+import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.TableFunctionApplicationResult;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.type.Type;
 
-import javax.inject.Inject;
-
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
+import static com.datastax.oss.driver.api.querybuilder.QueryBuilder.truncate;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.MoreCollectors.toOptional;
-import static io.trino.plugin.cassandra.CassandraType.toCassandraType;
 import static io.trino.plugin.cassandra.util.CassandraCqlUtils.ID_COLUMN_NAME;
 import static io.trino.plugin.cassandra.util.CassandraCqlUtils.cqlNameToSqlName;
 import static io.trino.plugin.cassandra.util.CassandraCqlUtils.quoteStringLiteral;
 import static io.trino.plugin.cassandra.util.CassandraCqlUtils.validColumnName;
+import static io.trino.plugin.cassandra.util.CassandraCqlUtils.validSchemaName;
+import static io.trino.plugin.cassandra.util.CassandraCqlUtils.validTableName;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
+import static io.trino.spi.connector.RelationColumnsMetadata.forTable;
+import static io.trino.spi.connector.RelationCommentMetadata.forRelation;
+import static io.trino.spi.connector.RetryMode.NO_RETRIES;
+import static io.trino.spi.connector.SaveMode.REPLACE;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -75,17 +94,20 @@ public class CassandraMetadata
     private final boolean allowDropTable;
 
     private final JsonCodec<List<ExtraColumnMetadata>> extraColumnMetadataCodec;
+    private final CassandraTypeManager cassandraTypeManager;
 
     @Inject
     public CassandraMetadata(
             CassandraSession cassandraSession,
             CassandraPartitionManager partitionManager,
             JsonCodec<List<ExtraColumnMetadata>> extraColumnMetadataCodec,
+            CassandraTypeManager cassandraTypeManager,
             CassandraClientConfig config)
     {
         this.partitionManager = requireNonNull(partitionManager, "partitionManager is null");
         this.cassandraSession = requireNonNull(cassandraSession, "cassandraSession is null");
-        this.allowDropTable = requireNonNull(config, "config is null").getAllowDropTable();
+        this.cassandraTypeManager = requireNonNull(cassandraTypeManager, "cassandraTypeManager is null");
+        this.allowDropTable = config.getAllowDropTable();
         this.extraColumnMetadataCodec = requireNonNull(extraColumnMetadataCodec, "extraColumnMetadataCodec is null");
     }
 
@@ -98,11 +120,15 @@ public class CassandraMetadata
     }
 
     @Override
-    public CassandraTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName)
+    public CassandraTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+        }
+
         requireNonNull(tableName, "tableName is null");
         try {
-            return cassandraSession.getTable(tableName).getTableHandle();
+            return new CassandraTableHandle(cassandraSession.getTable(tableName).tableHandle());
         }
         catch (TableNotFoundException | SchemaNotFoundException e) {
             // table was not found
@@ -112,20 +138,36 @@ public class CassandraMetadata
 
     private static SchemaTableName getTableName(ConnectorTableHandle tableHandle)
     {
-        return ((CassandraTableHandle) tableHandle).getSchemaTableName();
+        return ((CassandraTableHandle) tableHandle).getRequiredNamedRelation().getSchemaTableName();
     }
 
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         requireNonNull(tableHandle, "tableHandle is null");
+        CassandraTableHandle handle = (CassandraTableHandle) tableHandle;
+        if (handle.relationHandle() instanceof CassandraQueryRelationHandle queryRelationHandle) {
+            List<ColumnMetadata> columns = getColumnHandles(queryRelationHandle.getQuery()).stream()
+                    .map(CassandraColumnHandle.class::cast)
+                    .map(CassandraColumnHandle::getColumnMetadata)
+                    .collect(toImmutableList());
+            return new ConnectorTableMetadata(getSchemaTableName(handle), columns);
+        }
         return getTableMetadata(getTableName(tableHandle));
+    }
+
+    private static SchemaTableName getSchemaTableName(CassandraTableHandle handle)
+    {
+        return handle.isNamedRelation()
+                ? handle.getRequiredNamedRelation().getSchemaTableName()
+                // TODO (https://github.com/trinodb/trino/issues/6694) SchemaTableName should not be required for synthetic ConnectorTableHandle
+                : new SchemaTableName("_generated", "_generated_query");
     }
 
     private ConnectorTableMetadata getTableMetadata(SchemaTableName tableName)
     {
         CassandraTable table = cassandraSession.getTable(tableName);
-        List<ColumnMetadata> columns = table.getColumns().stream()
+        List<ColumnMetadata> columns = table.columns().stream()
                 .map(CassandraColumnHandle::getColumnMetadata)
                 .collect(toList());
         return new ConnectorTableMetadata(tableName, columns);
@@ -162,34 +204,61 @@ public class CassandraMetadata
         requireNonNull(tableHandle, "tableHandle is null");
         CassandraTable table = cassandraSession.getTable(getTableName(tableHandle));
         ImmutableMap.Builder<String, ColumnHandle> columnHandles = ImmutableMap.builder();
-        for (CassandraColumnHandle columnHandle : table.getColumns()) {
-            columnHandles.put(cqlNameToSqlName(columnHandle.getName()).toLowerCase(ENGLISH), columnHandle);
+        for (CassandraColumnHandle columnHandle : table.columns()) {
+            columnHandles.put(cqlNameToSqlName(columnHandle.name()).toLowerCase(ENGLISH), columnHandle);
         }
-        return columnHandles.build();
+        return columnHandles.buildOrThrow();
     }
 
     @Override
-    public Map<SchemaTableName, List<ColumnMetadata>> listTableColumns(ConnectorSession session, SchemaTablePrefix prefix)
+    public Iterator<RelationColumnsMetadata> streamRelationColumns(ConnectorSession session, Optional<String> schemaName, UnaryOperator<Set<SchemaTableName>> relationFilter)
     {
-        requireNonNull(prefix, "prefix is null");
-        ImmutableMap.Builder<SchemaTableName, List<ColumnMetadata>> columns = ImmutableMap.builder();
-        for (SchemaTableName tableName : listTables(session, prefix)) {
+        Map<SchemaTableName, RelationColumnsMetadata> relationColumns = new HashMap<>();
+
+        for (CassandraTable table : listCassandraTables(session, schemaName)) {
             try {
-                columns.put(tableName, getTableMetadata(tableName).getColumns());
+                SchemaTableName tableName = table.tableHandle().getSchemaTableName();
+                relationColumns.put(tableName, forTable(tableName, table.columns().stream()
+                        .map(CassandraColumnHandle::getColumnMetadata)
+                        .collect(toImmutableList())));
             }
             catch (NotFoundException e) {
                 // table disappeared during listing operation
             }
         }
-        return columns.build();
+
+        return relationFilter.apply(relationColumns.keySet()).stream()
+                .map(relationColumns::get)
+                .iterator();
     }
 
-    private List<SchemaTableName> listTables(ConnectorSession session, SchemaTablePrefix prefix)
+    private List<CassandraTable> listCassandraTables(ConnectorSession session, Optional<String> schemaName)
     {
-        if (prefix.getTable().isEmpty()) {
-            return listTables(session, prefix.getSchema());
+        ImmutableList.Builder<CassandraTable> tables = ImmutableList.builder();
+        for (String schema : listSchemas(session, schemaName)) {
+            try {
+                cassandraSession.listTables(schema).forEach(tables::add);
+            }
+            catch (SchemaNotFoundException e) {
+                // schema disappeared during listing operation
+            }
         }
-        return ImmutableList.of(prefix.toSchemaTableName());
+        return tables.build();
+    }
+
+    @Override
+    public Iterator<RelationCommentMetadata> streamRelationComments(ConnectorSession session, Optional<String> schemaName, UnaryOperator<Set<SchemaTableName>> relationFilter)
+    {
+        Map<SchemaTableName, RelationCommentMetadata> relationColumns = new HashMap<>();
+
+        for (SchemaTableName schemaTableName : listTables(session, schemaName)) {
+            // Set empty comments because the connector doesn't support table comments
+            relationColumns.put(schemaTableName, forRelation(schemaTableName, Optional.empty()));
+        }
+
+        return relationFilter.apply(relationColumns.keySet()).stream()
+                .map(relationColumns::get)
+                .iterator();
     }
 
     @Override
@@ -199,27 +268,33 @@ public class CassandraMetadata
     }
 
     @Override
-    public boolean usesLegacyTableLayouts()
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle connectorTableHandle, Constraint constraint)
     {
-        return false;
-    }
-
-    @Override
-    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint constraint)
-    {
-        CassandraTableHandle handle = (CassandraTableHandle) tableHandle;
+        CassandraTableHandle tableHandle = (CassandraTableHandle) connectorTableHandle;
+        if (tableHandle.isSynthetic()) {
+            // filter pushdown currently not supported for passthrough query
+            return Optional.empty();
+        }
+        CassandraNamedRelationHandle handle = tableHandle.getRequiredNamedRelation();
+        if (handle.getPartitions().isPresent() || !handle.getClusteringKeyPredicates().isEmpty()) {
+            // TODO support repeated applyFilter
+            return Optional.empty();
+        }
 
         CassandraPartitionResult partitionResult = partitionManager.getPartitions(handle, constraint.getSummary());
 
         String clusteringKeyPredicates = "";
         TupleDomain<ColumnHandle> unenforcedConstraint;
-        if (partitionResult.isUnpartitioned()) {
-            unenforcedConstraint = partitionResult.getUnenforcedConstraint();
+        if (partitionResult.unpartitioned() || partitionResult.indexedColumnPredicatePushdown()) {
+            // When the filter is missing at least one of the partition keys or when the table is not partitioned,
+            // use the raw unenforced constraint of the partitionResult
+            unenforcedConstraint = partitionResult.unenforcedConstraint();
         }
         else {
             CassandraClusteringPredicatesExtractor clusteringPredicatesExtractor = new CassandraClusteringPredicatesExtractor(
-                    cassandraSession.getTable(handle.getSchemaTableName()).getClusteringKeyColumns(),
-                    partitionResult.getUnenforcedConstraint(),
+                    cassandraTypeManager,
+                    cassandraSession.getTable(handle.getSchemaTableName()).clusteringKeyColumns(),
+                    partitionResult.unenforcedConstraint(),
                     cassandraSession.getCassandraVersion());
             clusteringKeyPredicates = clusteringPredicatesExtractor.getClusteringKeyPredicates();
             unenforcedConstraint = clusteringPredicatesExtractor.getUnenforcedConstraints();
@@ -228,30 +303,29 @@ public class CassandraMetadata
         Optional<List<CassandraPartition>> currentPartitions = handle.getPartitions();
         if (currentPartitions.isPresent() &&
                 // TODO: we should skip only when new table handle does not narrow down enforced predicate
-                currentPartitions.get().containsAll(partitionResult.getPartitions()) &&
+                currentPartitions.get().containsAll(partitionResult.partitions()) &&
                 handle.getClusteringKeyPredicates().equals(clusteringKeyPredicates)) {
             return Optional.empty();
         }
 
         return Optional.of(
-                new ConstraintApplicationResult<>(new CassandraTableHandle(
+                new ConstraintApplicationResult<>(new CassandraTableHandle(new CassandraNamedRelationHandle(
                         handle.getSchemaName(),
                         handle.getTableName(),
-                        Optional.of(partitionResult.getPartitions()),
-                        clusteringKeyPredicates),
+                        Optional.of(partitionResult.partitions()),
+                        // TODO this should probably be AND-ed with handle.getClusteringKeyPredicates()
+                        clusteringKeyPredicates)),
                         unenforcedConstraint,
+                        constraint.getExpression(),
                         false));
     }
 
     @Override
-    public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
+    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
     {
-        return new ConnectorTableProperties();
-    }
-
-    @Override
-    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
-    {
+        if (saveMode == REPLACE) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+        }
         createTable(tableMetadata);
     }
 
@@ -264,7 +338,7 @@ public class CassandraMetadata
             throw new TrinoException(PERMISSION_DENIED, "DROP TABLE is disabled in this Cassandra catalog");
         }
 
-        CassandraTableHandle cassandraTableHandle = (CassandraTableHandle) tableHandle;
+        CassandraNamedRelationHandle cassandraTableHandle = ((CassandraTableHandle) tableHandle).getRequiredNamedRelation();
         if (cassandraSession.isMaterializedView(cassandraTableHandle.getSchemaTableName())) {
             throw new TrinoException(NOT_SUPPORTED, "Dropping materialized views not yet supported");
         }
@@ -273,18 +347,31 @@ public class CassandraMetadata
     }
 
     @Override
-    public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorNewTableLayout> layout)
+    public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
+        if (retryMode != NO_RETRIES) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support query retries");
+        }
+        if (replace) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+        }
+
         return createTable(tableMetadata);
     }
 
     private CassandraOutputTableHandle createTable(ConnectorTableMetadata tableMetadata)
     {
+        if (tableMetadata.getComment().isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating tables with table comment");
+        }
         ImmutableList.Builder<String> columnNames = ImmutableList.builder();
         ImmutableList.Builder<Type> columnTypes = ImmutableList.builder();
         ImmutableList.Builder<ExtraColumnMetadata> columnExtra = ImmutableList.builder();
         columnExtra.add(new ExtraColumnMetadata(ID_COLUMN_NAME, true));
         for (ColumnMetadata column : tableMetadata.getColumns()) {
+            if (column.getComment() != null) {
+                throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating tables with column comment");
+            }
             columnNames.add(column.getName());
             columnTypes.add(column.getType());
             columnExtra.add(new ExtraColumnMetadata(column.getName(), column.isHidden()));
@@ -302,7 +389,7 @@ public class CassandraMetadata
             queryBuilder.append(", ")
                     .append(validColumnName(name))
                     .append(" ")
-                    .append(toCassandraType(type, cassandraSession.getProtocolVersion()).getName().toLowerCase(ENGLISH));
+                    .append(cassandraTypeManager.toCassandraType(type, cassandraSession.getProtocolVersion()).kind().name().toLowerCase(ENGLISH));
         }
         queryBuilder.append(") ");
 
@@ -326,18 +413,29 @@ public class CassandraMetadata
     }
 
     @Override
-    public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle)
+    public void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        CassandraTableHandle table = (CassandraTableHandle) tableHandle;
+        CassandraNamedRelationHandle table = ((CassandraTableHandle) tableHandle).getRequiredNamedRelation();
+        cassandraSession.execute(truncate(validSchemaName(table.getSchemaName()), validTableName(table.getTableName())).build());
+    }
+
+    @Override
+    public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> insertedColumns, RetryMode retryMode)
+    {
+        if (retryMode != NO_RETRIES) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support query retries");
+        }
+
+        CassandraNamedRelationHandle table = ((CassandraTableHandle) tableHandle).getRequiredNamedRelation();
         if (cassandraSession.isMaterializedView(table.getSchemaTableName())) {
             throw new TrinoException(NOT_SUPPORTED, "Inserting into materialized views not yet supported");
         }
 
         SchemaTableName schemaTableName = new SchemaTableName(table.getSchemaName(), table.getTableName());
-        List<CassandraColumnHandle> columns = cassandraSession.getTable(schemaTableName).getColumns();
+        List<CassandraColumnHandle> columns = cassandraSession.getTable(schemaTableName).columns();
         List<String> columnNames = columns.stream()
                 .filter(columnHandle -> !isHiddenIdColumn(columnHandle))
-                .map(CassandraColumnHandle::getName)
+                .map(CassandraColumnHandle::name)
                 .collect(Collectors.toList());
         List<Type> columnTypes = columns.stream()
                 .filter(columnHandle -> !isHiddenIdColumn(columnHandle))
@@ -357,26 +455,31 @@ public class CassandraMetadata
     }
 
     @Override
-    public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle insertHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    public Optional<ConnectorOutputMetadata> finishInsert(
+            ConnectorSession session,
+            ConnectorInsertTableHandle insertHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
     {
         return Optional.empty();
     }
 
     private static boolean isHiddenIdColumn(CassandraColumnHandle columnHandle)
     {
-        return columnHandle.isHidden() && ID_COLUMN_NAME.equals(columnHandle.getName());
+        return columnHandle.hidden() && ID_COLUMN_NAME.equals(columnHandle.name());
     }
 
     @Override
-    public ColumnHandle getDeleteRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
-    {
-        return new CassandraColumnHandle("$update_row_id", 0, CassandraTypes.TEXT, false, false, false, true);
-    }
-
-    @Override
-    public ConnectorTableHandle beginDelete(ConnectorSession session, ConnectorTableHandle tableHandle)
+    public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, Map<Integer, Collection<ColumnHandle>> updateCaseColumns, RetryMode retryMode)
     {
         throw new TrinoException(NOT_SUPPORTED, "Delete without primary key or partition key is not supported");
+    }
+
+    @Override
+    public ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return new CassandraColumnHandle("$update_row_id", 0, CassandraTypes.TEXT, false, false, false, true);
     }
 
     @Override
@@ -388,12 +491,10 @@ public class CassandraMetadata
     @Override
     public OptionalLong executeDelete(ConnectorSession session, ConnectorTableHandle deleteHandle)
     {
-        CassandraTableHandle handle = (CassandraTableHandle) deleteHandle;
-        Optional<List<CassandraPartition>> partitions = handle.getPartitions();
+        CassandraNamedRelationHandle handle = ((CassandraTableHandle) deleteHandle).getRequiredNamedRelation();
+        List<CassandraPartition> partitions = handle.getPartitions()
+                .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "Deleting without partition key is not supported"));
         if (partitions.isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Deleting without partition key is not supported");
-        }
-        if (partitions.get().isEmpty()) {
             // there are no records of a given partition key
             return OptionalLong.empty();
         }
@@ -401,5 +502,30 @@ public class CassandraMetadata
             cassandraSession.execute(cql);
         }
         return OptionalLong.empty();
+    }
+
+    @Override
+    public Optional<TableFunctionApplicationResult<ConnectorTableHandle>> applyTableFunction(ConnectorSession session, ConnectorTableFunctionHandle handle)
+    {
+        if (!(handle instanceof QueryHandle queryHandle)) {
+            return Optional.empty();
+        }
+
+        CassandraTableHandle tableHandle = queryHandle.tableHandle();
+        List<ColumnHandle> columnHandles = getColumnHandles(((CassandraQueryRelationHandle) tableHandle.relationHandle()).getQuery());
+        return Optional.of(new TableFunctionApplicationResult<>(tableHandle, columnHandles));
+    }
+
+    public List<ColumnHandle> getColumnHandles(String query)
+    {
+        PreparedStatement statement = cassandraSession.prepare(SimpleStatement.newInstance(query));
+        int position = 0;
+        ImmutableList.Builder<ColumnHandle> columnsBuilder = ImmutableList.builderWithExpectedSize(statement.getResultSetDefinitions().size());
+        for (ColumnDefinition column : statement.getResultSetDefinitions()) {
+            CassandraType cassandraType = cassandraTypeManager.toCassandraType(column.getType())
+                    .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "Unsupported type: " + column.getType()));
+            columnsBuilder.add(new CassandraColumnHandle(column.getName().asInternal(), position++, cassandraType, false, false, false, false));
+        }
+        return columnsBuilder.build();
     }
 }

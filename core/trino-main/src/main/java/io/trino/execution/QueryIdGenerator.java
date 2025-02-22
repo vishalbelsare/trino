@@ -16,9 +16,8 @@ package io.trino.execution;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.primitives.Chars;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.spi.QueryId;
-
-import javax.annotation.concurrent.GuardedBy;
 
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -77,9 +76,10 @@ public class QueryIdGenerator
     /**
      * Generate next queryId using the following format:
      * {@code YYYYMMDD_hhmmss_index_coordId}
-     * <p/>
-     * {@code index} rolls at the start of every day or when it is close to reaching {@code 99,999}.
-     * {@code coordId} is a randomly generated when this instance is created.
+     * <ul>
+     * <li>{@code index} rolls at the start of every day or when it is close to reaching {@code 99,999}.</li>
+     * <li>{@code coordId} is a randomly generated when this instance is created.</li>
+     * </ul>
      */
     public synchronized QueryId createNextQueryId()
     {

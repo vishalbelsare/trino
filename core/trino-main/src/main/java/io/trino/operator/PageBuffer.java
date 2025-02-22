@@ -13,15 +13,10 @@
  */
 package io.trino.operator;
 
-import com.google.common.util.concurrent.ListenableFuture;
-import io.trino.operator.WorkProcessorOperatorAdapter.AdapterWorkProcessorOperator;
 import io.trino.spi.Page;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import static com.google.common.base.Preconditions.checkState;
-import static io.trino.operator.Operator.NOT_BLOCKED;
-import static io.trino.operator.WorkProcessor.ProcessState.blocked;
 import static io.trino.operator.WorkProcessor.ProcessState.finished;
 import static io.trino.operator.WorkProcessor.ProcessState.ofResult;
 import static io.trino.operator.WorkProcessor.ProcessState.yielded;
@@ -29,36 +24,19 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Provides a bridge between classic {@link Operator} push input model
- * and {@link WorkProcessorOperator} pull model. {@link AdapterWorkProcessorOperator}
- * can use {@link PageBuffer} to convert from push input model to pull model.
+ * and {@link WorkProcessorOperator} pull model.
  */
 public class PageBuffer
 {
-    private final ListenableFuture<Void> initialFuture;
-
     @Nullable
     private Page page;
     private boolean finished;
-
-    public PageBuffer()
-    {
-        this(NOT_BLOCKED);
-    }
-
-    public PageBuffer(ListenableFuture<Void> initialFuture)
-    {
-        this.initialFuture = initialFuture;
-    }
 
     public WorkProcessor<Page> pages()
     {
         return WorkProcessor.create(() -> {
             if (isFinished() && isEmpty()) {
                 return finished();
-            }
-
-            if (!initialFuture.isDone()) {
-                return blocked(initialFuture);
             }
 
             if (!isEmpty()) {

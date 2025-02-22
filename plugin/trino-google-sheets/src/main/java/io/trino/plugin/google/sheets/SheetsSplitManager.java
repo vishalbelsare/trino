@@ -13,23 +13,22 @@
  */
 package io.trino.plugin.google.sheets;
 
+import com.google.inject.Inject;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
-import io.trino.spi.connector.TableNotFoundException;
-
-import javax.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 
+import static io.trino.plugin.google.sheets.SheetsConnectorTableHandle.tableNotFound;
 import static java.util.Objects.requireNonNull;
 
 public class SheetsSplitManager
@@ -48,19 +47,16 @@ public class SheetsSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle connectorTableHandle,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
-        SheetsTableHandle tableHandle = (SheetsTableHandle) connectorTableHandle;
-        Optional<SheetsTable> table = sheetsClient.getTable(tableHandle.getTableName());
-
-        // this can happen if table is removed during a query
-        if (table.isEmpty()) {
-            throw new TableNotFoundException(tableHandle.toSchemaTableName());
-        }
+        SheetsConnectorTableHandle tableHandle = (SheetsConnectorTableHandle) connectorTableHandle;
+        SheetsTable table = sheetsClient.getTable(tableHandle)
+                // this can happen if table is removed during a query
+                .orElseThrow(() -> tableNotFound(tableHandle));
 
         List<ConnectorSplit> splits = new ArrayList<>();
-        splits.add(new SheetsSplit(tableHandle.getSchemaName(), tableHandle.getTableName(), table.get().getValues()));
+        splits.add(new SheetsSplit(table.values()));
         Collections.shuffle(splits);
         return new FixedSplitSource(splits);
     }

@@ -16,7 +16,7 @@ package io.trino.security;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.testing.ConfigAssertions;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -29,7 +29,7 @@ public class TestAccessControlConfig
     public void testDefaults()
     {
         ConfigAssertions.assertRecordedDefaults(ConfigAssertions.recordDefaults(AccessControlConfig.class)
-                .setAccessControlFiles(""));
+                .setAccessControlFiles(ImmutableList.of()));
     }
 
     @Test
@@ -39,12 +39,10 @@ public class TestAccessControlConfig
         Path config1 = Files.createTempFile(null, null);
         Path config2 = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("access-control.config-files", config1.toString() + "," + config2.toString())
-                .build();
+        Map<String, String> properties = ImmutableMap.of("access-control.config-files", config1.toString() + "," + config2.toString());
 
         AccessControlConfig expected = new AccessControlConfig()
-                .setAccessControlFiles(ImmutableList.of(config1.toFile(), config2.toFile()));
+                .setAccessControlFiles(ImmutableList.of(config1.toFile().getAbsolutePath(), config2.toFile().getAbsolutePath()));
 
         ConfigAssertions.assertFullMapping(properties, expected);
     }

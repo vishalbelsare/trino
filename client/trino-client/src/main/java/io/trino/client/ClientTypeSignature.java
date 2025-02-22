@@ -16,11 +16,9 @@ package io.trino.client;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.client.ClientTypeSignatureParameter.ParameterKind;
 
-import javax.annotation.concurrent.Immutable;
-
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -30,9 +28,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.client.ClientStandardTypes.ROW;
+import static io.trino.client.ClientStandardTypes.TIMESTAMP_WITH_TIME_ZONE;
+import static io.trino.client.ClientStandardTypes.TIME_WITH_TIME_ZONE;
 import static io.trino.client.ClientStandardTypes.VARCHAR;
-import static java.lang.String.format;
-import static java.util.Collections.unmodifiableList;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
@@ -58,7 +56,7 @@ public class ClientTypeSignature
         this.rawType = rawType;
         checkArgument(!rawType.isEmpty(), "rawType is empty");
         checkArgument(!PATTERN.matcher(rawType).matches(), "Bad characters in rawType type: %s", rawType);
-        this.arguments = unmodifiableList(new ArrayList<>(requireNonNull(arguments, "arguments is null")));
+        this.arguments = ImmutableList.copyOf(arguments);
     }
 
     @JsonProperty
@@ -96,6 +94,15 @@ public class ClientTypeSignature
         if (arguments.isEmpty()) {
             return rawType;
         }
+
+        if (rawType.equals(TIME_WITH_TIME_ZONE)) {
+            return "time(" + arguments.get(0) + ") with time zone";
+        }
+
+        if (rawType.equals(TIMESTAMP_WITH_TIME_ZONE)) {
+            return "timestamp(" + arguments.get(0) + ") with time zone";
+        }
+
         return rawType + arguments.stream()
                 .map(ClientTypeSignatureParameter::toString)
                 .collect(joining(",", "(", ")"));
@@ -104,20 +111,18 @@ public class ClientTypeSignature
     @Deprecated
     private String rowToString()
     {
-        String fields = arguments.stream()
+        if (arguments.isEmpty()) {
+            return "row";
+        }
+        return arguments.stream()
                 .map(ClientTypeSignatureParameter::getNamedTypeSignature)
                 .map(parameter -> {
                     if (parameter.getName().isPresent()) {
-                        return format("%s %s", parameter.getName().get(), parameter.getTypeSignature());
+                        return parameter.getName().get() + " " + parameter.getTypeSignature();
                     }
                     return parameter.getTypeSignature().toString();
                 })
-                .collect(joining(","));
-
-        if (fields.isEmpty()) {
-            return "row";
-        }
-        return format("row(%s)", fields);
+                .collect(joining(",", "row(", ")"));
     }
 
     @Override

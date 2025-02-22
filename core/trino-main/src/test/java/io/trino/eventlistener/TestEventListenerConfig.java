@@ -16,7 +16,7 @@ package io.trino.eventlistener;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.testing.ConfigAssertions;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -32,7 +32,7 @@ public class TestEventListenerConfig
     public void testDefaults()
     {
         assertRecordedDefaults(ConfigAssertions.recordDefaults(EventListenerConfig.class)
-                .setEventListenerFiles(""));
+                .setEventListenerFiles(ImmutableList.of()));
     }
 
     @Test
@@ -42,12 +42,11 @@ public class TestEventListenerConfig
         Path config1 = Files.createTempFile(null, null);
         Path config2 = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("event-listener.config-files", config1.toString() + "," + config2.toString())
-                .build();
+        Map<String, String> properties = ImmutableMap.of(
+                "event-listener.config-files", config1.toString() + "," + config2.toString());
 
         EventListenerConfig expected = new EventListenerConfig()
-                .setEventListenerFiles(ImmutableList.of(config1.toFile(), config2.toFile()));
+                .setEventListenerFiles(ImmutableList.of(config1.toFile().getPath(), config2.toFile().getPath()));
 
         assertFullMapping(properties, expected);
     }

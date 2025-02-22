@@ -13,13 +13,16 @@
  */
 package io.trino.tests.product.launcher.env;
 
-import io.trino.tests.product.launcher.env.environment.EnvSinglenodeSqlserver;
+import io.trino.tests.product.launcher.env.environment.EnvMultinodeSqlserver;
+import io.trino.tests.product.launcher.env.jdk.BuiltInJdkProvider;
 import io.trino.tests.product.launcher.suite.suites.Suite1;
 import io.trino.tests.product.launcher.suite.suites.Suite6NonGeneric;
 import io.trino.tests.product.launcher.suite.suites.SuiteTpcds;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.tests.product.launcher.Configurations.canonicalEnvironmentName;
+import static io.trino.tests.product.launcher.Configurations.canonicalJdkProviderName;
+import static io.trino.tests.product.launcher.Configurations.nameForJdkProviderName;
 import static io.trino.tests.product.launcher.Configurations.nameForSuiteClass;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -38,7 +41,7 @@ public class TestConfigurations
         assertThat(canonicalEnvironmentName("DuzaAla")).isEqualTo("duza-ala");
         assertThat(canonicalEnvironmentName("EnvDuzaAla")).isEqualTo("duza-ala");
         // real life example
-        assertThat(canonicalEnvironmentName(EnvSinglenodeSqlserver.class.getSimpleName())).isEqualTo("singlenode-sqlserver");
+        assertThat(canonicalEnvironmentName(EnvMultinodeSqlserver.class.getSimpleName())).isEqualTo("multinode-sqlserver");
 
         // document current state; this behavior is neither intentional or (currently) forbidden
         assertThat(canonicalEnvironmentName("duza----Ala")).isEqualTo("duza-ala");
@@ -53,5 +56,13 @@ public class TestConfigurations
         assertThat(nameForSuiteClass(SuiteTpcds.class)).isEqualTo("suite-tpcds");
         // suite name with a number  and then a word
         assertThat(nameForSuiteClass(Suite6NonGeneric.class)).isEqualTo("suite-6-non-generic");
+    }
+
+    @Test
+    public void testJdkProviderName()
+    {
+        assertThat(nameForJdkProviderName(BuiltInJdkProvider.class)).isEqualTo("builtin");
+        assertThat(canonicalJdkProviderName("BuiltIN")).isEqualTo("builtin");
+        assertThat(canonicalJdkProviderName("built-IN")).isEqualTo("builtin");
     }
 }

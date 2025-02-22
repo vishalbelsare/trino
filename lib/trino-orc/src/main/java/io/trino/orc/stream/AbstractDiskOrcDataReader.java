@@ -17,8 +17,7 @@ import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.orc.OrcDataSourceId;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.IOException;
 
@@ -54,7 +53,7 @@ public abstract class AbstractDiskOrcDataReader
     @Override
     public long getRetainedSize()
     {
-        return buffer == null ? 0 : SizeOf.sizeOf(buffer);
+        return SizeOf.sizeOf(buffer);
     }
 
     @Override

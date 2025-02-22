@@ -14,20 +14,37 @@
 package io.trino.testing;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.spi.type.TimeZoneKey;
-import org.testng.annotations.Test;
+import io.trino.tpch.TpchTable;
+import org.intellij.lang.annotations.Language;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
+import static io.trino.SystemSessionProperties.DISTINCT_AGGREGATIONS_STRATEGY;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static io.trino.tpch.TpchTable.CUSTOMER;
+import static io.trino.tpch.TpchTable.LINE_ITEM;
+import static io.trino.tpch.TpchTable.NATION;
+import static io.trino.tpch.TpchTable.ORDERS;
+import static io.trino.tpch.TpchTable.REGION;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public abstract class AbstractTestAggregations
         extends AbstractTestQueryFramework
 {
+    protected static final Set<TpchTable<?>> REQUIRED_TPCH_TABLES = ImmutableSet.<TpchTable<?>>builder()
+            .add(LINE_ITEM)
+            .add(NATION)
+            .add(ORDERS)
+            .add(REGION)
+            .add(CUSTOMER)
+            .build();
+
     @Test
     public void testCountBoolean()
     {
@@ -227,13 +244,31 @@ public abstract class AbstractTestAggregations
     public void testCountDistinct()
     {
         assertQuery("SELECT COUNT(DISTINCT custkey + 1) FROM orders", "SELECT COUNT(*) FROM (SELECT DISTINCT custkey + 1 FROM orders) t");
-        assertQuery("SELECT COUNT(DISTINCT linenumber), COUNT(*) from lineitem where linenumber < 0");
+    }
+
+    @Test
+    public void testMixedDistinctAndZeroOnEmptyInputAggregations()
+    {
+        assertQuery("SELECT COUNT(DISTINCT linenumber), COUNT(*), COUNT(linenumber) from lineitem where linenumber < 0");
+        assertQuery("SELECT COUNT(DISTINCT linenumber), COUNT_IF(linenumber < 0) from lineitem where linenumber < 0", "VALUES (0, 0)");
+        assertQuery("SELECT COUNT(DISTINCT linenumber), approx_distinct(linenumber), approx_distinct(linenumber, 0.5) from lineitem where linenumber < 0", "VALUES (0, 0, 0)");
+        assertQuery("SELECT COUNT(DISTINCT linenumber), approx_distinct(orderkey > 10), approx_distinct(orderkey > 10, 0.5) from lineitem where linenumber < 0", "VALUES (0, 0, 0)");
     }
 
     @Test
     public void testDistinctGroupBy()
     {
-        assertQuery("SELECT COUNT(DISTINCT clerk) AS count, orderdate FROM orders GROUP BY orderdate ORDER BY count, orderdate");
+        @Language("SQL") String query = "" +
+                "SELECT COUNT(DISTINCT clerk) AS count_distinct, COUNT(clerk) AS count, orderdate " +
+                "FROM orders " +
+                "GROUP BY orderdate " +
+                "ORDER BY count_distinct, orderdate";
+        assertQuery(query);
+        assertQuery(
+                Session.builder(getSession())
+                        .setSystemProperty(DISTINCT_AGGREGATIONS_STRATEGY, "single_step")
+                        .build(),
+                query);
     }
 
     @Test
@@ -300,6 +335,18 @@ public abstract class AbstractTestAggregations
     }
 
     @Test
+    public void testMultipleDifferentDistinctOverUnion()
+    {
+        assertQuery(
+                """
+                SELECT custkey, COUNT(DISTINCT orderkey), COUNT(DISTINCT orderstatus)
+                FROM (SELECT orderkey, orderstatus, custkey FROM orders WHERE orderstatus = 'O'
+                UNION ALL SELECT orderkey, orderstatus, custkey FROM orders WHERE orderstatus = 'F')
+                GROUP BY custkey
+                """);
+    }
+
+    @Test
     public void testMultipleDistinct()
     {
         assertQuery(
@@ -321,6 +368,85 @@ public abstract class AbstractTestAggregations
                         "SUM(custkey + 1.0), " +
                         "AVG(custkey), " +
                         "VARIANCE(custkey) FROM (SELECT DISTINCT custkey FROM orders) t");
+    }
+
+    @Test
+    public void testMultiColumnsCountDistinct()
+    {
+        assertQuery("SELECT COUNT(DISTINCT orderkey), COUNT(DISTINCT custkey) from orders");
+        assertQuery("SELECT COUNT(DISTINCT orderkey), COUNT(DISTINCT custkey) from orders group by orderstatus");
+        assertQuery("SELECT orderstatus, COUNT(DISTINCT orderkey), COUNT(DISTINCT custkey) from orders group by orderstatus");
+        assertQuery("SELECT orderstatus, COUNT(DISTINCT orderkey), SUM(totalprice) from orders group by orderstatus");
+        assertQuery("SELECT orderstatus, COUNT(DISTINCT orderkey), COUNT(DISTINCT custkey), SUM(totalprice) from orders group by orderstatus");
+        assertQuery("SELECT orderstatus, COUNT(DISTINCT orderkey), COUNT(DISTINCT custkey), COUNT(DISTINCT totalprice), COUNT(custkey), SUM(totalprice) from orders group by orderstatus");
+        assertQuery("SELECT orderstatus, COUNT(DISTINCT orderkey), COUNT(DISTINCT totalprice), SUM(totalprice) from orders group by orderstatus");
+        assertQuery("SELECT orderstatus, orderpriority, COUNT(orderstatus), COUNT(DISTINCT orderpriority)," +
+                " COUNT(DISTINCT orderkey), COUNT(DISTINCT totalprice), SUM(totalprice), MAX(custkey) from orders group by orderstatus, orderpriority");
+    }
+
+    // Make sure redundant NULL values are not passed to the aggregations which potentially could happen in GroupId based mixed distinct and non-distinct aggregation implementation
+    @Test
+    public void testDistinctAggregationSensitiveToNull()
+    {
+        assertQuery("select a, array_agg(b), array_agg(distinct c) from (values (1,1,1)) t(a,b,c) group by a");
+    }
+
+    @Test
+    public void testDistinctAndNonDistinctAggregationOnTheSameColumn()
+    {
+        assertQuery("SELECT COUNT(custkey), COUNT(DISTINCT custkey) FROM orders");
+        assertQuery("SELECT COUNT(custkey), SUM(custkey), COUNT(DISTINCT custkey), SUM(DISTINCT custkey) FROM orders");
+        assertQuery("SELECT custkey, COUNT(custkey), SUM(custkey), COUNT(DISTINCT custkey), SUM(DISTINCT custkey) FROM orders GROUP BY custkey");
+    }
+
+    @Test
+    public void testDistinctAndNonDistinctWithoutArgument()
+    {
+        assertQuery("SELECT COUNT(*), COUNT(DISTINCT nationkey) FROM customer");
+    }
+
+    @Test
+    public void testMultiInputsDistinct()
+    {
+        assertQuery(
+                "SELECT corr(DISTINCT x, y) FROM " +
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
+                "VALUES (1.0)");
+
+        assertQuery(
+                "SELECT corr(DISTINCT x, y), corr(DISTINCT y, x) FROM " +
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
+                "VALUES (1.0, 1.0)");
+
+        assertQuery(
+                "SELECT corr(DISTINCT x, y), corr(DISTINCT y, x), count(*) FROM " +
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
+                "VALUES (1.0, 1.0, 4)");
+
+        assertQuery(
+                "SELECT corr(DISTINCT x, y), corr(DISTINCT y, x), count(DISTINCT x) FROM " +
+                        "(VALUES " +
+                        "   (1, 1)," +
+                        "   (2, 2)," +
+                        "   (2, 2)," +
+                        "   (3, 3)" +
+                        ") t(x, y)",
+                "VALUES (1.0, 1.0, 3)");
     }
 
     @Test
@@ -872,14 +998,14 @@ public abstract class AbstractTestAggregations
     public void testDistinctNan()
     {
         MaterializedResult actual = computeActual("SELECT DISTINCT a/a FROM (VALUES (0.0e0), (0.0e0)) x (a)");
-        assertTrue(Double.isNaN((Double) actual.getOnlyValue()));
+        assertThat(Double.isNaN((Double) actual.getOnlyValue())).isTrue();
     }
 
     @Test
     public void testGroupByNan()
     {
         MaterializedResult actual = computeActual("SELECT * FROM (VALUES nan(), nan(), nan()) GROUP BY 1");
-        assertTrue(Double.isNaN((Double) actual.getOnlyValue()));
+        assertThat(Double.isNaN((Double) actual.getOnlyValue())).isTrue();
     }
 
     @Test
@@ -887,10 +1013,10 @@ public abstract class AbstractTestAggregations
     {
         MaterializedResult actual = computeActual("SELECT a, b, c FROM (VALUES ROW(nan(), 1, 2), ROW(nan(), 1, 2)) t(a, b, c) GROUP BY 1, 2, 3");
         List<MaterializedRow> actualRows = actual.getMaterializedRows();
-        assertEquals(actualRows.size(), 1);
-        assertTrue(Double.isNaN((Double) actualRows.get(0).getField(0)));
-        assertEquals(actualRows.get(0).getField(1), 1);
-        assertEquals(actualRows.get(0).getField(2), 2);
+        assertThat(actualRows).hasSize(1);
+        assertThat(Double.isNaN((Double) actualRows.get(0).getField(0))).isTrue();
+        assertThat(actualRows.get(0).getField(1)).isEqualTo(1);
+        assertThat(actualRows.get(0).getField(2)).isEqualTo(2);
     }
 
     @Test
@@ -898,19 +1024,19 @@ public abstract class AbstractTestAggregations
     {
         MaterializedResult actual = computeActual("SELECT a FROM (VALUES (ARRAY[nan(), 2e0, 3e0]), (ARRAY[nan(), 2e0, 3e0])) t(a) GROUP BY a");
         List<MaterializedRow> actualRows = actual.getMaterializedRows();
-        assertEquals(actualRows.size(), 1);
+        assertThat(actualRows).hasSize(1);
         @SuppressWarnings("unchecked")
         List<Double> value = (List<Double>) actualRows.get(0).getField(0);
-        assertTrue(Double.isNaN(value.get(0)));
-        assertEquals(value.get(1), 2.0);
-        assertEquals(value.get(2), 3.0);
+        assertThat(Double.isNaN(value.get(0))).isTrue();
+        assertThat(value.get(1)).isEqualTo(2.0);
+        assertThat(value.get(2)).isEqualTo(3.0);
     }
 
     @Test
     public void testGroupByNanMap()
     {
         MaterializedResult actual = computeActual("SELECT MAP_KEYS(x)[1] FROM (VALUES MAP(ARRAY[nan()], ARRAY[ARRAY[1]]), MAP(ARRAY[nan()], ARRAY[ARRAY[2]])) t(x) GROUP BY 1");
-        assertTrue(Double.isNaN((Double) actual.getOnlyValue()));
+        assertThat(Double.isNaN((Double) actual.getOnlyValue())).isTrue();
     }
 
     @Test
@@ -1315,14 +1441,14 @@ public abstract class AbstractTestAggregations
                         "WHERE orderkey IN (1, 2, 3, 4, 5) " +
                         "GROUP BY GROUPING SETS ((), (orderpriority), (orderpriority, custkey))",
                 "VALUES " +
-                        "(NULL, NULL , ('F', 'O', 'O'))," +
-                        "('5-LOW', NULL , ('F', 'O'))," +
-                        "('1-URGENT', NULL , ('O'))," +
+                        "(NULL, NULL , ARRAY['F', 'O', 'O'])," +
+                        "('5-LOW', NULL , ARRAY['F', 'O'])," +
+                        "('1-URGENT', NULL, ARRAY['O'])," +
                         "('5-LOW', 370 , NULL)," +
-                        "('5-LOW', 1234, ('F'))," +
-                        "('5-LOW', 1369, ('O'))," +
+                        "('5-LOW', 1234, ARRAY['F'])," +
+                        "('5-LOW', 1369, ARRAY['O'])," +
                         "('5-LOW', 445 , NULL)," +
-                        "('1-URGENT', 781 , ('O'))");
+                        "('1-URGENT', 781 , ARRAY['O'])");
     }
 
     @Test
@@ -1343,49 +1469,63 @@ public abstract class AbstractTestAggregations
     public void testApproxMostFrequentWithLong()
     {
         MaterializedResult actual1 = computeActual("SELECT approx_most_frequent(3, cast(x as bigint), 15) FROM (values 1, 2, 1, 3, 1, 2, 3, 4, 5) t(x)");
-        assertEquals(actual1.getRowCount(), 1);
-        assertEquals(actual1.getMaterializedRows().get(0).getFields().get(0), ImmutableMap.of(1L, 3L, 2L, 2L, 3L, 2L));
+        assertThat(actual1.getRowCount()).isEqualTo(1);
+        assertThat(actual1.getMaterializedRows().get(0).getFields().get(0)).isEqualTo(ImmutableMap.of(1L, 3L, 2L, 2L, 3L, 2L));
 
         MaterializedResult actual2 = computeActual("SELECT approx_most_frequent(2, cast(x as bigint), 15) FROM (values 1, 2, 1, 3, 1, 2, 3, 4, 5) t(x)");
-        assertEquals(actual2.getRowCount(), 1);
-        assertEquals(actual2.getMaterializedRows().get(0).getFields().get(0), ImmutableMap.of(1L, 3L, 2L, 2L));
+        assertThat(actual2.getRowCount()).isEqualTo(1);
+        assertThat(actual2.getMaterializedRows().get(0).getFields().get(0)).isEqualTo(ImmutableMap.of(1L, 3L, 2L, 2L));
     }
 
     @Test
     public void testApproxMostFrequentWithVarchar()
     {
         MaterializedResult actual1 = computeActual("SELECT approx_most_frequent(3, x, 15) FROM (values 'A', 'B', 'A', 'C', 'A', 'B', 'C', 'D', 'E') t(x)");
-        assertEquals(actual1.getRowCount(), 1);
-        assertEquals(actual1.getMaterializedRows().get(0).getFields().get(0), ImmutableMap.of("A", 3L, "B", 2L, "C", 2L));
+        assertThat(actual1.getRowCount()).isEqualTo(1);
+        assertThat(actual1.getMaterializedRows().get(0).getFields().get(0)).isEqualTo(ImmutableMap.of("A", 3L, "B", 2L, "C", 2L));
 
         MaterializedResult actual2 = computeActual("SELECT approx_most_frequent(2, x, 15) FROM (values 'A', 'B', 'A', 'C', 'A', 'B', 'C', 'D', 'E') t(x)");
-        assertEquals(actual2.getRowCount(), 1);
-        assertEquals(actual2.getMaterializedRows().get(0).getFields().get(0), ImmutableMap.of("A", 3L, "B", 2L));
+        assertThat(actual2.getRowCount()).isEqualTo(1);
+        assertThat(actual2.getMaterializedRows().get(0).getFields().get(0)).isEqualTo(ImmutableMap.of("A", 3L, "B", 2L));
     }
 
     @Test
     public void testApproxMostFrequentWithLongGroupBy()
     {
         MaterializedResult actual1 = computeActual("SELECT k, approx_most_frequent(3, cast(v as bigint), 15) FROM (values ('a', 1), ('b', 2), ('a', 1), ('c', 3), ('a', 1), ('b', 2), ('c', 3), ('a', 4), ('b', 5)) t(k, v) GROUP BY 1 ORDER BY 1");
-        assertEquals(actual1.getRowCount(), 3);
-        assertEquals(actual1.getMaterializedRows().get(0).getFields().get(0), "a");
-        assertEquals(actual1.getMaterializedRows().get(0).getFields().get(1), ImmutableMap.of(1L, 3L, 4L, 1L));
-        assertEquals(actual1.getMaterializedRows().get(1).getFields().get(0), "b");
-        assertEquals(actual1.getMaterializedRows().get(1).getFields().get(1), ImmutableMap.of(2L, 2L, 5L, 1L));
-        assertEquals(actual1.getMaterializedRows().get(2).getFields().get(0), "c");
-        assertEquals(actual1.getMaterializedRows().get(2).getFields().get(1), ImmutableMap.of(3L, 2L));
+        assertThat(actual1.getRowCount()).isEqualTo(3);
+        assertThat(actual1.getMaterializedRows().get(0).getFields().get(0)).isEqualTo("a");
+        assertThat(actual1.getMaterializedRows().get(0).getFields().get(1)).isEqualTo(ImmutableMap.of(1L, 3L, 4L, 1L));
+        assertThat(actual1.getMaterializedRows().get(1).getFields().get(0)).isEqualTo("b");
+        assertThat(actual1.getMaterializedRows().get(1).getFields().get(1)).isEqualTo(ImmutableMap.of(2L, 2L, 5L, 1L));
+        assertThat(actual1.getMaterializedRows().get(2).getFields().get(0)).isEqualTo("c");
+        assertThat(actual1.getMaterializedRows().get(2).getFields().get(1)).isEqualTo(ImmutableMap.of(3L, 2L));
     }
 
     @Test
     public void testApproxMostFrequentWithStringGroupBy()
     {
         MaterializedResult actual1 = computeActual("SELECT k, approx_most_frequent(3, v, 15) FROM (values ('a', 'A'), ('b', 'B'), ('a', 'A'), ('c', 'C'), ('a', 'A'), ('b', 'B'), ('c', 'C'), ('a', 'D'), ('b', 'E')) t(k, v) GROUP BY 1 ORDER BY 1");
-        assertEquals(actual1.getRowCount(), 3);
-        assertEquals(actual1.getMaterializedRows().get(0).getFields().get(0), "a");
-        assertEquals(actual1.getMaterializedRows().get(0).getFields().get(1), ImmutableMap.of("A", 3L, "D", 1L));
-        assertEquals(actual1.getMaterializedRows().get(1).getFields().get(0), "b");
-        assertEquals(actual1.getMaterializedRows().get(1).getFields().get(1), ImmutableMap.of("B", 2L, "E", 1L));
-        assertEquals(actual1.getMaterializedRows().get(2).getFields().get(0), "c");
-        assertEquals(actual1.getMaterializedRows().get(2).getFields().get(1), ImmutableMap.of("C", 2L));
+        assertThat(actual1.getRowCount()).isEqualTo(3);
+        assertThat(actual1.getMaterializedRows().get(0).getFields().get(0)).isEqualTo("a");
+        assertThat(actual1.getMaterializedRows().get(0).getFields().get(1)).isEqualTo(ImmutableMap.of("A", 3L, "D", 1L));
+        assertThat(actual1.getMaterializedRows().get(1).getFields().get(0)).isEqualTo("b");
+        assertThat(actual1.getMaterializedRows().get(1).getFields().get(1)).isEqualTo(ImmutableMap.of("B", 2L, "E", 1L));
+        assertThat(actual1.getMaterializedRows().get(2).getFields().get(0)).isEqualTo("c");
+        assertThat(actual1.getMaterializedRows().get(2).getFields().get(1)).isEqualTo(ImmutableMap.of("C", 2L));
+    }
+
+    @Test
+    public void testLongDecimalAggregations()
+    {
+        assertQuery(
+                """
+                SELECT avg(value_big), sum(value_big), avg(value_small), sum(value_small)
+                FROM (
+                    SELECT orderkey as id, CAST(power(2, 65) as DECIMAL(38, 0)) as value_big, CAST(1 as DECIMAL(38, 0)) as value_small
+                    FROM orders
+                    LIMIT 10)
+                GROUP BY id
+                """);
     }
 }

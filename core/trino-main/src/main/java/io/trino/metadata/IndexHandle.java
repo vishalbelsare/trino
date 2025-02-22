@@ -13,75 +13,27 @@
  */
 package io.trino.metadata;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import io.trino.connector.CatalogName;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorIndexHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 
-import java.util.Objects;
-
 import static java.util.Objects.requireNonNull;
 
-public final class IndexHandle
+public record IndexHandle(
+        CatalogHandle catalogHandle,
+        ConnectorTransactionHandle transactionHandle,
+        ConnectorIndexHandle connectorHandle)
 {
-    private final CatalogName catalogName;
-    private final ConnectorTransactionHandle transactionHandle;
-    private final ConnectorIndexHandle connectorHandle;
-
-    @JsonCreator
-    public IndexHandle(
-            @JsonProperty("catalogName") CatalogName catalogName,
-            @JsonProperty("transactionHandle") ConnectorTransactionHandle transactionHandle,
-            @JsonProperty("connectorHandle") ConnectorIndexHandle connectorHandle)
+    public IndexHandle
     {
-        this.catalogName = requireNonNull(catalogName, "catalogName is null");
-        this.transactionHandle = requireNonNull(transactionHandle, "transactionHandle is null");
-        this.connectorHandle = requireNonNull(connectorHandle, "connectorHandle is null");
-    }
-
-    @JsonProperty
-    public CatalogName getCatalogName()
-    {
-        return catalogName;
-    }
-
-    @JsonProperty
-    public ConnectorTransactionHandle getTransactionHandle()
-    {
-        return transactionHandle;
-    }
-
-    @JsonProperty
-    public ConnectorIndexHandle getConnectorHandle()
-    {
-        return connectorHandle;
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(catalogName, transactionHandle, connectorHandle);
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (this == obj) {
-            return true;
-        }
-        if (obj == null || getClass() != obj.getClass()) {
-            return false;
-        }
-        IndexHandle other = (IndexHandle) obj;
-        return Objects.equals(this.catalogName, other.catalogName) &&
-                Objects.equals(this.transactionHandle, other.transactionHandle) &&
-                Objects.equals(this.connectorHandle, other.connectorHandle);
+        requireNonNull(catalogHandle, "catalogHandle is null");
+        requireNonNull(transactionHandle, "transactionHandle is null");
+        requireNonNull(connectorHandle, "connectorHandle is null");
     }
 
     @Override
     public String toString()
     {
-        return catalogName + ":" + connectorHandle;
+        return catalogHandle + ":" + connectorHandle;
     }
 }

@@ -13,8 +13,12 @@
  */
 package io.trino.spi.block;
 
+import static io.airlift.slice.SizeOf.instanceSize;
+
 public class PageBuilderStatus
 {
+    public static final int INSTANCE_SIZE = instanceSize(PageBuilderStatus.class);
+
     public static final int DEFAULT_MAX_PAGE_SIZE_IN_BYTES = 1024 * 1024;
 
     private final int maxPageSizeInBytes;

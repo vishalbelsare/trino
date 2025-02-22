@@ -14,7 +14,7 @@
 package io.trino.plugin.example;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.Map;
@@ -35,9 +35,7 @@ public class TestExampleConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("metadata-uri", "file://test.json")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("metadata-uri", "file://test.json");
 
         ExampleConfig expected = new ExampleConfig()
                 .setMetadata(URI.create("file://test.json"));

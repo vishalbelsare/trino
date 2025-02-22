@@ -16,15 +16,24 @@ package io.trino.sql.planner.optimizations;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.SortOrder;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.ExpressionRewriter;
+import io.trino.sql.ir.ExpressionTreeRewriter;
+import io.trino.sql.ir.Lambda;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AggregationNode.Aggregation;
+import io.trino.sql.planner.plan.ApplyNode;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.DistinctLimitNode;
 import io.trino.sql.planner.plan.GroupIdNode;
 import io.trino.sql.planner.plan.LimitNode;
+import io.trino.sql.planner.plan.MergeProcessorNode;
+import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.PatternRecognitionNode;
 import io.trino.sql.planner.plan.PatternRecognitionNode.Measure;
 import io.trino.sql.planner.plan.PlanNode;
@@ -34,28 +43,33 @@ import io.trino.sql.planner.plan.StatisticAggregations;
 import io.trino.sql.planner.plan.StatisticsWriterNode;
 import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
+import io.trino.sql.planner.plan.TableFunctionNode.PassThroughColumn;
+import io.trino.sql.planner.plan.TableFunctionNode.PassThroughSpecification;
+import io.trino.sql.planner.plan.TableFunctionProcessorNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.WindowNode;
 import io.trino.sql.planner.rowpattern.AggregationValuePointer;
-import io.trino.sql.planner.rowpattern.LogicalIndexExtractor.ExpressionAndValuePointers;
+import io.trino.sql.planner.rowpattern.ClassifierValuePointer;
+import io.trino.sql.planner.rowpattern.ExpressionAndValuePointers;
+import io.trino.sql.planner.rowpattern.MatchNumberValuePointer;
 import io.trino.sql.planner.rowpattern.ScalarValuePointer;
 import io.trino.sql.planner.rowpattern.ValuePointer;
 import io.trino.sql.planner.rowpattern.ir.IrLabel;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.ExpressionRewriter;
-import io.trino.sql.tree.ExpressionTreeRewriter;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
@@ -106,6 +120,19 @@ public class SymbolMapper
         return mappingFunction.apply(symbol);
     }
 
+    public ApplyNode.SetExpression map(ApplyNode.SetExpression expression)
+    {
+        return switch (expression) {
+            case ApplyNode.Exists exists -> exists;
+            case ApplyNode.In in -> new ApplyNode.In(map(in.value()), map(in.reference()));
+            case ApplyNode.QuantifiedComparison comparison -> new ApplyNode.QuantifiedComparison(
+                    comparison.operator(),
+                    comparison.quantifier(),
+                    map(comparison.value()),
+                    map(comparison.reference()));
+        };
+    }
+
     public List<Symbol> map(List<Symbol> symbols)
     {
         return symbols.stream()
@@ -126,10 +153,25 @@ public class SymbolMapper
         return ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<>()
         {
             @Override
-            public Expression rewriteSymbolReference(SymbolReference node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+            public Expression rewriteReference(Reference node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
             {
                 Symbol canonical = map(Symbol.from(node));
                 return canonical.toSymbolReference();
+            }
+
+            @Override
+            public Expression rewriteLambda(Lambda node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+            {
+                List<Symbol> arguments = node.arguments().stream()
+                        .map(symbol -> map(new Symbol(symbol.type(), symbol.name())))
+                        .collect(toImmutableList());
+
+                Expression body = treeRewriter.rewrite(node.body(), context);
+                if (body != node.body()) {
+                    return new Lambda(arguments, body);
+                }
+
+                return node;
             }
         }, expression);
     }
@@ -149,7 +191,7 @@ public class SymbolMapper
         return new AggregationNode(
                 newNodeId,
                 source,
-                aggregations.build(),
+                aggregations.buildOrThrow(),
                 groupingSets(
                         mapAndDistinct(node.getGroupingKeys()),
                         node.getGroupingSetCount(),
@@ -179,7 +221,7 @@ public class SymbolMapper
         ImmutableList.Builder<List<Symbol>> newGroupingSets = ImmutableList.builder();
 
         for (List<Symbol> groupingSet : node.getGroupingSets()) {
-            ImmutableList.Builder<Symbol> newGroupingSet = ImmutableList.builder();
+            Set<Symbol> newGroupingSet = new LinkedHashSet<>();
             for (Symbol output : groupingSet) {
                 Symbol newOutput = map(output);
                 newGroupingMappings.putIfAbsent(
@@ -187,7 +229,7 @@ public class SymbolMapper
                         map(node.getGroupingColumns().get(output)));
                 newGroupingSet.add(newOutput);
             }
-            newGroupingSets.add(newGroupingSet.build());
+            newGroupingSets.add(ImmutableList.copyOf(newGroupingSet));
         }
 
         return new GroupIdNode(
@@ -207,20 +249,23 @@ public class SymbolMapper
                     .map(this::map)
                     .collect(toImmutableList());
             WindowNode.Frame newFrame = map(function.getFrame());
+            Optional<OrderingScheme> newOrderingScheme = function.getOrderingScheme().map(this::map);
 
-            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, newFrame, function.isIgnoreNulls()));
+            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, newOrderingScheme, newFrame, function.isIgnoreNulls(), function.isDistinct()));
         });
+
+        SpecificationWithPreSortedPrefix newSpecification = mapAndDistinct(node.getSpecification(), node.getPreSortedOrderPrefix());
 
         return new WindowNode(
                 node.getId(),
                 source,
-                mapAndDistinct(node.getSpecification()),
-                newFunctions.build(),
+                newSpecification.specification(),
+                newFunctions.buildOrThrow(),
                 node.getHashSymbol().map(this::map),
                 node.getPrePartitionedInputs().stream()
                         .map(this::map)
                         .collect(toImmutableSet()),
-                node.getPreSortedOrderPrefix());
+                newSpecification.preSorted());
     }
 
     private WindowNode.Frame map(WindowNode.Frame frame)
@@ -232,28 +277,41 @@ public class SymbolMapper
                 frame.getSortKeyCoercedForFrameStartComparison().map(this::map),
                 frame.getEndType(),
                 frame.getEndValue().map(this::map),
-                frame.getSortKeyCoercedForFrameEndComparison().map(this::map),
-                frame.getOriginalStartValue(),
-                frame.getOriginalEndValue());
+                frame.getSortKeyCoercedForFrameEndComparison().map(this::map));
     }
 
-    private WindowNode.Specification mapAndDistinct(WindowNode.Specification specification)
+    private SpecificationWithPreSortedPrefix mapAndDistinct(DataOrganizationSpecification specification, int preSorted)
     {
-        return new WindowNode.Specification(
-                mapAndDistinct(specification.getPartitionBy()),
-                specification.getOrderingScheme().map(this::map));
+        Optional<OrderingSchemeWithPreSortedPrefix> newOrderingScheme = specification.orderingScheme()
+                .map(orderingScheme -> map(orderingScheme, preSorted));
+
+        return new SpecificationWithPreSortedPrefix(
+                new DataOrganizationSpecification(
+                        mapAndDistinct(specification.partitionBy()),
+                        newOrderingScheme.map(OrderingSchemeWithPreSortedPrefix::orderingScheme)),
+                newOrderingScheme.map(OrderingSchemeWithPreSortedPrefix::preSorted).orElse(preSorted));
+    }
+
+    public DataOrganizationSpecification mapAndDistinct(DataOrganizationSpecification specification)
+    {
+        return new DataOrganizationSpecification(
+                mapAndDistinct(specification.partitionBy()),
+                specification.orderingScheme().map(this::map));
     }
 
     public PatternRecognitionNode map(PatternRecognitionNode node, PlanNode source)
     {
+        SpecificationWithPreSortedPrefix newSpecification = mapAndDistinct(node.getSpecification(), node.getPreSortedOrderPrefix());
+
         ImmutableMap.Builder<Symbol, WindowNode.Function> newFunctions = ImmutableMap.builder();
         node.getWindowFunctions().forEach((symbol, function) -> {
             List<Expression> newArguments = function.getArguments().stream()
                     .map(this::map)
                     .collect(toImmutableList());
             WindowNode.Frame newFrame = map(function.getFrame());
+            verify(function.getOrderingScheme().isEmpty());
 
-            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, newFrame, function.isIgnoreNulls()));
+            newFunctions.put(map(symbol), new WindowNode.Function(function.getResolvedFunction(), newArguments, Optional.empty(), newFrame, function.isIgnoreNulls(), function.isDistinct()));
         });
 
         ImmutableMap.Builder<Symbol, Measure> newMeasures = ImmutableMap.builder();
@@ -268,22 +326,21 @@ public class SymbolMapper
         return new PatternRecognitionNode(
                 node.getId(),
                 source,
-                mapAndDistinct(node.getSpecification()),
+                newSpecification.specification(),
                 node.getHashSymbol().map(this::map),
                 node.getPrePartitionedInputs().stream()
                         .map(this::map)
                         .collect(toImmutableSet()),
-                node.getPreSortedOrderPrefix(),
-                newFunctions.build(),
-                newMeasures.build(),
+                newSpecification.preSorted(),
+                newFunctions.buildOrThrow(),
+                newMeasures.buildOrThrow(),
                 node.getCommonBaseFrame().map(this::map),
                 node.getRowsPerMatch(),
-                node.getSkipToLabel(),
+                node.getSkipToLabels(),
                 node.getSkipToPosition(),
                 node.isInitial(),
                 node.getPattern(),
-                node.getSubsets(),
-                newVariableDefinitions.build());
+                newVariableDefinitions.buildOrThrow());
     }
 
     private ExpressionAndValuePointers map(ExpressionAndValuePointers expressionAndValuePointers)
@@ -291,50 +348,99 @@ public class SymbolMapper
         // Map only the input symbols of ValuePointers. These are the symbols produced by the source node.
         // Other symbols present in the ExpressionAndValuePointers structure are synthetic unique symbols
         // with no outer usage or dependencies.
-        ImmutableList.Builder<ValuePointer> newValuePointers = ImmutableList.builder();
-        for (ValuePointer valuePointer : expressionAndValuePointers.getValuePointers()) {
-            if (valuePointer instanceof ScalarValuePointer) {
-                ScalarValuePointer scalarValuePointer = (ScalarValuePointer) valuePointer;
-                Symbol inputSymbol = scalarValuePointer.getInputSymbol();
-                if (expressionAndValuePointers.getClassifierSymbols().contains(inputSymbol) || expressionAndValuePointers.getMatchNumberSymbols().contains(inputSymbol)) {
-                    newValuePointers.add(scalarValuePointer);
-                }
-                else {
-                    newValuePointers.add(new ScalarValuePointer(scalarValuePointer.getLogicalIndexPointer(), map(inputSymbol)));
-                }
-            }
-            else {
-                AggregationValuePointer aggregationValuePointer = (AggregationValuePointer) valuePointer;
-
-                List<Expression> newArguments = aggregationValuePointer.getArguments().stream()
-                        .map(expression -> ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<Void>()
-                        {
-                            @Override
-                            public Expression rewriteSymbolReference(SymbolReference node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+        ImmutableList.Builder<ExpressionAndValuePointers.Assignment> newAssignments = ImmutableList.builder();
+        for (ExpressionAndValuePointers.Assignment assignment : expressionAndValuePointers.getAssignments()) {
+            ValuePointer newPointer = switch (assignment.valuePointer()) {
+                case ClassifierValuePointer pointer -> pointer;
+                case MatchNumberValuePointer pointer -> pointer;
+                case ScalarValuePointer pointer -> new ScalarValuePointer(pointer.getLogicalIndexPointer(), map(pointer.getInputSymbol()));
+                case AggregationValuePointer pointer -> {
+                    List<Expression> newArguments = pointer.getArguments().stream()
+                            .map(expression -> ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<Void>()
                             {
-                                if (Symbol.from(node).equals(aggregationValuePointer.getClassifierSymbol()) || Symbol.from(node).equals(aggregationValuePointer.getMatchNumberSymbol())) {
-                                    return node;
+                                @Override
+                                public Expression rewriteReference(Reference node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+                                {
+                                    if (pointer.getClassifierSymbol().isPresent() && Symbol.from(node).equals(pointer.getClassifierSymbol().get()) ||
+                                            pointer.getMatchNumberSymbol().isPresent() && Symbol.from(node).equals(pointer.getMatchNumberSymbol().get())) {
+                                        return node;
+                                    }
+                                    return map(node);
                                 }
-                                return map(node);
-                            }
-                        }, expression))
-                        .collect(toImmutableList());
+                            }, expression))
+                            .collect(toImmutableList());
 
-                newValuePointers.add(new AggregationValuePointer(
-                        aggregationValuePointer.getFunction(),
-                        aggregationValuePointer.getSetDescriptor(),
-                        newArguments,
-                        aggregationValuePointer.getClassifierSymbol(),
-                        aggregationValuePointer.getMatchNumberSymbol()));
-            }
+                    yield new AggregationValuePointer(
+                            pointer.getFunction(),
+                            pointer.getSetDescriptor(),
+                            newArguments,
+                            pointer.getClassifierSymbol(),
+                            pointer.getMatchNumberSymbol());
+                }
+            };
+
+            newAssignments.add(new ExpressionAndValuePointers.Assignment(assignment.symbol(), newPointer));
         }
 
-        return new ExpressionAndValuePointers(
-                expressionAndValuePointers.getExpression(),
-                expressionAndValuePointers.getLayout(),
-                newValuePointers.build(),
-                expressionAndValuePointers.getClassifierSymbols(),
-                expressionAndValuePointers.getMatchNumberSymbols());
+        return new ExpressionAndValuePointers(expressionAndValuePointers.getExpression(), newAssignments.build());
+    }
+
+    public TableFunctionProcessorNode map(TableFunctionProcessorNode node, PlanNode source)
+    {
+        // rewrite and deduplicate pass-through specifications
+        // note: Potentially, pass-through symbols from different sources might be recognized as semantically identical, and rewritten
+        // to the same symbol. Currently, we retrieve the first occurrence of a symbol, and skip all the following occurrences.
+        // For better performance, we could pick the occurrence with "isPartitioningColumn" property, since the pass-through mechanism
+        // is more efficient for partitioning columns which are guaranteed to be constant within partition.
+        // TODO choose a partitioning column to be retrieved while deduplicating
+        ImmutableList.Builder<PassThroughSpecification> newPassThroughSpecifications = ImmutableList.builder();
+        Set<Symbol> newPassThroughSymbols = new HashSet<>();
+        for (PassThroughSpecification specification : node.getPassThroughSpecifications()) {
+            ImmutableList.Builder<PassThroughColumn> newColumns = ImmutableList.builder();
+            for (PassThroughColumn column : specification.columns()) {
+                Symbol newSymbol = map(column.symbol());
+                if (newPassThroughSymbols.add(newSymbol)) {
+                    newColumns.add(new PassThroughColumn(newSymbol, column.isPartitioningColumn()));
+                }
+            }
+            newPassThroughSpecifications.add(new PassThroughSpecification(specification.declaredAsPassThrough(), newColumns.build()));
+        }
+
+        // rewrite required symbols without deduplication. the table function expects specific input layout
+        List<List<Symbol>> newRequiredSymbols = node.getRequiredSymbols().stream()
+                .map(this::map)
+                .collect(toImmutableList());
+
+        // rewrite and deduplicate marker mapping
+        Optional<Map<Symbol, Symbol>> newMarkerSymbols = node.getMarkerSymbols()
+                .map(mapping -> mapping.entrySet().stream()
+                        .collect(toImmutableMap(
+                                entry -> map(entry.getKey()),
+                                entry -> map(entry.getValue()),
+                                (first, second) -> {
+                                    checkState(first.equals(second), "Ambiguous marker symbols: %s and %s", first, second);
+                                    return first;
+                                })));
+
+        // rewrite and deduplicate specification
+        Optional<SpecificationWithPreSortedPrefix> newSpecification = node.getSpecification().map(specification -> mapAndDistinct(specification, node.getPreSorted()));
+
+        return new TableFunctionProcessorNode(
+                node.getId(),
+                node.getName(),
+                map(node.getProperOutputs()),
+                Optional.of(source),
+                node.isPruneWhenEmpty(),
+                newPassThroughSpecifications.build(),
+                newRequiredSymbols,
+                newMarkerSymbols,
+                newSpecification.map(SpecificationWithPreSortedPrefix::specification),
+                node.getPrePartitioned().stream()
+                        .map(this::map)
+                        .collect(toImmutableSet()),
+                newSpecification.map(SpecificationWithPreSortedPrefix::preSorted).orElse(node.getPreSorted()),
+                node.getHashSymbol().map(this::map),
+                node.getHandle());
     }
 
     public LimitNode map(LimitNode node, PlanNode source)
@@ -350,19 +456,42 @@ public class SymbolMapper
                         .collect(toImmutableList()));
     }
 
+    public OrderingSchemeWithPreSortedPrefix map(OrderingScheme orderingScheme, int preSorted)
+    {
+        ImmutableList.Builder<Symbol> newSymbols = ImmutableList.builder();
+        ImmutableMap.Builder<Symbol, SortOrder> newOrderings = ImmutableMap.builder();
+        int newPreSorted = preSorted;
+
+        Set<Symbol> added = new HashSet<>(orderingScheme.orderBy().size());
+
+        for (int i = 0; i < orderingScheme.orderBy().size(); i++) {
+            Symbol symbol = orderingScheme.orderBy().get(i);
+            Symbol canonical = map(symbol);
+            if (added.add(canonical)) {
+                newSymbols.add(canonical);
+                newOrderings.put(canonical, orderingScheme.ordering(symbol));
+            }
+            else if (i < preSorted) {
+                newPreSorted--;
+            }
+        }
+
+        return new OrderingSchemeWithPreSortedPrefix(new OrderingScheme(newSymbols.build(), newOrderings.buildOrThrow()), newPreSorted);
+    }
+
     public OrderingScheme map(OrderingScheme orderingScheme)
     {
         ImmutableList.Builder<Symbol> newSymbols = ImmutableList.builder();
         ImmutableMap.Builder<Symbol, SortOrder> newOrderings = ImmutableMap.builder();
-        Set<Symbol> added = new HashSet<>(orderingScheme.getOrderBy().size());
-        for (Symbol symbol : orderingScheme.getOrderBy()) {
+        Set<Symbol> added = new HashSet<>(orderingScheme.orderBy().size());
+        for (Symbol symbol : orderingScheme.orderBy()) {
             Symbol canonical = map(symbol);
             if (added.add(canonical)) {
                 newSymbols.add(canonical);
-                newOrderings.put(canonical, orderingScheme.getOrdering(symbol));
+                newOrderings.put(canonical, orderingScheme.ordering(symbol));
             }
         }
-        return new OrderingScheme(newSymbols.build(), newOrderings.build());
+        return new OrderingScheme(newSymbols.build(), newOrderings.buildOrThrow());
     }
 
     public DistinctLimitNode map(DistinctLimitNode node, PlanNode source)
@@ -403,9 +532,7 @@ public class SymbolMapper
                 map(node.getFragmentSymbol()),
                 map(node.getColumns()),
                 node.getColumnNames(),
-                node.getNotNullColumnSymbols(),
                 node.getPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())),
-                node.getPreferredPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())),
                 node.getStatisticsAggregation().map(this::map),
                 node.getStatisticsAggregationDescriptor().map(descriptor -> descriptor.map(this::map)));
     }
@@ -426,8 +553,50 @@ public class SymbolMapper
                 map(node.getFragmentSymbol()),
                 map(node.getColumns()),
                 node.getColumnNames(),
+                node.getPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())));
+    }
+
+    public MergeWriterNode map(MergeWriterNode node, PlanNode source)
+    {
+        // Intentionally does not use mapAndDistinct on columns as that would remove columns
+        List<Symbol> newOutputs = map(node.getOutputSymbols());
+
+        return new MergeWriterNode(
+                node.getId(),
+                source,
+                node.getTarget(),
+                map(node.getProjectedSymbols()),
                 node.getPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())),
-                node.getPreferredPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())));
+                newOutputs);
+    }
+
+    public MergeWriterNode map(MergeWriterNode node, PlanNode source, PlanNodeId newId)
+    {
+        // Intentionally does not use mapAndDistinct on columns as that would remove columns
+        List<Symbol> newOutputs = map(node.getOutputSymbols());
+
+        return new MergeWriterNode(
+                newId,
+                source,
+                node.getTarget(),
+                map(node.getProjectedSymbols()),
+                node.getPartitioningScheme().map(partitioningScheme -> map(partitioningScheme, source.getOutputSymbols())),
+                newOutputs);
+    }
+
+    public MergeProcessorNode map(MergeProcessorNode node, PlanNode source)
+    {
+        List<Symbol> newOutputs = map(node.getOutputSymbols());
+
+        return new MergeProcessorNode(
+                node.getId(),
+                source,
+                node.getTarget(),
+                map(node.getRowIdSymbol()),
+                map(node.getMergeRowSymbol()),
+                map(node.getDataColumnSymbols()),
+                map(node.getRedistributionColumnSymbols()),
+                newOutputs);
     }
 
     public PartitioningScheme map(PartitioningScheme scheme, List<Symbol> sourceLayout)
@@ -437,7 +606,8 @@ public class SymbolMapper
                 mapAndDistinct(sourceLayout),
                 scheme.getHashColumn().map(this::map),
                 scheme.isReplicateNullsAndAny(),
-                scheme.getBucketToPartition());
+                scheme.getBucketToPartition(),
+                scheme.getPartitionCount());
     }
 
     public TableFinishNode map(TableFinishNode node, PlanNode source)
@@ -498,6 +668,24 @@ public class SymbolMapper
                 node.getStep());
     }
 
+    private record OrderingSchemeWithPreSortedPrefix(OrderingScheme orderingScheme, int preSorted)
+    {
+        private OrderingSchemeWithPreSortedPrefix(OrderingScheme orderingScheme, int preSorted)
+        {
+            this.orderingScheme = requireNonNull(orderingScheme, "orderingScheme is null");
+            this.preSorted = preSorted;
+        }
+    }
+
+    private record SpecificationWithPreSortedPrefix(DataOrganizationSpecification specification, int preSorted)
+    {
+        private SpecificationWithPreSortedPrefix(DataOrganizationSpecification specification, int preSorted)
+        {
+            this.specification = requireNonNull(specification, "specification is null");
+            this.preSorted = preSorted;
+        }
+    }
+
     public static Builder builder()
     {
         return new Builder();
@@ -514,7 +702,7 @@ public class SymbolMapper
 
         public SymbolMapper build()
         {
-            return SymbolMapper.symbolMapper(mappings.build());
+            return SymbolMapper.symbolMapper(mappings.buildOrThrow());
         }
     }
 }

@@ -14,7 +14,7 @@
 package io.trino.plugin.jdbc.credential.file;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -40,9 +40,7 @@ public class TestConfigFileBasedCredentialProviderConfig
     {
         Path credentialFile = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("connection-credential-file", credentialFile.toString())
-                .build();
+        Map<String, String> properties = ImmutableMap.of("connection-credential-file", credentialFile.toString());
 
         ConfigFileBasedCredentialProviderConfig expected = new ConfigFileBasedCredentialProviderConfig()
                 .setCredentialFile(credentialFile.toString());

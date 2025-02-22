@@ -15,60 +15,39 @@ package io.trino.sql.relational;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.BoundSignature;
 import io.trino.metadata.ResolvedFunction;
-import io.trino.metadata.Signature;
+import io.trino.spi.function.BoundSignature;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
+import static io.trino.metadata.OperatorNameUtil.mangleOperatorName;
 import static io.trino.spi.function.OperatorType.CAST;
 import static java.util.Objects.requireNonNull;
 
-public class SpecialForm
-        extends RowExpression
+public record SpecialForm(
+        io.trino.sql.relational.SpecialForm.Form form,
+        Type type,
+        List<RowExpression> arguments,
+        List<ResolvedFunction> functionDependencies)
+        implements RowExpression
 {
-    private final Form form;
-    private final Type returnType;
-    private final List<RowExpression> arguments;
-    private final List<ResolvedFunction> functionDependencies;
-
-    public SpecialForm(Form form, Type returnType, RowExpression... arguments)
+    public SpecialForm
     {
-        this(form, returnType, ImmutableList.copyOf(arguments));
-    }
-
-    public SpecialForm(Form form, Type returnType, List<RowExpression> arguments)
-    {
-        this(form, returnType, arguments, ImmutableList.of());
-    }
-
-    public SpecialForm(Form form, Type returnType, List<RowExpression> arguments, List<ResolvedFunction> functionDependencies)
-    {
-        this.form = requireNonNull(form, "form is null");
-        this.returnType = requireNonNull(returnType, "returnType is null");
-        this.arguments = requireNonNull(arguments, "arguments is null");
-        this.functionDependencies = ImmutableList.copyOf(requireNonNull(functionDependencies, "functionDependencies is null"));
-    }
-
-    public Form getForm()
-    {
-        return form;
-    }
-
-    public List<ResolvedFunction> getFunctionDependencies()
-    {
-        return functionDependencies;
+        requireNonNull(form, "form is null");
+        requireNonNull(type, "type is null");
+        requireNonNull(arguments, "arguments is null");
+        functionDependencies = ImmutableList.copyOf(requireNonNull(functionDependencies, "functionDependencies is null"));
     }
 
     public ResolvedFunction getOperatorDependency(OperatorType operator)
     {
-        String mangleOperatorName = Signature.mangleOperatorName(operator);
+        String mangleOperatorName = mangleOperatorName(operator);
         for (ResolvedFunction function : functionDependencies) {
-            if (function.getSignature().getName().equals(mangleOperatorName)) {
+            if (function.signature().getName().getFunctionName().equalsIgnoreCase(mangleOperatorName)) {
                 return function;
             }
         }
@@ -80,9 +59,9 @@ public class SpecialForm
         if (fromType.equals(toType)) {
             return Optional.empty();
         }
-        BoundSignature boundSignature = new BoundSignature(Signature.mangleOperatorName(CAST), toType, ImmutableList.of(fromType));
+        BoundSignature boundSignature = new BoundSignature(builtinFunctionName(CAST), toType, ImmutableList.of(fromType));
         for (ResolvedFunction function : functionDependencies) {
-            if (function.getSignature().equals(boundSignature)) {
+            if (function.signature().equals(boundSignature)) {
                 return Optional.of(function);
             }
         }
@@ -90,42 +69,9 @@ public class SpecialForm
     }
 
     @Override
-    public Type getType()
-    {
-        return returnType;
-    }
-
-    public List<RowExpression> getArguments()
-    {
-        return arguments;
-    }
-
-    @Override
     public String toString()
     {
         return form.name() + "(" + Joiner.on(", ").join(arguments) + ")";
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        SpecialForm that = (SpecialForm) o;
-        return form == that.form &&
-                Objects.equals(returnType, that.returnType) &&
-                Objects.equals(arguments, that.arguments) &&
-                Objects.equals(functionDependencies, that.functionDependencies);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(form, returnType, arguments, functionDependencies);
     }
 
     @Override
@@ -148,6 +94,7 @@ public class SpecialForm
         OR,
         DEREFERENCE,
         ROW_CONSTRUCTOR,
+        ARRAY_CONSTRUCTOR,
         BIND,
     }
 }

@@ -16,53 +16,43 @@ package io.trino.plugin.hive.security;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.plugin.base.security.AllowAllSecurityModule;
 import io.trino.plugin.base.security.ConnectorAccessControlModule;
 import io.trino.plugin.base.security.FileBasedAccessControlModule;
 import io.trino.plugin.base.security.ReadOnlySecurityModule;
 
-import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigurationAwareModule.combine;
 
 public class HiveSecurityModule
         extends AbstractConfigurationAwareModule
 {
-    public static final String LEGACY = "legacy";
-    public static final String FILE = "file";
-    public static final String READ_ONLY = "read-only";
-    public static final String SQL_STANDARD = "sql-standard";
-    public static final String ALLOW_ALL = "allow-all";
-    public static final String SYSTEM = "system";
+    public enum HiveSecurity
+    {
+        ALLOW_ALL,
+        READ_ONLY,
+        FILE,
+        SQL_STANDARD,
+        SYSTEM,
+        /**/
+    }
 
     @Override
     protected void setup(Binder binder)
     {
         install(new ConnectorAccessControlModule());
-        bindSecurityModule(
-                LEGACY,
-                combine(
-                        new LegacySecurityModule(),
-                        new StaticAccessControlMetadataModule()));
-        bindSecurityModule(
-                FILE,
-                combine(
-                        new FileBasedAccessControlModule(),
-                        new StaticAccessControlMetadataModule()));
-        bindSecurityModule(
-                READ_ONLY,
-                combine(
-                        new ReadOnlySecurityModule(),
-                        new StaticAccessControlMetadataModule()));
-        bindSecurityModule(SQL_STANDARD, new SqlStandardSecurityModule());
-        bindSecurityModule(ALLOW_ALL, new AllowAllSecurityModule());
-        bindSecurityModule(SYSTEM, new SystemSecurityModule());
+        install(switch (buildConfigObject(SecurityConfig.class).getSecuritySystem()) {
+            case ALLOW_ALL -> combine(new AllowAllSecurityModule(), new StaticAccessControlMetadataModule(), usingSystemSecurity(false));
+            case READ_ONLY -> combine(new ReadOnlySecurityModule(), new StaticAccessControlMetadataModule(), usingSystemSecurity(false));
+            case FILE -> combine(new FileBasedAccessControlModule(), new StaticAccessControlMetadataModule(), usingSystemSecurity(false));
+            case SQL_STANDARD -> combine(new SqlStandardSecurityModule(), usingSystemSecurity(false));
+            // do not bind a ConnectorAccessControl so the engine will use system security with system roles
+            case SYSTEM -> combine(new StaticAccessControlMetadataModule(), usingSystemSecurity(true));
+        });
     }
 
-    private void bindSecurityModule(String name, Module module)
+    private static Module usingSystemSecurity(boolean system)
     {
-        install(conditionalModule(
-                SecurityConfig.class,
-                security -> name.equalsIgnoreCase(security.getSecuritySystem()),
-                module));
+        return binder -> binder.bind(boolean.class).annotatedWith(UsingSystemSecurity.class).toInstance(system);
     }
 
     private static class StaticAccessControlMetadataModule
@@ -71,7 +61,7 @@ public class HiveSecurityModule
         @Override
         public void configure(Binder binder)
         {
-            binder.bind(AccessControlMetadataFactory.class).toInstance((metastore) -> new AccessControlMetadata() {});
+            binder.bind(AccessControlMetadataFactory.class).toInstance(_ -> new AccessControlMetadata() {});
         }
     }
 }

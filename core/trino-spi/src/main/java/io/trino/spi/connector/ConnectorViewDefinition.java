@@ -22,6 +22,7 @@ import java.util.Optional;
 import java.util.StringJoiner;
 
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 public class ConnectorViewDefinition
 {
@@ -32,6 +33,7 @@ public class ConnectorViewDefinition
     private final Optional<String> comment;
     private final Optional<String> owner;
     private final boolean runAsInvoker;
+    private final List<CatalogSchemaName> path;
 
     @JsonCreator
     public ConnectorViewDefinition(
@@ -41,7 +43,8 @@ public class ConnectorViewDefinition
             @JsonProperty("columns") List<ViewColumn> columns,
             @JsonProperty("comment") Optional<String> comment,
             @JsonProperty("owner") Optional<String> owner,
-            @JsonProperty("runAsInvoker") boolean runAsInvoker)
+            @JsonProperty("runAsInvoker") boolean runAsInvoker,
+            @JsonProperty("path") List<CatalogSchemaName> path)
     {
         this.originalSql = requireNonNull(originalSql, "originalSql is null");
         this.catalog = requireNonNull(catalog, "catalog is null");
@@ -50,6 +53,7 @@ public class ConnectorViewDefinition
         this.comment = requireNonNull(comment, "comment is null");
         this.owner = requireNonNull(owner, "owner is null");
         this.runAsInvoker = runAsInvoker;
+        this.path = path == null ? List.of() : List.copyOf(path);
         if (catalog.isEmpty() && schema.isPresent()) {
             throw new IllegalArgumentException("catalog must be present if schema is present");
         }
@@ -103,6 +107,12 @@ public class ConnectorViewDefinition
         return runAsInvoker;
     }
 
+    @JsonProperty
+    public List<CatalogSchemaName> getPath()
+    {
+        return path;
+    }
+
     public ConnectorViewDefinition withoutOwner()
     {
         return new ConnectorViewDefinition(
@@ -112,7 +122,8 @@ public class ConnectorViewDefinition
                 columns,
                 comment,
                 Optional.empty(),
-                runAsInvoker);
+                runAsInvoker,
+                path);
     }
 
     @Override
@@ -125,6 +136,7 @@ public class ConnectorViewDefinition
         joiner.add("columns=" + columns);
         catalog.ifPresent(value -> joiner.add("catalog=" + value));
         schema.ifPresent(value -> joiner.add("schema=" + value));
+        joiner.add(path.stream().map(CatalogSchemaName::toString).collect(joining(", ", "path=(", ")")));
         joiner.add("originalSql=[" + originalSql + "]");
         return getClass().getSimpleName() + joiner.toString();
     }
@@ -133,14 +145,18 @@ public class ConnectorViewDefinition
     {
         private final String name;
         private final TypeId type;
+        private final Optional<String> comment;
 
         @JsonCreator
         public ViewColumn(
                 @JsonProperty("name") String name,
-                @JsonProperty("type") TypeId type)
+                @JsonProperty("type") TypeId type,
+                @JsonProperty("comment") Optional<String> comment)
+
         {
             this.name = requireNonNull(name, "name is null");
             this.type = requireNonNull(type, "type is null");
+            this.comment = requireNonNull(comment, "comment is null");
         }
 
         @JsonProperty
@@ -155,10 +171,20 @@ public class ConnectorViewDefinition
             return type;
         }
 
+        @JsonProperty
+        public Optional<String> getComment()
+        {
+            return comment;
+        }
+
         @Override
         public String toString()
         {
-            return name + " " + type;
+            StringJoiner joiner = new StringJoiner(", ", "[", "]");
+            joiner.add("name=" + name);
+            joiner.add("type=" + type);
+            comment.ifPresent(value -> joiner.add("comment=" + value));
+            return getClass().getSimpleName() + joiner;
         }
     }
 }

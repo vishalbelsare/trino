@@ -13,6 +13,7 @@
  */
 package io.trino.sql.planner.iterative.rule;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multiset;
@@ -25,12 +26,10 @@ import io.trino.execution.TaskManagerConfig;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
-import io.trino.spi.type.TypeOperators;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.Partitioning;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.StreamPreferredProperties;
 import io.trino.sql.planner.optimizations.StreamPropertyDerivations.StreamProperties;
@@ -69,6 +68,7 @@ import static io.trino.sql.planner.plan.Patterns.Exchange.scope;
 import static io.trino.sql.planner.plan.Patterns.source;
 import static java.lang.Double.isNaN;
 import static java.lang.Math.min;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -99,11 +99,12 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
     private static final Capture<ProjectNode> PROJECTION = newCapture();
     private static final Capture<AggregationNode> AGGREGATION = newCapture();
     private static final Capture<GroupIdNode> GROUP_ID = newCapture();
+    private static final Capture<ExchangeNode> REMOTE_EXCHANGE = newCapture();
 
     private static final Pattern<ExchangeNode> WITH_PROJECTION =
             // If there was no exchange here, adding new exchanges could break property derivations logic of AddExchanges, AddLocalExchanges
             typeOf(ExchangeNode.class)
-                    .with(scope().equalTo(REMOTE))
+                    .with(scope().equalTo(REMOTE)).capturedAs(REMOTE_EXCHANGE)
                     .with(source().matching(
                             // PushPartialAggregationThroughExchange adds a projection. However, it can be removed if RemoveRedundantIdentityProjections is run in the mean-time.
                             typeOf(ProjectNode.class).capturedAs(PROJECTION)
@@ -117,7 +118,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
     private static final Pattern<ExchangeNode> WITHOUT_PROJECTION =
             // If there was no exchange here, adding new exchanges could break property derivations logic of AddExchanges, AddLocalExchanges
             typeOf(ExchangeNode.class)
-                    .with(scope().equalTo(REMOTE))
+                    .with(scope().equalTo(REMOTE)).capturedAs(REMOTE_EXCHANGE)
                     .with(source().matching(
                             typeOf(AggregationNode.class).capturedAs(AGGREGATION)
                                     .with(step().equalTo(AggregationNode.Step.PARTIAL))
@@ -128,31 +129,37 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
     private static final double GROUPING_SETS_SYMBOL_REQUIRED_FREQUENCY = 0.5;
     private static final double ANTI_SKEWNESS_MARGIN = 3;
 
-    private final Metadata metadata;
-    private final TypeOperators typeOperators;
-    private final TypeAnalyzer typeAnalyzer;
+    private final PlannerContext plannerContext;
     private final TaskCountEstimator taskCountEstimator;
     private final DataSize maxPartialAggregationMemoryUsage;
 
     public AddExchangesBelowPartialAggregationOverGroupIdRuleSet(
-            Metadata metadata,
-            TypeOperators typeOperators,
-            TypeAnalyzer typeAnalyzer,
+            PlannerContext plannerContext,
             TaskCountEstimator taskCountEstimator,
             TaskManagerConfig taskManagerConfig)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
         this.taskCountEstimator = requireNonNull(taskCountEstimator, "taskCountEstimator is null");
-        this.maxPartialAggregationMemoryUsage = requireNonNull(taskManagerConfig, "taskManagerConfig is null").getMaxPartialAggregationMemoryUsage();
+        this.maxPartialAggregationMemoryUsage = taskManagerConfig.getMaxPartialAggregationMemoryUsage();
     }
 
     public Set<Rule<?>> rules()
     {
         return ImmutableSet.of(
-                new AddExchangesBelowProjectionPartialAggregationGroupId(),
-                new AddExchangesBelowExchangePartialAggregationGroupId());
+                belowProjectionRule(),
+                belowExchangeRule());
+    }
+
+    @VisibleForTesting
+    AddExchangesBelowExchangePartialAggregationGroupId belowExchangeRule()
+    {
+        return new AddExchangesBelowExchangePartialAggregationGroupId();
+    }
+
+    @VisibleForTesting
+    AddExchangesBelowProjectionPartialAggregationGroupId belowProjectionRule()
+    {
+        return new AddExchangesBelowProjectionPartialAggregationGroupId();
     }
 
     private class AddExchangesBelowProjectionPartialAggregationGroupId
@@ -170,7 +177,8 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
             ProjectNode project = captures.get(PROJECTION);
             AggregationNode aggregation = captures.get(AGGREGATION);
             GroupIdNode groupId = captures.get(GROUP_ID);
-            return transform(aggregation, groupId, context)
+            ExchangeNode remoteExchange = captures.get(REMOTE_EXCHANGE);
+            return transform(aggregation, groupId, remoteExchange.getPartitioningScheme().getPartitionCount(), context)
                     .map(newAggregation -> Result.ofPlanNode(
                             exchange.replaceChildren(ImmutableList.of(
                                     project.replaceChildren(ImmutableList.of(
@@ -179,7 +187,8 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
         }
     }
 
-    private class AddExchangesBelowExchangePartialAggregationGroupId
+    @VisibleForTesting
+    class AddExchangesBelowExchangePartialAggregationGroupId
             extends BaseAddExchangesBelowExchangePartialAggregationGroupId
     {
         @Override
@@ -193,7 +202,8 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
         {
             AggregationNode aggregation = captures.get(AGGREGATION);
             GroupIdNode groupId = captures.get(GROUP_ID);
-            return transform(aggregation, groupId, context)
+            ExchangeNode remoteExchange = captures.get(REMOTE_EXCHANGE);
+            return transform(aggregation, groupId, remoteExchange.getPartitioningScheme().getPartitionCount(), context)
                     .map(newAggregation -> {
                         PlanNode newExchange = exchange.replaceChildren(ImmutableList.of(newAggregation));
                         return Result.ofPlanNode(newExchange);
@@ -216,7 +226,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
             return isEnableForcedExchangeBelowGroupId(session);
         }
 
-        protected Optional<PlanNode> transform(AggregationNode aggregation, GroupIdNode groupId, Context context)
+        protected Optional<PlanNode> transform(AggregationNode aggregation, GroupIdNode groupId, Optional<Integer> partitionCount, Context context)
         {
             if (groupId.getGroupingSets().size() < 2) {
                 return Optional.empty();
@@ -252,6 +262,14 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                     .map(groupId.getGroupingColumns()::get)
                     .collect(toImmutableList());
 
+            // Use only the symbol with the highest cardinality (if we have statistics). This makes partial aggregation more efficient in case of
+            // low correlation between symbol that are in every grouping set vs additional symbols.
+            PlanNodeStatsEstimate sourceStats = context.getStatsProvider().getStats(groupId.getSource());
+            desiredHashSymbols = desiredHashSymbols.stream()
+                    .filter(symbol -> !isNaN(sourceStats.getSymbolStatistics(symbol).getDistinctValuesCount()))
+                    .max(comparing(symbol -> sourceStats.getSymbolStatistics(symbol).getDistinctValuesCount()))
+                    .map(symbol -> (List<Symbol>) ImmutableList.of(symbol)).orElse(desiredHashSymbols);
+
             StreamPreferredProperties requiredProperties = fixedParallelism().withPartitioning(desiredHashSymbols);
             StreamProperties sourceProperties = derivePropertiesRecursively(groupId.getSource(), context);
             if (requiredProperties.isSatisfiedBy(sourceProperties)) {
@@ -280,7 +298,12 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                     source,
                     new PartitioningScheme(
                             Partitioning.create(FIXED_HASH_DISTRIBUTION, desiredHashSymbols),
-                            source.getOutputSymbols()));
+                            source.getOutputSymbols(),
+                            Optional.empty(),
+                            false,
+                            Optional.empty(),
+                            // It's fine to reuse partitionCount since that is computed by considering all the expanding nodes and table scans in a query
+                            partitionCount));
 
             source = partitionedExchange(
                     context.getIdAllocator().getNextId(),
@@ -313,7 +336,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                         .map(groupId.getGroupingColumns()::get)
                         .collect(toImmutableList());
 
-                double keyWidth = sourceStats.getOutputSizeInBytes(sourceSymbols, context.getSymbolAllocator().getTypes()) / sourceStats.getOutputRowCount();
+                double keyWidth = sourceStats.getOutputSizeInBytes(sourceSymbols) / sourceStats.getOutputRowCount();
                 double keyNdv = min(estimatedGroupCount(sourceSymbols, sourceStats), sourceStats.getOutputRowCount());
 
                 keysMemoryRequirements += keyWidth * keyNdv;
@@ -346,7 +369,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
             List<StreamProperties> inputProperties = resolvedPlanNode.getSources().stream()
                     .map(source -> derivePropertiesRecursively(source, context))
                     .collect(toImmutableList());
-            return deriveProperties(resolvedPlanNode, inputProperties, metadata, typeOperators, context.getSession(), context.getSymbolAllocator().getTypes(), typeAnalyzer);
+            return deriveProperties(resolvedPlanNode, inputProperties, plannerContext, context.getSession());
         }
     }
 }

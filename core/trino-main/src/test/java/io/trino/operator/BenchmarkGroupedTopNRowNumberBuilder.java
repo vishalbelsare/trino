@@ -16,13 +16,14 @@ package io.trino.operator;
 import com.google.common.collect.ImmutableList;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
+import io.trino.sql.gen.OrderingCompiler;
 import io.trino.tpch.LineItem;
 import io.trino.tpch.LineItemGenerator;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Fork;
-import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
@@ -36,12 +37,12 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_FIRST;
 import static io.trino.spi.connector.SortOrder.DESC_NULLS_LAST;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.VarcharType.VARCHAR;
 
 @State(Scope.Thread)
 @OutputTimeUnit(TimeUnit.SECONDS)
@@ -58,36 +59,41 @@ public class BenchmarkGroupedTopNRowNumberBuilder
     @State(Scope.Thread)
     public static class BenchmarkData
     {
-        private final List<Type> types = ImmutableList.of(DOUBLE, DOUBLE, VARCHAR, DOUBLE);
-        private final PageWithPositionComparator comparator = new SimplePageWithPositionComparator(
-                types,
-                ImmutableList.of(EXTENDED_PRICE, SHIP_DATE),
-                ImmutableList.of(DESC_NULLS_LAST, ASC_NULLS_FIRST),
-                new TypeOperators());
+        private final List<Type> types = ImmutableList.of(DOUBLE, DOUBLE, DATE, DOUBLE);
 
         @Param({"1", "10", "100"})
-        private String topN = "1";
+        private int topN = 1;
 
         @Param({"10000", "1000000"})
-        private String positions = "1";
+        private int positions = 1000;
 
+        // when positions is evenly divisible by groupCount, each row will end up in the same group on each processPage call,
+        // which means it will stop inserting after topN is saturated which may or may not be desirable for any given benchmark scenario
         @Param({"1", "10000", "1000000"})
-        private String groupCount = "1";
+        private int groupCount = 1;
 
+        @Param("100")
+        private int addPageCalls = 1;
+
+        private PageWithPositionComparator comparator;
         private Page page;
-        private GroupedTopNRowNumberBuilder topNBuilder;
 
-        @Setup(value = Level.Invocation)
+        @Setup
         public void setup()
         {
-            page = createInputPage(Integer.valueOf(positions), types);
-
-            topNBuilder = new GroupedTopNRowNumberBuilder(types, comparator, Integer.valueOf(topN), false, new CyclingGroupByHash(Integer.valueOf(groupCount)));
+            OrderingCompiler orderingCompiler = new OrderingCompiler(new TypeOperators());
+            List<Integer> sortColumns = ImmutableList.of(EXTENDED_PRICE, SHIP_DATE);
+            List<Type> sortTypes = sortColumns.stream()
+                    .map(types::get)
+                    .collect(toImmutableList());
+            List<SortOrder> sortOrders = ImmutableList.of(DESC_NULLS_LAST, ASC_NULLS_FIRST);
+            comparator = orderingCompiler.compilePageWithPositionComparator(sortTypes, sortColumns, sortOrders);
+            page = createInputPage(positions, types);
         }
 
-        public GroupedTopNBuilder getTopNBuilder()
+        public GroupedTopNRowNumberBuilder newTopNRowNumberBuilder()
         {
-            return topNBuilder;
+            return new GroupedTopNRowNumberBuilder(types, comparator, topN, false, new int[0], new CyclingGroupByHash(groupCount));
         }
 
         public Page getPage()
@@ -97,10 +103,29 @@ public class BenchmarkGroupedTopNRowNumberBuilder
     }
 
     @Benchmark
+    public long processTopNInput(BenchmarkData data)
+    {
+        GroupedTopNRowNumberBuilder topNBuilder = data.newTopNRowNumberBuilder();
+        Page inputPage = data.getPage();
+        for (int i = 0; i < data.addPageCalls; i++) {
+            if (!topNBuilder.processPage(inputPage).process()) {
+                throw new IllegalStateException("Work did not complete");
+            }
+        }
+        return topNBuilder.getEstimatedSizeInBytes();
+    }
+
+    @Benchmark
     public List<Page> topN(BenchmarkData data)
     {
-        data.getTopNBuilder().processPage(data.getPage()).process();
-        return ImmutableList.copyOf(data.getTopNBuilder().buildResult());
+        GroupedTopNRowNumberBuilder topNBuilder = data.newTopNRowNumberBuilder();
+        Page inputPage = data.getPage();
+        for (int i = 0; i < data.addPageCalls; i++) {
+            if (!topNBuilder.processPage(inputPage).process()) {
+                throw new IllegalStateException("Work did not complete");
+            }
+        }
+        return ImmutableList.copyOf(topNBuilder.buildResult());
     }
 
     public static void main(String[] args)
@@ -108,7 +133,10 @@ public class BenchmarkGroupedTopNRowNumberBuilder
     {
         BenchmarkData data = new BenchmarkData();
         data.setup();
-        new BenchmarkGroupedTopNRowNumberBuilder().topN(data);
+
+        BenchmarkGroupedTopNRowNumberBuilder benchmark = new BenchmarkGroupedTopNRowNumberBuilder();
+        benchmark.topN(data);
+        benchmark.processTopNInput(data);
 
         benchmark(BenchmarkGroupedTopNRowNumberBuilder.class).run();
     }
@@ -122,10 +150,10 @@ public class BenchmarkGroupedTopNRowNumberBuilder
             pageBuilder.declarePosition();
 
             LineItem lineItem = iterator.next();
-            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(EXTENDED_PRICE), lineItem.getExtendedPrice());
-            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(DISCOUNT), lineItem.getDiscount());
-            DATE.writeLong(pageBuilder.getBlockBuilder(SHIP_DATE), lineItem.getShipDate());
-            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(QUANTITY), lineItem.getQuantity());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(EXTENDED_PRICE), lineItem.extendedPrice());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(DISCOUNT), lineItem.discount());
+            DATE.writeLong(pageBuilder.getBlockBuilder(SHIP_DATE), lineItem.shipDate());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(QUANTITY), lineItem.quantity());
         }
         return pageBuilder.build();
     }

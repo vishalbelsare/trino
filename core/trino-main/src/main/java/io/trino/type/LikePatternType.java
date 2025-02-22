@@ -14,13 +14,19 @@
 package io.trino.type;
 
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlock;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
 import io.trino.spi.type.TypeSignature;
 
-import static io.trino.operator.scalar.JoniRegexpCasts.joniRegexp;
+import java.util.Optional;
+
+import static io.airlift.slice.Slices.utf8Slice;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 public class LikePatternType
         extends AbstractVariableWidthType
@@ -30,19 +36,32 @@ public class LikePatternType
 
     private LikePatternType()
     {
-        super(new TypeSignature(NAME), JoniRegexp.class);
+        super(new TypeSignature(NAME), LikePattern.class);
     }
 
     @Override
     public Object getObjectValue(ConnectorSession session, Block block, int position)
     {
-        throw new UnsupportedOperationException();
-    }
+        if (block.isNull(position)) {
+            return null;
+        }
 
-    @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        throw new UnsupportedOperationException();
+        VariableWidthBlock valueBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        int valuePosition = block.getUnderlyingValuePosition(position);
+        Slice slice = valueBlock.getSlice(valuePosition);
+
+        // layout is: <patternLength> <pattern> <hasEscape> <escape>?
+        int length = slice.getInt(0);
+        String pattern = slice.toString(4, length, UTF_8);
+
+        boolean hasEscape = slice.getByte(4 + length) != 0;
+
+        if (hasEscape) {
+            char escape = (char) slice.getInt(4 + length + 1);
+            return "[" + pattern + "][" + escape + "]";
+        }
+
+        return "[" + pattern + "]";
     }
 
     @Override
@@ -52,13 +71,47 @@ public class LikePatternType
             return null;
         }
 
-        return joniRegexp(block.getSlice(position, 0, block.getSliceLength(position)));
+        VariableWidthBlock valueBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        int valuePosition = block.getUnderlyingValuePosition(position);
+        Slice slice = valueBlock.getSlice(valuePosition);
+
+        // layout is: <patternLength> <pattern> <hasEscape> <escape>?
+        int length = slice.getInt(0);
+        String pattern = slice.toString(4, length, UTF_8);
+
+        boolean hasEscape = slice.getByte(4 + length) != 0;
+
+        Optional<Character> escape = Optional.empty();
+        if (hasEscape) {
+            escape = Optional.of((char) slice.getInt(4 + length + 1));
+        }
+
+        return LikePattern.compile(pattern, escape);
     }
 
     @Override
     public void writeObject(BlockBuilder blockBuilder, Object value)
     {
-        Slice pattern = ((JoniRegexp) value).pattern();
-        blockBuilder.writeBytes(pattern, 0, pattern.length()).closeEntry();
+        LikePattern likePattern = (LikePattern) value;
+        Slice pattern = utf8Slice(likePattern.getPattern());
+
+        Slice slice = Slices.allocate(
+                Integer.BYTES +
+                pattern.length() +
+                Byte.BYTES +
+                (likePattern.getEscape().isPresent() ? Integer.BYTES : 0));
+
+        // layout is: <pattern_length> <pattern> <hasEscape> <escape>?
+        slice.setInt(0, pattern.length());
+        slice.setBytes(4, pattern);
+        if (likePattern.getEscape().isEmpty()) {
+            slice.setByte(4 + pattern.length(), (byte) 0);
+        }
+        else {
+            slice.setByte(4 + pattern.length(), (byte) 1);
+            slice.setInt(4 + pattern.length() + 1, likePattern.getEscape().get());
+        }
+
+        ((VariableWidthBlockBuilder) blockBuilder).writeEntry(slice);
     }
 }

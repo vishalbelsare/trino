@@ -18,43 +18,30 @@ import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.type.Type;
 import io.trino.testing.TestingConnectorContext;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.plugin.mongodb.ObjectIdType.OBJECT_ID;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestMongoPlugin
 {
-    private MongoServer server;
-    private String connectionString;
-
-    @BeforeClass
-    public void start()
-    {
-        server = new MongoServer();
-        connectionString = server.getConnectionString().toString();
-    }
-
     @Test
     public void testCreateConnector()
     {
         MongoPlugin plugin = new MongoPlugin();
 
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        Connector connector = factory.create("test", ImmutableMap.of("mongodb.connection-url", connectionString), new TestingConnectorContext());
+        Connector connector = factory.create(
+                "test",
+                ImmutableMap.of(
+                        "mongodb.connection-url", "mongodb://localhost:27017",
+                        "bootstrap.quiet", "true"),
+                new TestingConnectorContext());
 
         Type type = getOnlyElement(plugin.getTypes());
-        assertEquals(type, OBJECT_ID);
+        assertThat(type).isEqualTo(OBJECT_ID);
 
         connector.shutdown();
-    }
-
-    @AfterClass(alwaysRun = true)
-    public void destroy()
-    {
-        server.close();
     }
 }

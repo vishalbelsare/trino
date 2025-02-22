@@ -14,7 +14,6 @@
 package io.trino.tests.product.launcher.cli;
 
 import io.airlift.units.Duration;
-import io.trino.testing.TestingProperties;
 import io.trino.tests.product.launcher.Extensions;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -23,11 +22,19 @@ import picocli.CommandLine.IFactory;
 import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Option;
 
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ListResourceBundle;
+import java.util.ResourceBundle;
 
 import static com.google.inject.util.Modules.EMPTY_MODULE;
+import static io.trino.testing.TestingProperties.getProjectVersion;
 import static io.trino.tests.product.launcher.cli.Launcher.EnvironmentCommand;
 import static io.trino.tests.product.launcher.cli.Launcher.SuiteCommand;
 import static io.trino.tests.product.launcher.cli.Launcher.TestCommand;
@@ -58,20 +65,22 @@ public class Launcher
     public static void main(String[] args)
     {
         Launcher launcher = new Launcher();
-        run(launcher, args);
+        // write directly to System.out, bypassing logging & io.airlift.log.Logging#rewireStdStreams
+        System.exit(execute(launcher, new LauncherBundle(), new FileOutputStream(FileDescriptor.out), args));
     }
 
-    public static void run(Launcher launcher, String[] args)
+    public static int execute(Launcher launcher, ResourceBundle bundle, OutputStream outputStream, String[] args)
     {
-        IFactory factory = createFactory(launcher.getExtensions());
-        System.exit(new CommandLine(launcher, factory)
+        IFactory factory = createFactory(outputStream, launcher.getExtensions());
+        return new CommandLine(launcher, factory)
                 .setCaseInsensitiveEnumValuesAllowed(true)
                 .registerConverter(Duration.class, Duration::valueOf)
                 .registerConverter(Path.class, Paths::get)
-                .setResourceBundle(new LauncherBundle()).execute(args));
+                .setResourceBundle(bundle)
+                .execute(args);
     }
 
-    private static IFactory createFactory(Extensions extensions)
+    private static IFactory createFactory(OutputStream outputStream, Extensions extensions)
     {
         requireNonNull(extensions, "extensions is null");
         return new IFactory()
@@ -81,7 +90,7 @@ public class Launcher
                     throws Exception
             {
                 try {
-                    return clazz.getConstructor(Extensions.class).newInstance(extensions);
+                    return clazz.getConstructor(OutputStream.class, Extensions.class).newInstance(outputStream, extensions);
                 }
                 catch (NoSuchMethodException ignore) {
                     return CommandLine.defaultFactory().create(clazz);
@@ -151,25 +160,49 @@ public class Launcher
         @Override
         public String[] getVersion()
         {
-            return new String[] {spec.name() + " " + TestingProperties.getProjectVersion()};
+            return new String[] {spec.name() + " " + getProjectVersion()};
         }
     }
 
-    private static class LauncherBundle
+    static class LauncherBundle
             extends ListResourceBundle
     {
         @Override
         protected Object[][] getContents()
         {
-            return new Object[][] {
-                    {"project.version", TestingProperties.getProjectVersion()},
-                    {"product-tests.module", "testing/trino-product-tests"},
-                    {"product-tests.name", "trino-product-tests"},
-                    {"server.module", "core/trino-server"},
-                    {"server.name", "trino-server"},
-                    {"launcher.bin", "testing/trino-product-tests-launcher/bin/run-launcher"},
-                    {"cli.bin", format("client/trino-cli/target/trino-cli-%s-executable.jar", TestingProperties.getProjectVersion())}
-            };
+            try {
+                Path jdkDistribution = findJdkDistribution();
+                return new Object[][] {
+                        {"project.version", getProjectVersion()},
+                        {"product-tests.module", "testing/trino-product-tests"},
+                        {"product-tests.name", "trino-product-tests"},
+                        {"server.package", "core/trino-server/target/trino-server-" + getProjectVersion() + ".tar.gz"},
+                        {"launcher.bin", "testing/trino-product-tests-launcher/bin/run-launcher"},
+                        {"cli.bin", format("client/trino-cli/target/trino-cli-%s-executable.jar", getProjectVersion())},
+                        {"jdk.current", Files.readString(jdkDistribution).trim()},
+                        {"jdk.distributions", jdkDistribution.getParent().toAbsolutePath().toString()}
+                };
+            }
+            catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        protected Path findJdkDistribution()
+        {
+            String searchFor = "core/jdk/current";
+            Path currentWorkingDirectory = Paths.get("").toAbsolutePath();
+            Path current = currentWorkingDirectory; // current working directory
+
+            while (current != null) {
+                if (Files.exists(current.resolve(searchFor))) {
+                    return current.resolve(searchFor);
+                }
+
+                current = current.getParent();
+            }
+
+            throw new RuntimeException("Could not find %s in the directory %s and its' parents".formatted(searchFor, currentWorkingDirectory));
         }
     }
 }

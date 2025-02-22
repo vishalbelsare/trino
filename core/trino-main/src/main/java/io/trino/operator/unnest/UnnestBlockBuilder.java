@@ -13,47 +13,20 @@
  */
 package io.trino.operator.unnest;
 
-import com.google.common.annotations.VisibleForTesting;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DictionaryBlock;
-import io.trino.spi.block.PageBuilderStatus;
-import io.trino.spi.type.Type;
 
-import java.util.Arrays;
-
-import static com.google.common.base.Preconditions.checkElementIndex;
-import static com.google.common.base.Preconditions.checkPositionIndexes;
-import static com.google.common.base.Preconditions.checkState;
-import static io.trino.operator.unnest.UnnestOperatorBlockUtil.calculateNewArraySize;
+import static com.google.common.base.Verify.verify;
+import static io.trino.operator.unnest.UnnestBlockBuilder.NullElementFinder.NULL_NOT_FOUND;
 import static java.util.Objects.requireNonNull;
 
-/**
- * This class manages the low level details of building unnested blocks with a goal of minimizing data copying
- */
-class UnnestBlockBuilder
+public class UnnestBlockBuilder
 {
-    private final Type type;
-    private Block source;
-
-    // checks for existence of null element in the source when required
+    // checks for the existence of a null element in the source when required
     private final NullElementFinder nullFinder = new NullElementFinder();
 
-    // flag indicating whether we are using copied block or a dictionary block
-    private boolean usingCopiedBlock;
-
-    // State for output dictionary block
-    private int[] ids;
-    private int positionCount;
-
-    // State for output copied block
-    private BlockBuilder outputBlockBuilder;
-    private PageBuilderStatus pageBuilderStatus;
-
-    public UnnestBlockBuilder(Type type)
-    {
-        this.type = requireNonNull(type, "type is null");
-    }
+    private Block source;
+    private int sourcePosition;
 
     /**
      * Replaces input source block with {@code block}. The old data structures for output have to be
@@ -62,165 +35,60 @@ class UnnestBlockBuilder
     public void resetInputBlock(Block block)
     {
         this.source = requireNonNull(block, "block is null");
-        // output and null-check have to be cleared because the source has changed
-        clearCurrentOutput();
-        nullFinder.resetCheck();
+        this.nullFinder.resetCheck(block);
+        this.sourcePosition = 0;
     }
 
-    /**
-     * Resets all data structures used for producing current output block, except for the source block.
-     */
-    @VisibleForTesting
-    void clearCurrentOutput()
+    public Block buildWithoutNulls(int outputPositionCount)
     {
-        // clear dictionary block state
-        ids = new int[0];
-        positionCount = 0;
-        usingCopiedBlock = false;
-
-        // clear copied block state
-        outputBlockBuilder = null;
-        pageBuilderStatus = null;
+        Block output = source.getRegion(sourcePosition, outputPositionCount);
+        sourcePosition += outputPositionCount;
+        return output;
     }
 
-    /**
-     * Prepares for a new output block.
-     * The caller has to ensure that the source is not null when this method is invoked.
-     */
-    public void startNewOutput(PageBuilderStatus pageBuilderStatus, int expectedEntries)
+    public Block buildWithNulls(int[] outputEntriesPerPosition, int startPosition, int inputBatchSize, int outputPositionCount, int[] lengths)
     {
-        checkState(source != null, "source is null");
-        this.pageBuilderStatus = pageBuilderStatus;
-
-        // Prepare for a new dictionary block
-        this.ids = new int[expectedEntries];
-        this.positionCount = 0;
-        this.usingCopiedBlock = false;
-    }
-
-    public Block buildOutputAndFlush()
-    {
-        Block outputBlock;
-        if (usingCopiedBlock) {
-            outputBlock = outputBlockBuilder.build();
-        }
-        else {
-            outputBlock = new DictionaryBlock(positionCount, source, ids);
+        if (nullFinder.getNullElementIndex() == NULL_NOT_FOUND) {
+            source = source.copyWithAppendedNull();
+            nullFinder.setNullElementIndex(source.getPositionCount() - 1);
         }
 
-        // Flush stored state, so that ids cannot be modified after the dictionary has been constructed
-        clearCurrentOutput();
-
-        return outputBlock;
+        return buildWithNullsByDictionary(
+                outputEntriesPerPosition,
+                startPosition,
+                inputBatchSize,
+                outputPositionCount,
+                nullFinder.getNullElementIndex(),
+                lengths);
     }
 
-    /**
-     * Append element at position {@code index} in the source block to output block
-     */
-    public void appendElement(int index)
+    private Block buildWithNullsByDictionary(
+            int[] requiredOutputEntries,
+            int offset,
+            int inputBatchSize,
+            int outputPositionCount,
+            int nullIndex,
+            int[] lengths)
     {
-        checkState(source != null, "source is null");
-        checkElementIndex(index, source.getPositionCount());
+        verify(nullIndex != NULL_NOT_FOUND, "nullIndex is -1");
 
-        if (usingCopiedBlock) {
-            type.appendTo(source, index, outputBlockBuilder);
-        }
-        else {
-            appendId(index);
-        }
-    }
+        int position = 0;
+        int[] ids = new int[outputPositionCount];
 
-    /**
-     * Append range of elements starting at {@code startPosition} and length {@code length}
-     * from the source block to output block.
-     * <p>
-     * Purpose of this method is to avoid repeated range checks for every invocation of {@link #appendElement}.
-     */
-    public void appendRange(int startPosition, int length)
-    {
-        // check range validity
-        checkState(source != null, "source is null");
-        checkPositionIndexes(startPosition, startPosition + length, source.getPositionCount());
+        for (int i = 0; i < inputBatchSize; i++) {
+            int entryCount = lengths[offset + i];
 
-        if (usingCopiedBlock) {
-            for (int i = 0; i < length; i++) {
-                type.appendTo(source, startPosition + i, outputBlockBuilder);
+            for (int j = 0; j < entryCount; j++) {
+                ids[position++] = sourcePosition++;
+            }
+
+            int maxEntryCount = requiredOutputEntries[offset + i];
+            for (int j = entryCount; j < maxEntryCount; j++) {
+                ids[position++] = nullIndex;
             }
         }
-        else {
-            for (int i = 0; i < length; i++) {
-                appendId(startPosition + i);
-            }
-        }
-    }
 
-    public void appendNull()
-    {
-        if (usingCopiedBlock) {
-            outputBlockBuilder.appendNull();
-        }
-        else {
-            int nullIndex = nullFinder.getNullElementIndex();
-            if (nullIndex == -1) {
-                startUsingCopiedBlock();
-                appendNull();
-            }
-            else {
-                appendId(nullIndex);
-            }
-        }
-    }
-
-    /**
-     * This method is invoked when transition from dictionary block to copied block happens.
-     * - outputBlockBuilder is created and existing elements as indicated by ids[] are copied over.
-     * - ids[] and positionCount are reset, as they are not used anymore.
-     */
-    private void startUsingCopiedBlock()
-    {
-        requireNonNull(pageBuilderStatus, "pageBuilderStatus is null");
-        // initialize state for copied block
-        outputBlockBuilder = type.createBlockBuilder(pageBuilderStatus.createBlockBuilderStatus(), ids.length);
-
-        // Transfer elements from ids[] to output page builder
-        for (int i = 0; i < positionCount; i++) {
-            type.appendTo(source, ids[i], outputBlockBuilder);
-        }
-
-        // reset state for dictionary block
-        ids = new int[0];
-        positionCount = 0;
-
-        usingCopiedBlock = true;
-    }
-
-    /**
-     * This method appends {@code sourcePosition} to ids array.
-     * <p>
-     * The caller of this method has to ensure the following:
-     * - {@code sourcePosition} is a valid index in the source
-     * - {@code usingCopiedBlock} is false
-     */
-    private void appendId(int sourcePosition)
-    {
-        if (positionCount == ids.length) {
-            // grow capacity
-            int newSize = calculateNewArraySize(ids.length);
-            ids = Arrays.copyOf(ids, newSize);
-        }
-        ids[positionCount] = sourcePosition;
-        positionCount++;
-    }
-
-    /**
-     * Get number of positions in the output block being prepared
-     */
-    public int getPositionCount()
-    {
-        if (usingCopiedBlock) {
-            return outputBlockBuilder.getPositionCount();
-        }
-        return positionCount;
+        return DictionaryBlock.create(outputPositionCount, source, ids);
     }
 
     /**
@@ -228,18 +96,22 @@ class UnnestBlockBuilder
      * The result is cached with the first invocation of {@link #getNullElementIndex} after the reset. The
      * cache can be invalidated by invoking {@link #resetCheck}.
      */
-    private class NullElementFinder
+    static class NullElementFinder
     {
-        private boolean checkedForNull;
-        private int nullElementPosition = -1;
+        static final int NULL_NOT_FOUND = -1;
 
-        void resetCheck()
+        private boolean checkedForNull;
+        private int nullElementPosition = NULL_NOT_FOUND;
+        private Block source;
+
+        public void resetCheck(Block source)
         {
             this.checkedForNull = false;
-            this.nullElementPosition = -1;
+            this.nullElementPosition = NULL_NOT_FOUND;
+            this.source = requireNonNull(source, "source is null");
         }
 
-        private int getNullElementIndex()
+        public int getNullElementIndex()
         {
             if (checkedForNull) {
                 return nullElementPosition;
@@ -248,9 +120,20 @@ class UnnestBlockBuilder
             return nullElementPosition;
         }
 
+        public void setNullElementIndex(int nullElementPosition)
+        {
+            this.nullElementPosition = nullElementPosition;
+            this.checkedForNull = true;
+        }
+
         private void checkForNull()
         {
-            nullElementPosition = -1;
+            nullElementPosition = NULL_NOT_FOUND;
+            checkedForNull = true;
+
+            if (!source.mayHaveNull()) {
+                return;
+            }
 
             for (int i = 0; i < source.getPositionCount(); i++) {
                 if (source.isNull(i)) {
@@ -258,8 +141,6 @@ class UnnestBlockBuilder
                     break;
                 }
             }
-
-            checkedForNull = true;
         }
     }
 }

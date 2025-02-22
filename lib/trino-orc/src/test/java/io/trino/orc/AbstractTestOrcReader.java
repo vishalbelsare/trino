@@ -23,12 +23,12 @@ import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.SqlDate;
 import io.trino.spi.type.SqlDecimal;
+import io.trino.spi.type.SqlTime;
 import io.trino.spi.type.SqlTimestamp;
 import io.trino.spi.type.SqlTimestampWithTimeZone;
 import io.trino.spi.type.SqlVarbinary;
 import org.joda.time.DateTimeZone;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -37,6 +37,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
 
 import static com.google.common.collect.Iterables.concat;
 import static com.google.common.collect.Iterables.cycle;
@@ -52,6 +53,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
@@ -60,13 +62,15 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.DateTimeTestingUtils.sqlTimestampOf;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Collections.nCopies;
+import static java.util.UUID.randomUUID;
 import static java.util.stream.Collectors.toList;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public abstract class AbstractTestOrcReader
 {
@@ -85,12 +89,8 @@ public abstract class AbstractTestOrcReader
     public AbstractTestOrcReader(OrcTester tester)
     {
         this.tester = tester;
-    }
 
-    @BeforeClass
-    public void setUp()
-    {
-        assertEquals(DateTimeZone.getDefault(), HIVE_STORAGE_TIME_ZONE);
+        assertThat(DateTimeZone.getDefault()).isEqualTo(HIVE_STORAGE_TIME_ZONE);
     }
 
     @Test
@@ -308,9 +308,28 @@ public abstract class AbstractTestOrcReader
                 .put("1970-01-14 00:04:16.789", SqlTimestamp.fromMillis(3, 1123456789L))
                 .put("2001-09-10 12:04:16.789", SqlTimestamp.fromMillis(3, 1000123456789L))
                 .put("2019-12-05 13:41:39.564", SqlTimestamp.fromMillis(3, 1575553299564L))
-                .build();
-        map.forEach((expected, value) -> assertEquals(value.toString(), expected));
+                .buildOrThrow();
+        map.forEach((expected, value) -> assertThat(value.toString()).isEqualTo(expected));
         tester.testRoundTrip(TIMESTAMP_MILLIS, newArrayList(limit(cycle(map.values()), 30_000)));
+    }
+
+    @Test
+    public void testTimeMicros()
+            throws Exception
+    {
+        Map<String, SqlTime> map = ImmutableMap.<String, SqlTime>builder()
+                .put("00:00:00.000000", SqlTime.newInstance(6, 0L))
+                .put("12:05:19.257000", SqlTime.newInstance(6, 43519257000000000L))
+                .put("17:37:07.638000", SqlTime.newInstance(6, 63427638000000000L))
+                .put("05:17:37.346000", SqlTime.newInstance(6, 19057346000000000L))
+                .put("06:09:00.988000", SqlTime.newInstance(6, 22140988000000000L))
+                .put("13:31:34.185000", SqlTime.newInstance(6, 48694185000000000L))
+                .put("01:09:07.185000", SqlTime.newInstance(6, 4147185000000000L))
+                .put("20:43:39.822000", SqlTime.newInstance(6, 74619822000000000L))
+                .put("23:59:59.999000", SqlTime.newInstance(6, 86399999000000000L))
+                .buildOrThrow();
+        map.forEach((expected, value) -> assertThat(value.toString()).isEqualTo(expected));
+        tester.testRoundTrip(TIME_MICROS, newArrayList(limit(cycle(map.values()), 30_000)));
     }
 
     @Test
@@ -325,8 +344,8 @@ public abstract class AbstractTestOrcReader
                 .put("1970-01-14 00:04:16.789123", SqlTimestamp.newInstance(6, 1123456789123L, 0))
                 .put("2001-09-10 12:04:16.789123", SqlTimestamp.newInstance(6, 1000123456789123L, 0))
                 .put("2019-12-05 13:41:39.564321", SqlTimestamp.newInstance(6, 1575553299564321L, 0))
-                .build();
-        map.forEach((expected, value) -> assertEquals(value.toString(), expected));
+                .buildOrThrow();
+        map.forEach((expected, value) -> assertThat(value.toString()).isEqualTo(expected));
         tester.testRoundTrip(TIMESTAMP_MICROS, newArrayList(limit(cycle(map.values()), 30_000)));
     }
 
@@ -342,8 +361,8 @@ public abstract class AbstractTestOrcReader
                 .put("1970-01-14 00:04:16.789123456", SqlTimestamp.newInstance(9, 1123456789123L, 456_000))
                 .put("2001-09-10 12:04:16.789123456", SqlTimestamp.newInstance(9, 1000123456789123L, 456_000))
                 .put("2019-12-05 13:41:39.564321789", SqlTimestamp.newInstance(9, 1575553299564321L, 789_000))
-                .build();
-        map.forEach((expected, value) -> assertEquals(value.toString(), expected));
+                .buildOrThrow();
+        map.forEach((expected, value) -> assertThat(value.toString()).isEqualTo(expected));
         tester.testRoundTrip(TIMESTAMP_NANOS, newArrayList(limit(cycle(map.values()), 30_000)));
     }
 
@@ -359,8 +378,8 @@ public abstract class AbstractTestOrcReader
                 .put("1970-01-14 00:04:16.789 UTC", SqlTimestampWithTimeZone.newInstance(3, 1123456789L, 0, UTC_KEY))
                 .put("2001-09-10 12:04:16.789 UTC", SqlTimestampWithTimeZone.newInstance(3, 1000123456789L, 0, UTC_KEY))
                 .put("2019-12-05 13:41:39.564 UTC", SqlTimestampWithTimeZone.newInstance(3, 1575553299564L, 0, UTC_KEY))
-                .build();
-        map.forEach((expected, value) -> assertEquals(value.toString(), expected));
+                .buildOrThrow();
+        map.forEach((expected, value) -> assertThat(value.toString()).isEqualTo(expected));
         tester.testRoundTrip(TIMESTAMP_TZ_MILLIS, newArrayList(limit(cycle(map.values()), 30_000)));
     }
 
@@ -376,8 +395,8 @@ public abstract class AbstractTestOrcReader
                 .put("1970-01-14 00:04:16.789123 UTC", SqlTimestampWithTimeZone.newInstance(6, 1123456789L, 123_000_000, UTC_KEY))
                 .put("2001-09-10 12:04:16.789123 UTC", SqlTimestampWithTimeZone.newInstance(6, 1000123456789L, 123_000_000, UTC_KEY))
                 .put("2019-12-05 13:41:39.564321 UTC", SqlTimestampWithTimeZone.newInstance(6, 1575553299564L, 321_000_000, UTC_KEY))
-                .build();
-        map.forEach((expected, value) -> assertEquals(value.toString(), expected));
+                .buildOrThrow();
+        map.forEach((expected, value) -> assertThat(value.toString()).isEqualTo(expected));
         tester.testRoundTrip(TIMESTAMP_TZ_MICROS, newArrayList(limit(cycle(map.values()), 30_000)));
     }
 
@@ -393,8 +412,8 @@ public abstract class AbstractTestOrcReader
                 .put("1970-01-14 00:04:16.789123456 UTC", SqlTimestampWithTimeZone.newInstance(9, 1123456789L, 123_456_000, UTC_KEY))
                 .put("2001-09-10 12:04:16.789123456 UTC", SqlTimestampWithTimeZone.newInstance(9, 1000123456789L, 123_456_000, UTC_KEY))
                 .put("2019-12-05 13:41:39.564321789 UTC", SqlTimestampWithTimeZone.newInstance(9, 1575553299564L, 321_789_000, UTC_KEY))
-                .build();
-        map.forEach((expected, value) -> assertEquals(value.toString(), expected));
+                .buildOrThrow();
+        map.forEach((expected, value) -> assertThat(value.toString()).isEqualTo(expected));
         tester.testRoundTrip(TIMESTAMP_TZ_NANOS, newArrayList(limit(cycle(map.values()), 30_000)));
     }
 
@@ -505,6 +524,27 @@ public abstract class AbstractTestOrcReader
             throws Exception
     {
         tester.testRoundTrip(VARBINARY, nCopies(30_000, new SqlVarbinary(new byte[0])));
+    }
+
+    @Test
+    public void testUuidDirectSequence()
+            throws Exception
+    {
+        tester.testRoundTrip(
+                UUID,
+                intsBetween(0, 30_000).stream()
+                        .map(i -> randomUUID())
+                        .collect(toList()));
+    }
+
+    @Test
+    public void testUuidDictionarySequence()
+            throws Exception
+    {
+        tester.testRoundTrip(
+                UUID, ImmutableList.copyOf(limit(cycle(ImmutableList.of(1, 3, 5, 7, 11, 13, 17)), 30_000)).stream()
+                        .map(i -> new UUID(i, i))
+                        .collect(toList()));
     }
 
     private static <T> Iterable<T> skipEvery(int n, Iterable<T> iterable)

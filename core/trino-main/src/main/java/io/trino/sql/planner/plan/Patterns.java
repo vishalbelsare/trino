@@ -15,11 +15,9 @@ package io.trino.sql.planner.plan;
 
 import io.trino.matching.Pattern;
 import io.trino.matching.Property;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Lookup;
-import io.trino.sql.planner.plan.CorrelatedJoinNode.Type;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.PatternRecognitionRelation.RowsPerMatch;
 
 import java.util.List;
 import java.util.Optional;
@@ -55,19 +53,19 @@ public final class Patterns
         return typeOf(ApplyNode.class);
     }
 
-    public static Pattern<DeleteNode> delete()
-    {
-        return typeOf(DeleteNode.class);
-    }
-
-    public static Pattern<UpdateNode> update()
-    {
-        return typeOf(UpdateNode.class);
-    }
-
     public static Pattern<TableExecuteNode> tableExecute()
     {
         return typeOf(TableExecuteNode.class);
+    }
+
+    public static Pattern<MergeWriterNode> mergeWriter()
+    {
+        return typeOf(MergeWriterNode.class);
+    }
+
+    public static Pattern<MergeProcessorNode> mergeProcessor()
+    {
+        return typeOf(MergeProcessorNode.class);
     }
 
     public static Pattern<ExchangeNode> exchange()
@@ -103,6 +101,11 @@ public final class Patterns
     public static Pattern<JoinNode> join()
     {
         return typeOf(JoinNode.class);
+    }
+
+    public static Pattern<DynamicFilterSourceNode> dynamicFilterSource()
+    {
+        return typeOf(DynamicFilterSourceNode.class);
     }
 
     public static Pattern<SpatialJoinNode> spatialJoin()
@@ -205,6 +208,16 @@ public final class Patterns
         return typeOf(PatternRecognitionNode.class);
     }
 
+    public static Pattern<TableFunctionNode> tableFunction()
+    {
+        return typeOf(TableFunctionNode.class);
+    }
+
+    public static Pattern<TableFunctionProcessorNode> tableFunctionProcessor()
+    {
+        return typeOf(TableFunctionProcessorNode.class);
+    }
+
     public static Pattern<RowNumberNode> rowNumber()
     {
         return typeOf(RowNumberNode.class);
@@ -228,6 +241,11 @@ public final class Patterns
     public static Pattern<ExceptNode> except()
     {
         return typeOf(ExceptNode.class);
+    }
+
+    public static Pattern<RemoteSourceNode> remoteSourceNode()
+    {
+        return typeOf(RemoteSourceNode.class);
     }
 
     public static Property<PlanNode, Lookup, PlanNode> source()
@@ -291,7 +309,7 @@ public final class Patterns
 
     public static final class Join
     {
-        public static Property<JoinNode, Lookup, JoinNode.Type> type()
+        public static Property<JoinNode, Lookup, JoinType> type()
         {
             return property("type", JoinNode::getType);
         }
@@ -324,7 +342,7 @@ public final class Patterns
             return property("filter", CorrelatedJoinNode::getFilter);
         }
 
-        public static Property<CorrelatedJoinNode, Lookup, Type> type()
+        public static Property<CorrelatedJoinNode, Lookup, JoinType> type()
         {
             return property("type", CorrelatedJoinNode::getType);
         }

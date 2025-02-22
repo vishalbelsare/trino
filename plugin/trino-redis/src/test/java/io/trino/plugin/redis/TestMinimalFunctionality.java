@@ -14,121 +14,108 @@
 package io.trino.plugin.redis;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.Session;
+import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.metadata.TableHandle;
-import io.trino.plugin.redis.util.JsonEncoder;
-import io.trino.plugin.redis.util.RedisServer;
 import io.trino.security.AllowAllAccessControl;
-import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.type.BigintType;
-import io.trino.testing.MaterializedResult;
-import io.trino.testing.StandaloneQueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
-import redis.clients.jedis.Jedis;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
 
+import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 
-import static io.trino.plugin.redis.util.RedisTestUtils.createEmptyTableDescription;
-import static io.trino.plugin.redis.util.RedisTestUtils.installRedisPlugin;
-import static io.trino.testing.TestingSession.testSessionBuilder;
-import static io.trino.testing.assertions.Assert.assertEquals;
-import static io.trino.transaction.TransactionBuilder.transaction;
-import static org.testng.Assert.assertTrue;
+import static io.trino.testing.TransactionBuilder.transaction;
+import static java.lang.String.format;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@Execution(SAME_THREAD) // clearData(), populateData() looks like shared mutable state
 public class TestMinimalFunctionality
+        extends AbstractTestMinimalFunctionality
 {
-    private static final Session SESSION = testSessionBuilder()
-            .setCatalog("redis")
-            .setSchema("default")
-            .build();
-
-    private RedisServer redisServer;
-    private String tableName;
-    private StandaloneQueryRunner queryRunner;
-
-    @BeforeClass
-    public void startRedis()
+    @Override
+    protected Map<String, String> connectorProperties()
     {
-        redisServer = new RedisServer();
-    }
-
-    @AfterClass(alwaysRun = true)
-    public void stopRedis()
-    {
-        redisServer.close();
-        redisServer = null;
-    }
-
-    @BeforeMethod
-    public void spinUp()
-    {
-        this.tableName = "test_" + UUID.randomUUID().toString().replaceAll("-", "_");
-
-        this.queryRunner = new StandaloneQueryRunner(SESSION);
-
-        installRedisPlugin(redisServer, queryRunner,
-                ImmutableMap.<SchemaTableName, RedisTableDescription>builder()
-                        .put(createEmptyTableDescription(new SchemaTableName("default", tableName)))
-                        .build());
-    }
-
-    @AfterMethod(alwaysRun = true)
-    public void tearDown()
-    {
-        queryRunner.close();
-        queryRunner = null;
-    }
-
-    private void populateData(int count)
-    {
-        JsonEncoder jsonEncoder = new JsonEncoder();
-        for (long i = 0; i < count; i++) {
-            Object value = ImmutableMap.of("id", Long.toString(i), "value", UUID.randomUUID().toString());
-            try (Jedis jedis = redisServer.getJedisPool().getResource()) {
-                jedis.set(tableName + ":" + i, jsonEncoder.toString(value));
-            }
-        }
+        return ImmutableMap.of();
     }
 
     @Test
     public void testTableExists()
     {
         QualifiedObjectName name = new QualifiedObjectName("redis", "default", tableName);
-        transaction(queryRunner.getTransactionManager(), new AllowAllAccessControl())
+        Metadata metadata = queryRunner.getPlannerContext().getMetadata();
+        transaction(queryRunner.getTransactionManager(), metadata, new AllowAllAccessControl())
                 .singleStatement()
                 .execute(SESSION, session -> {
-                    Optional<TableHandle> handle = queryRunner.getServer().getMetadata().getTableHandle(session, name);
-                    assertTrue(handle.isPresent());
+                    Optional<TableHandle> handle = metadata.getTableHandle(session, name);
+                    assertThat(handle).isPresent();
                 });
     }
 
     @Test
     public void testTableHasData()
     {
-        MaterializedResult result = queryRunner.execute("SELECT count(1) from " + tableName);
+        clearData();
 
-        MaterializedResult expected = MaterializedResult.resultBuilder(SESSION, BigintType.BIGINT)
-                .row(0L)
-                .build();
-
-        assertEquals(result, expected);
+        assertThat(assertions.query("SELECT count(1) FROM " + tableName))
+                .matches("VALUES BIGINT '0'");
 
         int count = 1000;
         populateData(count);
 
-        result = queryRunner.execute("SELECT count(1) from " + tableName);
+        assertThat(assertions.query("SELECT count(1) FROM " + tableName))
+                .matches("VALUES BIGINT '%s'".formatted(count));
+    }
 
-        expected = MaterializedResult.resultBuilder(SESSION, BigintType.BIGINT)
-                .row((long) count)
-                .build();
+    @Test
+    public void testStringValueWhereClauseHasData()
+    {
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key = '%s:999'", stringValueTableName, stringValueTableName)))
+                .matches("VALUES BIGINT '1'");
 
-        assertEquals(result, expected);
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key IN ('%s:0', '%s:999')", stringValueTableName, stringValueTableName, stringValueTableName)))
+                .matches("VALUES BIGINT '2'");
+
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key IN ('%s:0', '%s:999')", stringValueTableName, stringValueTableName, tableName)))
+                .matches("VALUES BIGINT '1'");
+    }
+
+    @Test
+    public void testHashValueWhereClauseHasData()
+    {
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key = '%s:999'", hashValueTableName, hashValueTableName)))
+                .matches("VALUES BIGINT '1'");
+
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key IN ('%s:0', '%s:999')", hashValueTableName, hashValueTableName, hashValueTableName)))
+                .matches("VALUES BIGINT '2'");
+
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key IN ('%s:0', '%s:999')", hashValueTableName, hashValueTableName, tableName)))
+                .matches("VALUES BIGINT '1'");
+    }
+
+    @Test
+    public void testStringValueWhereClauseHasNoData()
+    {
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key = '%s:999'", stringValueTableName, tableName)))
+                .matches("VALUES BIGINT '0'");
+
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key IN ('%s:0', '%s:999')", stringValueTableName, tableName, tableName)))
+                .matches("VALUES BIGINT '0'");
+
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key = '%s:999' AND id = 1", stringValueTableName, stringValueTableName)))
+                .matches("VALUES BIGINT '0'");
+    }
+
+    @Test
+    public void testHashValueWhereClauseHasNoData()
+    {
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key = '%s:999'", hashValueTableName, tableName)))
+                .matches("VALUES BIGINT '0'");
+
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key IN ('%s:0', '%s:999')", hashValueTableName, tableName, tableName)))
+                .matches("VALUES BIGINT '0'");
+
+        assertThat(assertions.query(format("SELECT count(1) FROM %s WHERE redis_key = '%s:999' AND id = 1", hashValueTableName, hashValueTableName)))
+                .matches("VALUES BIGINT '0'");
     }
 }

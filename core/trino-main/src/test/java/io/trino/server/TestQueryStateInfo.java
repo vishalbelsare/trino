@@ -18,19 +18,21 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.trino.client.NodeVersion;
 import io.trino.execution.QueryInfo;
 import io.trino.execution.QueryState;
 import io.trino.execution.QueryStats;
 import io.trino.execution.resourcegroups.InternalResourceGroup;
+import io.trino.operator.RetryPolicy;
 import io.trino.spi.QueryId;
-import io.trino.spi.memory.MemoryPoolId;
 import io.trino.spi.resourcegroups.QueryType;
 import org.joda.time.DateTime;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
@@ -42,7 +44,7 @@ import static io.trino.server.QueryStateInfo.createQueuedQueryStateInfo;
 import static io.trino.spi.resourcegroups.SchedulingPolicy.WEIGHTED;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestQueryStateInfo
 {
@@ -71,28 +73,28 @@ public class TestQueryStateInfo
                 Optional.of(rootAX.getId()),
                 Optional.of(ImmutableList.of(rootAX.getInfo(), rootA.getInfo(), root.getInfo())));
 
-        assertEquals(query.getQuery(), "SELECT 1");
-        assertEquals(query.getQueryId().toString(), "query_root_a_x");
-        assertEquals(query.getQueryState(), QUEUED);
-        assertEquals(query.getProgress(), Optional.empty());
+        assertThat(query.getQuery()).isEqualTo("SELECT 1");
+        assertThat(query.getQueryId().toString()).isEqualTo("query_root_a_x");
+        assertThat(query.getQueryState()).isEqualTo(QUEUED);
+        assertThat(query.getProgress()).isEqualTo(Optional.empty());
 
         List<ResourceGroupInfo> chainInfo = query.getPathToRoot().get();
 
-        assertEquals(chainInfo.size(), 3);
+        assertThat(chainInfo).hasSize(3);
 
         ResourceGroupInfo rootAInfo = chainInfo.get(1);
         ResourceGroupInfo expectedRootAInfo = rootA.getInfo();
-        assertEquals(rootAInfo.getId(), expectedRootAInfo.getId());
-        assertEquals(rootAInfo.getState(), expectedRootAInfo.getState());
-        assertEquals(rootAInfo.getNumRunningQueries(), expectedRootAInfo.getNumRunningQueries());
-        assertEquals(rootAInfo.getNumQueuedQueries(), expectedRootAInfo.getNumQueuedQueries());
+        assertThat(rootAInfo.id()).isEqualTo(expectedRootAInfo.id());
+        assertThat(rootAInfo.state()).isEqualTo(expectedRootAInfo.state());
+        assertThat(rootAInfo.numRunningQueries()).isEqualTo(expectedRootAInfo.numRunningQueries());
+        assertThat(rootAInfo.numQueuedQueries()).isEqualTo(expectedRootAInfo.numQueuedQueries());
 
         ResourceGroupInfo actualRootInfo = chainInfo.get(2);
         ResourceGroupInfo expectedRootInfo = root.getInfo();
-        assertEquals(actualRootInfo.getId(), expectedRootInfo.getId());
-        assertEquals(actualRootInfo.getState(), expectedRootInfo.getState());
-        assertEquals(actualRootInfo.getNumRunningQueries(), expectedRootInfo.getNumRunningQueries());
-        assertEquals(actualRootInfo.getNumQueuedQueries(), expectedRootInfo.getNumQueuedQueries());
+        assertThat(actualRootInfo.id()).isEqualTo(expectedRootInfo.id());
+        assertThat(actualRootInfo.state()).isEqualTo(expectedRootInfo.state());
+        assertThat(actualRootInfo.numRunningQueries()).isEqualTo(expectedRootInfo.numRunningQueries());
+        assertThat(actualRootInfo.numQueuedQueries()).isEqualTo(expectedRootInfo.numQueuedQueries());
     }
 
     private QueryInfo createQueryInfo(String queryId, QueryState state, String query)
@@ -101,8 +103,6 @@ public class TestQueryStateInfo
                 new QueryId(queryId),
                 TEST_SESSION.toSessionRepresentation(),
                 state,
-                new MemoryPoolId("reserved"),
-                true,
                 URI.create("1"),
                 ImmutableList.of("2", "3"),
                 query,
@@ -119,51 +119,76 @@ public class TestQueryStateInfo
                         new Duration(9, MINUTES),
                         new Duration(10, MINUTES),
                         new Duration(11, MINUTES),
+                        new Duration(1, SECONDS),
+                        new Duration(2, SECONDS),
                         new Duration(12, MINUTES),
                         13,
                         14,
                         15,
+                        16,
                         100,
                         17,
                         18,
                         34,
                         19,
                         20.0,
-                        10.0,
+                        21.0,
                         DataSize.valueOf("21GB"),
                         DataSize.valueOf("22GB"),
                         DataSize.valueOf("23GB"),
                         DataSize.valueOf("24GB"),
                         DataSize.valueOf("25GB"),
-                        DataSize.valueOf("30GB"),
                         DataSize.valueOf("26GB"),
                         DataSize.valueOf("27GB"),
                         DataSize.valueOf("28GB"),
                         DataSize.valueOf("29GB"),
                         true,
+                        OptionalDouble.of(8.88),
+                        OptionalDouble.of(0),
                         new Duration(23, MINUTES),
                         new Duration(24, MINUTES),
+                        new Duration(25, MINUTES),
                         new Duration(26, MINUTES),
+                        new Duration(27, MINUTES),
                         true,
                         ImmutableSet.of(WAITING_FOR_MEMORY),
                         DataSize.valueOf("271GB"),
-                        281,
-                        new Duration(26, MINUTES),
                         DataSize.valueOf("272GB"),
+                        281,
                         282,
-                        DataSize.valueOf("27GB"),
-                        28,
+                        new Duration(28, MINUTES),
+                        new Duration(29, MINUTES),
+                        DataSize.valueOf("273GB"),
+                        DataSize.valueOf("274GB"),
+                        283,
+                        284,
+                        DataSize.valueOf("28GB"),
                         DataSize.valueOf("29GB"),
                         30,
-                        DataSize.valueOf("31GB"),
-                        32,
+                        31,
+                        DataSize.valueOf("32GB"),
                         DataSize.valueOf("33GB"),
+                        34,
+                        35,
+                        new Duration(101, SECONDS),
+                        new Duration(102, SECONDS),
+                        DataSize.valueOf("36GB"),
+                        DataSize.valueOf("37GB"),
+                        38,
+                        39,
+                        new Duration(103, SECONDS),
+                        new Duration(104, SECONDS),
+                        DataSize.valueOf("40GB"),
+                        DataSize.valueOf("41GB"),
                         ImmutableList.of(),
                         DynamicFiltersStats.EMPTY,
+                        ImmutableList.of(),
                         ImmutableList.of()),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
+                Optional.empty(),
+                false,
                 ImmutableMap.of(),
                 ImmutableSet.of(),
                 ImmutableMap.of(),
@@ -171,7 +196,7 @@ public class TestQueryStateInfo
                 ImmutableSet.of(),
                 Optional.empty(),
                 false,
-                "33",
+                "42",
                 Optional.empty(),
                 null,
                 null,
@@ -182,6 +207,9 @@ public class TestQueryStateInfo
                 ImmutableList.of(),
                 false,
                 Optional.empty(),
-                Optional.of(QueryType.SELECT));
+                Optional.of(QueryType.SELECT),
+                RetryPolicy.NONE,
+                false,
+                new NodeVersion("version"));
     }
 }

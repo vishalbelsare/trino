@@ -14,7 +14,7 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -40,11 +40,11 @@ public class TestDecimalConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("decimal-mapping", "allow_overflow")
                 .put("decimal-default-scale", "16")
                 .put("decimal-rounding-mode", "HALF_UP")
-                .build();
+                .buildOrThrow();
 
         DecimalConfig expected = new DecimalConfig()
                 .setDecimalMapping(ALLOW_OVERFLOW)

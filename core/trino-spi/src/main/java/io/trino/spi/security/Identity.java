@@ -50,7 +50,7 @@ public class Identity
         this.groups = Set.copyOf(requireNonNull(groups, "groups is null"));
         this.principal = requireNonNull(principal, "principal is null");
         this.enabledRoles = Set.copyOf(requireNonNull(enabledRoles, "enabledRoles is null"));
-        this.catalogRoles = Map.copyOf(requireNonNull(catalogRoles, "connectorRoles is null"));
+        this.catalogRoles = Map.copyOf(requireNonNull(catalogRoles, "catalogRoles is null"));
         this.extraCredentials = Map.copyOf(requireNonNull(extraCredentials, "extraCredentials is null"));
         this.onDestroy = requireNonNull(onDestroy, "onDestroy is null");
     }
@@ -130,13 +130,17 @@ public class Identity
             return false;
         }
         Identity identity = (Identity) o;
-        return Objects.equals(user, identity.user);
+        return Objects.equals(user, identity.user) &&
+               Objects.equals(groups, identity.groups) &&
+               Objects.equals(principal, identity.principal) &&
+               Objects.equals(enabledRoles, identity.enabledRoles) &&
+               Objects.equals(catalogRoles, identity.catalogRoles);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(user);
+        return Objects.hash(user, groups, principal, enabledRoles, catalogRoles);
     }
 
     @Override
@@ -222,7 +226,6 @@ public class Identity
 
         public Builder withEnabledRoles(Set<String> enabledRoles)
         {
-            enabledRoles = new HashSet<>(requireNonNull(enabledRoles, "enabledRoles is null"));
             this.enabledRoles = new HashSet<>(requireNonNull(enabledRoles, "enabledRoles is null"));
             return this;
         }

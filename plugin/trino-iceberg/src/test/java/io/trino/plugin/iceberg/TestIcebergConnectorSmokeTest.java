@@ -14,70 +14,142 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.testing.BaseConnectorSmokeTest;
+import io.trino.filesystem.Location;
+import io.trino.metastore.HiveMetastore;
 import io.trino.testing.QueryRunner;
-import io.trino.testing.TestingConnectorBehavior;
-import org.testng.annotations.Test;
+import io.trino.testing.sql.TestTable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
-import static io.trino.plugin.iceberg.IcebergQueryRunner.createIcebergQueryRunner;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+
+import static io.trino.plugin.iceberg.IcebergTestUtils.checkOrcFileSorting;
+import static io.trino.plugin.iceberg.IcebergTestUtils.getHiveMetastore;
+import static io.trino.tpch.TpchTable.NATION;
+import static io.trino.tpch.TpchTable.ORDERS;
+import static io.trino.tpch.TpchTable.REGION;
+import static org.apache.iceberg.FileFormat.ORC;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 // Redundant over TestIcebergOrcConnectorTest, but exists to exercise BaseConnectorSmokeTest
 // Some features like materialized views may be supported by Iceberg only.
+@TestInstance(PER_CLASS)
 public class TestIcebergConnectorSmokeTest
-        extends BaseConnectorSmokeTest
+        extends BaseIcebergConnectorSmokeTest
 {
+    private HiveMetastore metastore;
+
+    public TestIcebergConnectorSmokeTest()
+    {
+        super(ORC);
+    }
+
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return createIcebergQueryRunner(ImmutableMap.of(), ImmutableMap.of(), REQUIRED_TPCH_TABLES);
+        QueryRunner queryRunner = IcebergQueryRunner.builder()
+                .setInitialTables(NATION, ORDERS, REGION)
+                .setIcebergProperties(ImmutableMap.of(
+                        "iceberg.file-format", format.name(),
+                        "iceberg.register-table-procedure.enabled", "true",
+                        "iceberg.writer-sort-buffer-size", "1MB",
+                        "iceberg.allowed-extra-properties", "write.metadata.delete-after-commit.enabled,write.metadata.previous-versions-max"))
+                .build();
+        metastore = getHiveMetastore(queryRunner);
+        return queryRunner;
     }
 
     @Override
-    protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
+    protected void dropTableFromMetastore(String tableName)
     {
-        switch (connectorBehavior) {
-            case SUPPORTS_COMMENT_ON_COLUMN:
-            case SUPPORTS_TOPN_PUSHDOWN:
-                return false;
+        metastore.dropTable(getSession().getSchema().orElseThrow(), tableName, false);
+        assertThat(metastore.getTable(getSession().getSchema().orElseThrow(), tableName)).as("Table in metastore should be dropped").isEmpty();
+    }
 
-            case SUPPORTS_CREATE_VIEW:
-                return true;
+    @Override
+    protected String getMetadataLocation(String tableName)
+    {
+        return metastore
+                .getTable(getSession().getSchema().orElseThrow(), tableName).orElseThrow()
+                .getParameters().get("metadata_location");
+    }
 
-            case SUPPORTS_CREATE_MATERIALIZED_VIEW:
-                return true;
+    @Override
+    protected String schemaPath()
+    {
+        return "local:///%s".formatted(getSession().getSchema().orElseThrow());
+    }
 
-            case SUPPORTS_DELETE:
-                return true;
-            default:
-                return super.hasBehavior(connectorBehavior);
+    @Override
+    protected boolean locationExists(String location)
+    {
+        try {
+            return fileSystem.newInputFile(Location.of(location)).exists();
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
-    @Test
     @Override
-    public void testRowLevelDelete()
+    protected void deleteDirectory(String location)
     {
-        // Deletes are covered AbstractTestIcebergConnectorTest
-        assertThatThrownBy(super::testRowLevelDelete)
-                .hasStackTraceContaining("This connector only supports delete where one or more identity-transformed partitions are deleted entirely");
+        try {
+            fileSystem.deleteDirectory(Location.of(location));
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    @Override
+    protected boolean isFileSorted(Location path, String sortColumnName)
+    {
+        return checkOrcFileSorting(fileSystem, path, sortColumnName);
     }
 
     @Test
-    @Override
-    public void testShowCreateTable()
+    public void testRowConstructorColumnLimitForMergeQuery()
     {
-        assertThat((String) computeScalar("SHOW CREATE TABLE region"))
-                .isEqualTo("" +
-                        "CREATE TABLE iceberg.tpch.region (\n" +
-                        "   regionkey bigint,\n" +
-                        "   name varchar,\n" +
-                        "   comment varchar\n" +
-                        ")\n" +
-                        "WITH (\n" +
-                        "   format = 'ORC'\n" +
-                        ")");
+        String[] colNames = {"orderkey", "custkey", "orderstatus", "totalprice", "orderpriority", "clerk", "shippriority", "comment", "orderdate"};
+        String[] colTypes = {"bigint", "bigint", "varchar", "decimal(12,2)", "varchar", "varchar", "int", "varchar", "date"};
+        String tableDefinition = "(";
+        String columns = "(";
+        String selectQuery = "select ";
+        String notMatchedClause = "";
+        String matchedClause = "";
+        // Creating merge query with 325 columns
+        for (int i = 0; i < 36; i++) {
+            for (int j = 0; j < 9; j++) {
+                String columnName = colNames[j];
+                String columnType = colTypes[j];
+                tableDefinition += columnName + "_" + i + " " + columnType + ",";
+                selectQuery += columnName + " " + columnName + "_" + i + ",";
+                columns += columnName + "_" + i + ",";
+                notMatchedClause += "s." + columnName + "_" + i + ",";
+                matchedClause += columnName + "_" + i + " = s." + columnName + "_" + i + ",";
+            }
+        }
+        tableDefinition += "orderkey bigint, custkey bigint,  orderstatus varchar, totalprice decimal(12,2), orderpriority varchar) ";
+        selectQuery += "orderkey, custkey,  orderstatus, totalprice, orderpriority from orders limit 1 ";
+        columns += "orderkey, custkey,  orderstatus, totalprice, orderpriority) ";
+        notMatchedClause += "s.orderkey, s.custkey,  s.orderstatus, s.totalprice, s.orderpriority ";
+        matchedClause += "orderkey = s.orderkey, custkey = s.custkey,  orderstatus = s.orderstatus, totalprice = t.totalprice, orderpriority = s.orderpriority ";
+        TestTable table = newTrinoTable("test_merge_", tableDefinition);
+        assertUpdate("INSERT INTO " + table.getName() + " " + columns + " " + selectQuery, 1);
+        TestTable mergeTable = newTrinoTable("test_table_", tableDefinition);
+        assertUpdate("INSERT INTO " + mergeTable.getName() + " " + columns + " " + selectQuery, 1);
+        assertUpdate(
+                """
+                MERGE INTO %s t
+                USING (select * from %s ) s
+                ON (t.orderkey = s.orderkey)
+                WHEN MATCHED THEN UPDATE SET %s
+                WHEN NOT MATCHED THEN INSERT VALUES (%s)
+                """.formatted(mergeTable.getName(), table.getName(), matchedClause, notMatchedClause),
+                1);
     }
 }

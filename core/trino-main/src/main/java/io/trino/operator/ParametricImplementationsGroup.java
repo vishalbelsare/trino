@@ -15,20 +15,16 @@ package io.trino.operator;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
+import io.trino.spi.function.FunctionNullability;
+import io.trino.spi.function.Signature;
 import io.trino.spi.type.TypeSignature;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.trino.operator.ParametricFunctionHelpers.signatureWithName;
 import static io.trino.operator.annotations.FunctionsParserHelper.validateSignaturesCompatibility;
 import static java.util.Objects.requireNonNull;
 
@@ -111,30 +107,6 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
         return signature;
     }
 
-    public ParametricImplementationsGroup<T> withAlias(String alias)
-    {
-        if (alias.equals(signature.getName())) {
-            return this;
-        }
-        return new ParametricImplementationsGroup<>(
-                exactImplementations.values().stream()
-                        .map(implementation -> withAlias(alias, implementation))
-                        .collect(toImmutableMap(T::getSignature, Function.identity())),
-                specializedImplementations.stream()
-                        .map(implementation -> withAlias(alias, implementation))
-                        .collect(toImmutableList()),
-                genericImplementations.stream()
-                        .map(implementation -> withAlias(alias, implementation))
-                        .collect(toImmutableList()),
-                signatureWithName(alias, signature));
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <T extends ParametricImplementation> T withAlias(String name, T implementation)
-    {
-        return (T) implementation.withAlias(name);
-    }
-
     public static <T extends ParametricImplementation> Builder<T> builder()
     {
         return new Builder<>();
@@ -150,7 +122,7 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
 
         public ParametricImplementationsGroup<T> build()
         {
-            Map<Signature, T> exactImplementations = this.exactImplementations.build();
+            Map<Signature, T> exactImplementations = this.exactImplementations.buildOrThrow();
             List<T> specializedImplementations = this.specializedImplementations.build();
             List<T> genericImplementations = this.genericImplementations.build();
             return new ParametricImplementationsGroup<>(
@@ -180,7 +152,7 @@ public class ParametricImplementationsGroup<T extends ParametricImplementation>
                 List<T> specializedImplementations,
                 List<T> genericImplementations)
         {
-            if (specializedImplementations.size() + genericImplementations.size() == 0) {
+            if (specializedImplementations.isEmpty() && genericImplementations.isEmpty()) {
                 return getOnlyElement(exactImplementations.keySet());
             }
 

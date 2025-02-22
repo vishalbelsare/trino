@@ -58,11 +58,33 @@ def get_version():
     version = os.environ.get('TRINO_VERSION', '').strip()
     return version or maven_version('../../../pom.xml')
 
+
+def globalReplace(app, docname, source):
+    result = source[0]
+    for key in app.config.global_replacements:
+        result = result.replace(key, app.config.global_replacements[key])
+    source[0] = result
+
+
+def setup(app):
+   app.add_config_value('global_replacements', {}, True)
+   app.connect('source-read', globalReplace)
+
 # -- General configuration -----------------------------------------------------
 
 needs_sphinx = '3.0'
 
-extensions = ['myst_parser', 'backquote', 'download', 'issue', 'sphinx_copybutton']
+extensions = [
+    'myst_parser',
+    'backquote',
+    'download',
+    'issue',
+    'sphinx_copybutton',
+    'redirects',
+    'sphinxcontrib.jquery'
+]
+
+redirects_file = 'redirects.txt'
 
 templates_path = ['templates']
 
@@ -81,9 +103,22 @@ highlight_language = 'sql'
 
 default_role = 'backquote'
 
-rst_epilog = """
-.. |trino_server_release| replace:: ``trino-server-{release}``
-""".replace('{release}', release)
+# Any replace that is inside of a code block should be added here
+# https://stackoverflow.com/questions/8821511/substitutions-inside-sphinx-code-blocks-arent-replaced
+
+global_replacements = {
+    "|trino_version|" : version
+}
+
+myst_enable_extensions = [
+    "colon_fence",
+    "deflist",
+    "substitution"
+]
+
+myst_substitutions = {
+    "breaking": "<a href='../release.html#breaking-changes' title='Breaking change'>⚠️ Breaking change:</a>"
+}
 
 # -- Options for HTML output ---------------------------------------------------
 
@@ -94,8 +129,10 @@ html_static_path = ['static']
 html_title = '%s %s Documentation' % (project, release)
 
 html_logo = 'images/trino.svg'
+html_baseurl = 'https://trino.io/docs/current/'
 
-html_add_permalinks = '#'
+html_permalinks = True
+html_permalinks_icon = '#'
 html_show_copyright = False
 html_show_sphinx = False
 
@@ -104,7 +141,7 @@ html_sidebars = {
 }
 
 html_theme_options = {
-    'base_url': '/',
+    'base_url': html_baseurl,
     'globaltoc_depth': -1,
     'theme_color': '2196f3',
     'color_primary': '',  # set in CSS
@@ -112,8 +149,15 @@ html_theme_options = {
     'repo_url': 'https://github.com/trinodb/trino',
     'repo_name': 'Trino',
     'version_json': '../versions.json',
+    'nav_previous_text': 'Previous',
+    'nav_next_text': 'Next',
+    'search_placeholder_text': 'Search'
 }
 
 html_css_files = [
     'trino.css',
+]
+
+suppress_warnings = [
+    'config.cache'
 ]

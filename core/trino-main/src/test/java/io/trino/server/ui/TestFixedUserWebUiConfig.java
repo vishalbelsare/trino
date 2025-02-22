@@ -14,7 +14,7 @@
 package io.trino.server.ui;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -34,9 +34,7 @@ public class TestFixedUserWebUiConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("web-ui.user", "some-user")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("web-ui.user", "some-user");
 
         FixedUserWebUiConfig expected = new FixedUserWebUiConfig()
                 .setUsername("some-user");

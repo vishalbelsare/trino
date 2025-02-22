@@ -45,18 +45,16 @@ public class UnnestedSymbolMatcher
     @Override
     public Optional<Symbol> getAssignedSymbol(PlanNode node, Session session, Metadata metadata, SymbolAliases symbolAliases)
     {
-        if (!(node instanceof UnnestNode)) {
+        if (!(node instanceof UnnestNode unnestNode)) {
             return Optional.empty();
         }
-
-        UnnestNode unnestNode = (UnnestNode) node;
 
         Symbol unnestSymbol = Symbol.from(symbolAliases.get(symbol));
         List<Mapping> matches = unnestNode.getMappings().stream()
                 .filter(mapping -> mapping.getInput().equals(unnestSymbol))
                 .collect(toImmutableList());
         checkState(matches.size() < 2, "alias matching not supported for repeated unnest symbols");
-        if (matches.size() == 0) {
+        if (matches.isEmpty()) {
             return Optional.empty();
         }
 

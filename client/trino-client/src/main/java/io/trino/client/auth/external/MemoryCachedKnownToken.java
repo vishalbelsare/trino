@@ -13,7 +13,7 @@
  */
 package io.trino.client.auth.external;
 
-import javax.annotation.concurrent.ThreadSafe;
+import com.google.errorprone.annotations.ThreadSafe;
 
 import java.util.Optional;
 import java.util.concurrent.locks.Lock;
@@ -43,9 +43,7 @@ class MemoryCachedKnownToken
     private final Lock writeLock = lock.writeLock();
     private Optional<Token> knownToken = Optional.empty();
 
-    private MemoryCachedKnownToken()
-    {
-    }
+    private MemoryCachedKnownToken() {}
 
     @Override
     public Optional<Token> getToken()

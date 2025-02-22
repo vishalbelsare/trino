@@ -238,8 +238,8 @@ public class TpchRecordSet<E extends TpchEntity>
                             column -> column,
                             column -> {
                                 TpchColumnHandle tpchColumnHandle = (TpchColumnHandle) column;
-                                Type type = tpchColumnHandle.getType();
-                                TpchColumn<E> tpchColumn = table.getColumn(tpchColumnHandle.getColumnName());
+                                Type type = tpchColumnHandle.type();
+                                TpchColumn<E> tpchColumn = table.getColumn(tpchColumnHandle.columnName());
                                 return NullableValue.of(type, getTrinoObject(tpchColumn, type));
                             }));
 
@@ -253,15 +253,13 @@ public class TpchRecordSet<E extends TpchEntity>
             if (type.getJavaType() == long.class) {
                 return getLong(column);
             }
-            else if (type.getJavaType() == double.class) {
+            if (type.getJavaType() == double.class) {
                 return getDouble(column);
             }
-            else if (type.getJavaType() == Slice.class) {
+            if (type.getJavaType() == Slice.class) {
                 return getSlice(column);
             }
-            else {
-                throw new TrinoException(NOT_SUPPORTED, format("Unsupported column type %s", type.getDisplayName()));
-            }
+            throw new TrinoException(NOT_SUPPORTED, format("Unsupported column type %s", type.getDisplayName()));
         }
 
         private TpchColumn<E> getTpchColumn(int field)

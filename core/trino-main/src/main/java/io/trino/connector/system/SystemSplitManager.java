@@ -25,6 +25,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.connector.SystemTable;
@@ -32,6 +33,7 @@ import io.trino.spi.connector.SystemTable.Distribution;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.TupleDomain;
 
+import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.metadata.NodeState.ACTIVE;
@@ -57,20 +59,25 @@ public class SystemSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle tableHandle,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         SystemTableHandle table = (SystemTableHandle) tableHandle;
-        TupleDomain<ColumnHandle> constraint = table.getConstraint();
+        TupleDomain<ColumnHandle> tableConstraint = table.constraint();
 
-        SystemTable systemTable = tables.getSystemTable(session, table.getSchemaTableName())
+        SystemTable systemTable = tables.getSystemTable(session, table.schemaTableName())
                 // table might disappear in the meantime
-                .orElseThrow(() -> new TableNotFoundException(table.getSchemaTableName()));
+                .orElseThrow(() -> new TableNotFoundException(table.schemaTableName()));
+
+        Optional<ConnectorSplitSource> connectorSplitSource = systemTable.splitSource(session, tableConstraint);
+        if (connectorSplitSource.isPresent()) {
+            return connectorSplitSource.get();
+        }
 
         Distribution tableDistributionMode = systemTable.getDistribution();
         if (tableDistributionMode == SINGLE_COORDINATOR) {
             HostAddress address = nodeManager.getCurrentNode().getHostAndPort();
-            ConnectorSplit split = new SystemSplit(address, constraint);
+            ConnectorSplit split = new SystemSplit(address, tableConstraint, Optional.empty());
             return new FixedSplitSource(ImmutableList.of(split));
         }
 
@@ -84,7 +91,7 @@ public class SystemSplitManager
         }
         Set<InternalNode> nodeSet = nodes.build();
         for (InternalNode node : nodeSet) {
-            splits.add(new SystemSplit(node.getHostAndPort(), constraint));
+            splits.add(new SystemSplit(node.getHostAndPort(), tableConstraint, Optional.empty()));
         }
         return new FixedSplitSource(splits.build());
     }

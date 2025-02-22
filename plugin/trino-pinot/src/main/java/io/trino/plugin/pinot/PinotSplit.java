@@ -15,20 +15,29 @@ package io.trino.plugin.pinot;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
-import io.trino.spi.HostAddress;
+import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.SizeOf;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 
 public class PinotSplit
         implements ConnectorSplit
 {
+    private static final Joiner JOINER = Joiner.on(",");
+    private static final int INSTANCE_SIZE = instanceSize(PinotSplit.class);
+
     private final SplitType splitType;
     private final Optional<String> suffix;
     private final List<String> segments;
@@ -118,21 +127,23 @@ public class PinotSplit
     }
 
     @Override
-    public boolean isRemotelyAccessible()
+    public Map<String, String> getSplitInfo()
     {
-        return true;
+        return ImmutableMap.of(
+                "splitType", splitType.name(),
+                "suffix", suffix.orElse(""),
+                "segments", JOINER.join(segments),
+                "segmentHost", segmentHost.orElse(""));
     }
 
     @Override
-    public List<HostAddress> getAddresses()
+    public long getRetainedSizeInBytes()
     {
-        return ImmutableList.of();
-    }
-
-    @Override
-    public Object getInfo()
-    {
-        return this;
+        return INSTANCE_SIZE
+                + sizeOf(suffix, SizeOf::estimatedSizeOf)
+                + estimatedSizeOf(segments, SizeOf::estimatedSizeOf)
+                + sizeOf(segmentHost, SizeOf::estimatedSizeOf)
+                + sizeOf(timePredicate, SizeOf::estimatedSizeOf);
     }
 
     public enum SplitType

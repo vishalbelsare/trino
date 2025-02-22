@@ -27,9 +27,7 @@ import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.IOException;
 import java.time.ZoneId;
@@ -37,6 +35,7 @@ import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verifyNotNull;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.orc.metadata.Stream.StreamKind.DATA;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
@@ -50,7 +49,7 @@ import static java.util.Objects.requireNonNull;
 public class DoubleColumnReader
         implements ColumnReader
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(DoubleColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(DoubleColumnReader.class);
 
     private final OrcColumn column;
 
@@ -69,16 +68,16 @@ public class DoubleColumnReader
 
     private long[] nonNullValueTemp = new long[0];
 
-    private final LocalMemoryContext systemMemoryContext;
+    private final LocalMemoryContext memoryContext;
 
-    public DoubleColumnReader(Type type, OrcColumn column, LocalMemoryContext systemMemoryContext)
+    public DoubleColumnReader(Type type, OrcColumn column, LocalMemoryContext memoryContext)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
         verifyStreamType(column, type, DoubleType.class::isInstance);
 
         this.column = requireNonNull(column, "column is null");
-        this.systemMemoryContext = requireNonNull(systemMemoryContext, "systemMemoryContext is null");
+        this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
     }
 
     @Override
@@ -157,7 +156,7 @@ public class DoubleColumnReader
         int minNonNullValueSize = minNonNullValueSize(nonNullCount);
         if (nonNullValueTemp.length < minNonNullValueSize) {
             nonNullValueTemp = new long[minNonNullValueSize];
-            systemMemoryContext.setBytes(sizeOf(nonNullValueTemp));
+            memoryContext.setBytes(sizeOf(nonNullValueTemp));
         }
 
         dataStream.next(nonNullValueTemp, nonNullCount);
@@ -217,7 +216,7 @@ public class DoubleColumnReader
     @Override
     public void close()
     {
-        systemMemoryContext.close();
+        memoryContext.close();
     }
 
     @Override

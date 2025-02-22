@@ -13,7 +13,9 @@
  */
 package io.trino.util;
 
+import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.FormatMethod;
 import io.trino.client.ErrorLocation;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.Failure;
@@ -24,8 +26,7 @@ import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoTransportException;
 import io.trino.sql.parser.ParsingException;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -58,10 +59,16 @@ public final class Failures
         return toFailure(failure, newIdentityHashSet());
     }
 
+    @FormatMethod
     public static void checkCondition(boolean condition, ErrorCodeSupplier errorCode, String formatString, Object... args)
     {
+        checkCondition(condition, errorCode, () -> format(formatString, args));
+    }
+
+    public static void checkCondition(boolean condition, ErrorCodeSupplier errorCode, Supplier<String> errorMessage)
+    {
         if (!condition) {
-            throw new TrinoException(errorCode, format(formatString, args));
+            throw new TrinoException(errorCode, errorMessage.get());
         }
     }
 
@@ -81,7 +88,7 @@ public final class Failures
         String type;
         HostAddress remoteHost = null;
         if (throwable instanceof Failure) {
-            type = ((Failure) throwable).getType();
+            type = ((Failure) throwable).getFailureInfo().getType();
         }
         else {
             Class<?> clazz = throwable.getClass();
@@ -134,12 +141,11 @@ public final class Failures
     private static ErrorLocation getErrorLocation(Throwable throwable)
     {
         // TODO: this is a big hack
-        if (throwable instanceof ParsingException) {
-            ParsingException e = (ParsingException) throwable;
-            return new ErrorLocation(e.getLineNumber(), e.getColumnNumber());
+        if (throwable instanceof ParsingException parsingException) {
+            return new ErrorLocation(parsingException.getLineNumber(), parsingException.getColumnNumber());
         }
-        if (throwable instanceof TrinoException) {
-            return ((TrinoException) throwable).getLocation()
+        if (throwable instanceof TrinoException trinoException) {
+            return trinoException.getLocation()
                     .map(location -> new ErrorLocation(location.getLineNumber(), location.getColumnNumber()))
                     .orElse(null);
         }
@@ -149,18 +155,12 @@ public final class Failures
     @Nullable
     private static ErrorCode toErrorCode(Throwable throwable)
     {
-        requireNonNull(throwable);
-
-        if (throwable instanceof TrinoException) {
-            return ((TrinoException) throwable).getErrorCode();
-        }
-        if (throwable instanceof Failure && ((Failure) throwable).getErrorCode() != null) {
-            return ((Failure) throwable).getErrorCode();
-        }
-        if (throwable instanceof ParsingException) {
-            return SYNTAX_ERROR.toErrorCode();
-        }
-        return null;
+        return switch (requireNonNull(throwable)) {
+            case TrinoException trinoException -> trinoException.getErrorCode();
+            case Failure failure -> failure.getFailureInfo().getErrorCode();
+            case ParsingException _ -> SYNTAX_ERROR.toErrorCode();
+            default -> null;
+        };
     }
 
     public static TrinoException internalError(Throwable t)

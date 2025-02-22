@@ -18,36 +18,41 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.cost.TaskCountEstimator;
 import io.trino.spi.connector.SortOrder;
-import io.trino.sql.parser.SqlParser;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.RuleStatsRecorder;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.ExpectedValueProvider;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.iterative.IterativeOptimizer;
 import io.trino.sql.planner.iterative.rule.DetermineTableScanNodePartitioning;
 import io.trino.sql.planner.iterative.rule.RemoveRedundantIdentityProjections;
-import io.trino.sql.planner.plan.WindowNode;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Optional;
 
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.functionCall;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.output;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.sort;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.specification;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.window;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.windowFunction;
+import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
 
 public class TestEliminateSorts
         extends BasePlanTest
 {
     private static final String QUANTITY_ALIAS = "QUANTITY";
 
-    private static final ExpectedValueProvider<WindowNode.Specification> windowSpec = specification(
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowSpec = specification(
             ImmutableList.of(),
             ImmutableList.of(QUANTITY_ALIAS),
             ImmutableMap.of(QUANTITY_ALIAS, SortOrder.ASC_NULLS_LAST));
@@ -57,22 +62,7 @@ public class TestEliminateSorts
             ImmutableMap.of(QUANTITY_ALIAS, "quantity"));
 
     @Test
-    public void testEliminateSorts()
-    {
-        @Language("SQL") String sql = "SELECT quantity, row_number() OVER (ORDER BY quantity) FROM lineitem ORDER BY quantity";
-
-        PlanMatchPattern pattern =
-                output(
-                        window(windowMatcherBuilder -> windowMatcherBuilder
-                                        .specification(windowSpec)
-                                        .addFunction(functionCall("row_number", Optional.empty(), ImmutableList.of())),
-                                anyTree(LINEITEM_TABLESCAN_Q)));
-
-        assertUnitPlan(sql, pattern);
-    }
-
-    @Test
-    public void testNotEliminateSorts()
+    public void testNotEliminateSortsIfSortKeyIsDifferent()
     {
         @Language("SQL") String sql = "SELECT quantity, row_number() OVER (ORDER BY quantity) FROM lineitem ORDER BY tax";
 
@@ -82,25 +72,55 @@ public class TestEliminateSorts
                                 anyTree(
                                         window(windowMatcherBuilder -> windowMatcherBuilder
                                                         .specification(windowSpec)
-                                                        .addFunction(functionCall("row_number", Optional.empty(), ImmutableList.of())),
+                                                        .addFunction(windowFunction("row_number", ImmutableList.of(), DEFAULT_FRAME)),
                                                 anyTree(LINEITEM_TABLESCAN_Q)))));
+
+        assertUnitPlan(sql, pattern);
+    }
+
+    @Test
+    public void testNotEliminateSortsIfFilterExists()
+    {
+        @Language("SQL") String sql =
+                """
+                SELECT * FROM (
+                    SELECT quantity, row_number() OVER (ORDER BY quantity)
+                    FROM lineitem
+                )
+                WHERE quantity > 10
+                ORDER BY quantity
+                """;
+
+        PlanMatchPattern pattern =
+                anyTree(
+                        sort(
+                                anyTree(
+                                        filter(
+                                                new Comparison(GREATER_THAN, new Reference(DOUBLE, "QUANTITY"), new Cast(new Constant(INTEGER, 10L), DOUBLE)),
+                                                window(windowMatcherBuilder -> windowMatcherBuilder
+                                                                .specification(windowSpec)
+                                                                .addFunction(windowFunction("row_number", ImmutableList.of(), DEFAULT_FRAME)),
+                                                        anyTree(LINEITEM_TABLESCAN_Q))))));
 
         assertUnitPlan(sql, pattern);
     }
 
     private void assertUnitPlan(@Language("SQL") String sql, PlanMatchPattern pattern)
     {
-        TypeAnalyzer typeAnalyzer = new TypeAnalyzer(new SqlParser(), getQueryRunner().getMetadata());
         List<PlanOptimizer> optimizers = ImmutableList.of(
                 new IterativeOptimizer(
-                        getQueryRunner().getMetadata(),
+                        getPlanTester().getPlannerContext(),
                         new RuleStatsRecorder(),
-                        getQueryRunner().getStatsCalculator(),
-                        getQueryRunner().getCostCalculator(),
+                        getPlanTester().getStatsCalculator(),
+                        getPlanTester().getCostCalculator(),
                         ImmutableSet.of(
                                 new RemoveRedundantIdentityProjections(),
-                                new DetermineTableScanNodePartitioning(getQueryRunner().getMetadata(), getQueryRunner().getNodePartitioningManager(), new TaskCountEstimator(() -> 10)))),
-                new AddExchanges(getQueryRunner().getMetadata(), getQueryRunner().getTypeOperators(), typeAnalyzer, getQueryRunner().getStatsCalculator()));
+                                new DetermineTableScanNodePartitioning(getPlanTester().getPlannerContext().getMetadata(), getPlanTester().getNodePartitioningManager(), new TaskCountEstimator(() -> 10)))),
+                new AddExchanges(
+                        getPlanTester().getPlannerContext(),
+                        getPlanTester().getStatsCalculator(),
+                        getPlanTester().getTaskCountEstimator(),
+                        getPlanTester().getNodePartitioningManager()));
 
         assertPlan(sql, pattern, optimizers);
     }

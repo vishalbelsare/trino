@@ -14,37 +14,37 @@
 package io.trino.type;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.type.TypeCalculation.calculateLiteralValue;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTypeCalculation
 {
     @Test
     public void testBasicUsage()
     {
-        assertEquals(calculateLiteralValue("42", ImmutableMap.of()), Long.valueOf(42));
-        assertEquals(calculateLiteralValue("NULL", ImmutableMap.of()), Long.valueOf(0));
-        assertEquals(calculateLiteralValue("null", ImmutableMap.of()), Long.valueOf(0));
-        assertEquals(calculateLiteralValue("x", ImmutableMap.of("x", 42L)), Long.valueOf(42));
-        assertEquals(calculateLiteralValue("(42)", ImmutableMap.of()), Long.valueOf(42));
-        assertEquals(calculateLiteralValue("(NULL)", ImmutableMap.of()), Long.valueOf(0));
-        assertEquals(calculateLiteralValue("(x)", ImmutableMap.of("x", 42L)), Long.valueOf(42));
+        assertThat(calculateLiteralValue("42", ImmutableMap.of())).isEqualTo(Long.valueOf(42));
+        assertThat(calculateLiteralValue("NULL", ImmutableMap.of())).isEqualTo(Long.valueOf(0));
+        assertThat(calculateLiteralValue("null", ImmutableMap.of())).isEqualTo(Long.valueOf(0));
+        assertThat(calculateLiteralValue("x", ImmutableMap.of("x", 42L))).isEqualTo(Long.valueOf(42));
+        assertThat(calculateLiteralValue("(42)", ImmutableMap.of())).isEqualTo(Long.valueOf(42));
+        assertThat(calculateLiteralValue("(NULL)", ImmutableMap.of())).isEqualTo(Long.valueOf(0));
+        assertThat(calculateLiteralValue("(x)", ImmutableMap.of("x", 42L))).isEqualTo(Long.valueOf(42));
 
-        assertEquals(calculateLiteralValue("42 + 55", ImmutableMap.of()), Long.valueOf(42 + 55));
-        assertEquals(calculateLiteralValue("42 - 55", ImmutableMap.of()), Long.valueOf(42 - 55));
-        assertEquals(calculateLiteralValue("42 * 55", ImmutableMap.of()), Long.valueOf(42 * 55));
-        assertEquals(calculateLiteralValue("42 / 6", ImmutableMap.of()), Long.valueOf(42 / 6));
+        assertThat(calculateLiteralValue("42 + 55", ImmutableMap.of())).isEqualTo(Long.valueOf(42 + 55));
+        assertThat(calculateLiteralValue("42 - 55", ImmutableMap.of())).isEqualTo(Long.valueOf(42 - 55));
+        assertThat(calculateLiteralValue("42 * 55", ImmutableMap.of())).isEqualTo(Long.valueOf(42 * 55));
+        assertThat(calculateLiteralValue("42 / 6", ImmutableMap.of())).isEqualTo(Long.valueOf(42 / 6));
 
-        assertEquals(calculateLiteralValue("42 + 55 * 6", ImmutableMap.of()), Long.valueOf(42 + 55 * 6));
-        assertEquals(calculateLiteralValue("(42 + 55) * 6", ImmutableMap.of()), Long.valueOf((42 + 55) * 6));
+        assertThat(calculateLiteralValue("42 + 55 * 6", ImmutableMap.of())).isEqualTo(Long.valueOf(42 + 55 * 6));
+        assertThat(calculateLiteralValue("(42 + 55) * 6", ImmutableMap.of())).isEqualTo(Long.valueOf((42 + 55) * 6));
 
-        assertEquals(calculateLiteralValue("min(10,2)", ImmutableMap.of()), Long.valueOf(2));
-        assertEquals(calculateLiteralValue("min(10,2*10)", ImmutableMap.of()), Long.valueOf(10));
-        assertEquals(calculateLiteralValue("max(10,2*10)", ImmutableMap.of()), Long.valueOf(20));
-        assertEquals(calculateLiteralValue("max(10,2)", ImmutableMap.of()), Long.valueOf(10));
+        assertThat(calculateLiteralValue("min(10,2)", ImmutableMap.of())).isEqualTo(Long.valueOf(2));
+        assertThat(calculateLiteralValue("min(10,2*10)", ImmutableMap.of())).isEqualTo(Long.valueOf(10));
+        assertThat(calculateLiteralValue("max(10,2*10)", ImmutableMap.of())).isEqualTo(Long.valueOf(20));
+        assertThat(calculateLiteralValue("max(10,2)", ImmutableMap.of())).isEqualTo(Long.valueOf(10));
 
-        assertEquals(calculateLiteralValue("x + y", ImmutableMap.of("x", 42L, "y", 55L)), Long.valueOf(42 + 55));
+        assertThat(calculateLiteralValue("x + y", ImmutableMap.of("x", 42L, "y", 55L))).isEqualTo(Long.valueOf(42 + 55));
     }
 }

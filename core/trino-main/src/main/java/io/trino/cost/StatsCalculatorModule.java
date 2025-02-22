@@ -15,13 +15,11 @@ package io.trino.cost;
 
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
+import com.google.inject.Inject;
 import com.google.inject.Module;
+import com.google.inject.Provider;
 import com.google.inject.Scopes;
 import com.google.inject.TypeLiteral;
-import io.trino.metadata.Metadata;
-
-import javax.inject.Inject;
-import javax.inject.Provider;
 
 import java.util.List;
 
@@ -45,15 +43,13 @@ public class StatsCalculatorModule
     public static class StatsRulesProvider
             implements Provider<List<ComposableStatsCalculator.Rule<?>>>
     {
-        private final Metadata metadata;
         private final ScalarStatsCalculator scalarStatsCalculator;
         private final FilterStatsCalculator filterStatsCalculator;
         private final StatsNormalizer normalizer;
 
         @Inject
-        public StatsRulesProvider(Metadata metadata, ScalarStatsCalculator scalarStatsCalculator, FilterStatsCalculator filterStatsCalculator, StatsNormalizer normalizer)
+        public StatsRulesProvider(ScalarStatsCalculator scalarStatsCalculator, FilterStatsCalculator filterStatsCalculator, StatsNormalizer normalizer)
         {
-            this.metadata = requireNonNull(metadata, "metadata is null");
             this.scalarStatsCalculator = requireNonNull(scalarStatsCalculator, "scalarStatsCalculator is null");
             this.filterStatsCalculator = requireNonNull(filterStatsCalculator, "filterStatsCalculator is null");
             this.normalizer = requireNonNull(normalizer, "normalizer is null");
@@ -65,11 +61,13 @@ public class StatsCalculatorModule
             ImmutableList.Builder<ComposableStatsCalculator.Rule<?>> rules = ImmutableList.builder();
 
             rules.add(new OutputStatsRule());
-            rules.add(new TableScanStatsRule(metadata, normalizer));
-            rules.add(new SimpleFilterProjectSemiJoinStatsRule(metadata, normalizer, filterStatsCalculator)); // this must be before FilterStatsRule
+            rules.add(new TableScanStatsRule(normalizer));
+            rules.add(new SimpleFilterProjectSemiJoinStatsRule(normalizer, filterStatsCalculator)); // this must be before FilterStatsRule
+            rules.add(new FilterProjectAggregationStatsRule(normalizer, filterStatsCalculator)); // this must be before FilterStatsRule
             rules.add(new FilterStatsRule(normalizer, filterStatsCalculator));
-            rules.add(new ValuesStatsRule(metadata));
+            rules.add(new ValuesStatsRule());
             rules.add(new LimitStatsRule(normalizer));
+            rules.add(new DistinctLimitStatsRule(normalizer));
             rules.add(new TopNStatsRule(normalizer));
             rules.add(new EnforceSingleRowStatsRule(normalizer));
             rules.add(new ProjectStatsRule(scalarStatsCalculator, normalizer));
@@ -83,6 +81,9 @@ public class StatsCalculatorModule
             rules.add(new RowNumberStatsRule(normalizer));
             rules.add(new SampleStatsRule(normalizer));
             rules.add(new SortStatsRule());
+            rules.add(new DynamicFilterSourceStatsRule());
+            rules.add(new RemoteSourceStatsRule(normalizer));
+            rules.add(new TopNRankingStatsRule(normalizer));
 
             return rules.build();
         }

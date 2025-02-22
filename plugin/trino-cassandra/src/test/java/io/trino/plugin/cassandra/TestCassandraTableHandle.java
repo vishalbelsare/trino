@@ -14,22 +14,33 @@
 package io.trino.plugin.cassandra;
 
 import io.airlift.json.JsonCodec;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestCassandraTableHandle
 {
     private final JsonCodec<CassandraTableHandle> codec = JsonCodec.jsonCodec(CassandraTableHandle.class);
 
     @Test
-    public void testRoundTrip()
+    public void testRoundTripNamedRelationHandle()
     {
-        CassandraTableHandle expected = new CassandraTableHandle("schema", "table");
+        CassandraTableHandle expected = new CassandraTableHandle(new CassandraNamedRelationHandle("schema", "table"));
 
         String json = codec.toJson(expected);
         CassandraTableHandle actual = codec.fromJson(json);
 
-        assertEquals(actual.getSchemaTableName(), expected.getSchemaTableName());
+        assertThat(actual.getRequiredNamedRelation().getSchemaTableName()).isEqualTo(expected.getRequiredNamedRelation().getSchemaTableName());
+    }
+
+    @Test
+    public void testRoundTripQueryRelationHandle()
+    {
+        CassandraTableHandle expected = new CassandraTableHandle(new CassandraQueryRelationHandle("SELECT * FROM tpch.region"));
+
+        String json = codec.toJson(expected);
+        CassandraTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual.relationHandle()).isEqualTo(new CassandraQueryRelationHandle("SELECT * FROM tpch.region"));
     }
 }

@@ -75,15 +75,13 @@ public class GroupIdOperator
             // it's easier to create null blocks for every output column even though we only null out some grouping column outputs
             Block[] nullBlocks = new Block[outputTypes.size()];
             for (int i = 0; i < outputTypes.size(); i++) {
-                nullBlocks[i] = outputTypes.get(i).createBlockBuilder(null, 1)
-                        .appendNull()
-                        .build();
+                nullBlocks[i] = outputTypes.get(i).createNullBlock();
             }
 
             // create groupid blocks for every group
             Block[] groupIdBlocks = new Block[groupingSetMappings.size()];
             for (int i = 0; i < groupingSetMappings.size(); i++) {
-                BlockBuilder builder = BIGINT.createBlockBuilder(null, 1);
+                BlockBuilder builder = BIGINT.createFixedSizeBlockBuilder(1);
                 BIGINT.writeLong(builder, i);
                 groupIdBlocks[i] = builder.build();
             }
@@ -178,14 +176,14 @@ public class GroupIdOperator
 
         for (int i = 0; i < groupingSetInputs[currentGroupingSet].length; i++) {
             if (groupingSetInputs[currentGroupingSet][i] == -1) {
-                outputBlocks[i] = new RunLengthEncodedBlock(nullBlocks[i], currentPage.getPositionCount());
+                outputBlocks[i] = RunLengthEncodedBlock.create(nullBlocks[i], currentPage.getPositionCount());
             }
             else {
                 outputBlocks[i] = currentPage.getBlock(groupingSetInputs[currentGroupingSet][i]);
             }
         }
 
-        outputBlocks[outputBlocks.length - 1] = new RunLengthEncodedBlock(groupIdBlocks[currentGroupingSet], currentPage.getPositionCount());
+        outputBlocks[outputBlocks.length - 1] = RunLengthEncodedBlock.create(groupIdBlocks[currentGroupingSet], currentPage.getPositionCount());
         currentGroupingSet = (currentGroupingSet + 1) % groupingSetInputs.length;
         Page outputPage = new Page(currentPage.getPositionCount(), outputBlocks);
 

@@ -13,6 +13,7 @@
  */
 package io.trino.client;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.units.Duration;
@@ -20,6 +21,7 @@ import io.airlift.units.Duration;
 import java.net.URI;
 import java.nio.charset.CharsetEncoder;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -34,15 +36,16 @@ import static java.util.Objects.requireNonNull;
 public class ClientSession
 {
     private final URI server;
-    private final String principal;
     private final Optional<String> user;
+    private final Optional<String> sessionUser;
+    private final Optional<String> authorizationUser;
     private final String source;
     private final Optional<String> traceToken;
     private final Set<String> clientTags;
     private final String clientInfo;
-    private final String catalog;
-    private final String schema;
-    private final String path;
+    private final Optional<String> catalog;
+    private final Optional<String> schema;
+    private final List<String> path;
     private final ZoneId timeZone;
     private final Locale locale;
     private final Map<String, String> resourceEstimates;
@@ -53,6 +56,12 @@ public class ClientSession
     private final String transactionId;
     private final Duration clientRequestTimeout;
     private final boolean compressionDisabled;
+    private final Optional<String> encoding;
+
+    public static Builder builder()
+    {
+        return new Builder();
+    }
 
     public static Builder builder(ClientSession clientSession)
     {
@@ -62,21 +71,22 @@ public class ClientSession
     public static ClientSession stripTransactionId(ClientSession session)
     {
         return ClientSession.builder(session)
-                .withoutTransactionId()
+                .transactionId(null)
                 .build();
     }
 
-    public ClientSession(
+    private ClientSession(
             URI server,
-            String principal,
             Optional<String> user,
+            Optional<String> sessionUser,
+            Optional<String> authorizationUser,
             String source,
             Optional<String> traceToken,
             Set<String> clientTags,
             String clientInfo,
-            String catalog,
-            String schema,
-            String path,
+            Optional<String> catalog,
+            Optional<String> schema,
+            List<String> path,
             ZoneId timeZone,
             Locale locale,
             Map<String, String> resourceEstimates,
@@ -86,18 +96,20 @@ public class ClientSession
             Map<String, String> extraCredentials,
             String transactionId,
             Duration clientRequestTimeout,
-            boolean compressionDisabled)
+            boolean compressionDisabled,
+            Optional<String> encoding)
     {
         this.server = requireNonNull(server, "server is null");
-        this.principal = principal;
-        this.user = user;
-        this.source = source;
+        this.user = requireNonNull(user, "user is null");
+        this.sessionUser = requireNonNull(sessionUser, "sessionUser is null");
+        this.authorizationUser = requireNonNull(authorizationUser, "authorizationUser is null");
+        this.source = requireNonNull(source, "source is null");
         this.traceToken = requireNonNull(traceToken, "traceToken is null");
         this.clientTags = ImmutableSet.copyOf(requireNonNull(clientTags, "clientTags is null"));
         this.clientInfo = clientInfo;
         this.catalog = catalog;
         this.schema = schema;
-        this.path = path;
+        this.path = ImmutableList.copyOf(requireNonNull(path, "path is null"));
         this.locale = locale;
         this.timeZone = requireNonNull(timeZone, "timeZone is null");
         this.transactionId = transactionId;
@@ -108,6 +120,7 @@ public class ClientSession
         this.extraCredentials = ImmutableMap.copyOf(requireNonNull(extraCredentials, "extraCredentials is null"));
         this.clientRequestTimeout = clientRequestTimeout;
         this.compressionDisabled = compressionDisabled;
+        this.encoding = requireNonNull(encoding, "encoding is null");
 
         for (String clientTag : clientTags) {
             checkArgument(!clientTag.contains(","), "client tag cannot contain ','");
@@ -143,14 +156,19 @@ public class ClientSession
         return server;
     }
 
-    public String getPrincipal()
-    {
-        return principal;
-    }
-
     public Optional<String> getUser()
     {
         return user;
+    }
+
+    public Optional<String> getSessionUser()
+    {
+        return sessionUser;
+    }
+
+    public Optional<String> getAuthorizationUser()
+    {
+        return authorizationUser;
     }
 
     public String getSource()
@@ -173,17 +191,17 @@ public class ClientSession
         return clientInfo;
     }
 
-    public String getCatalog()
+    public Optional<String> getCatalog()
     {
         return catalog;
     }
 
-    public String getSchema()
+    public Optional<String> getSchema()
     {
         return schema;
     }
 
-    public String getPath()
+    public List<String> getPath()
     {
         return path;
     }
@@ -246,13 +264,19 @@ public class ClientSession
         return compressionDisabled;
     }
 
+    public Optional<String> getEncoding()
+    {
+        return encoding;
+    }
+
     @Override
     public String toString()
     {
         return toStringHelper(this)
                 .add("server", server)
-                .add("principal", principal)
                 .add("user", user)
+                .add("sessionUser", sessionUser)
+                .add("authorizationUser", authorizationUser)
                 .add("clientTags", clientTags)
                 .add("clientInfo", clientInfo)
                 .add("catalog", catalog)
@@ -263,6 +287,11 @@ public class ClientSession
                 .add("locale", locale)
                 .add("properties", properties)
                 .add("transactionId", transactionId)
+                .add("source", source)
+                .add("resourceEstimates", resourceEstimates)
+                .add("clientRequestTimeout", clientRequestTimeout)
+                .add("compressionDisabled", compressionDisabled)
+                .add("encoding", encoding)
                 .omitNullValues()
                 .toString();
     }
@@ -270,38 +299,43 @@ public class ClientSession
     public static final class Builder
     {
         private URI server;
-        private String principal;
-        private Optional<String> user;
+        private Optional<String> user = Optional.empty();
+        private Optional<String> sessionUser = Optional.empty();
+        private Optional<String> authorizationUser = Optional.empty();
         private String source;
-        private Optional<String> traceToken;
-        private Set<String> clientTags;
+        private Optional<String> traceToken = Optional.empty();
+        private Set<String> clientTags = ImmutableSet.of();
         private String clientInfo;
         private String catalog;
         private String schema;
-        private String path;
+        private List<String> path = ImmutableList.of();
         private ZoneId timeZone;
         private Locale locale;
-        private Map<String, String> resourceEstimates;
-        private Map<String, String> properties;
-        private Map<String, String> preparedStatements;
-        private Map<String, ClientSelectedRole> roles;
-        private Map<String, String> credentials;
+        private Map<String, String> resourceEstimates = ImmutableMap.of();
+        private Map<String, String> properties = ImmutableMap.of();
+        private Map<String, String> preparedStatements = ImmutableMap.of();
+        private Map<String, ClientSelectedRole> roles = ImmutableMap.of();
+        private Map<String, String> credentials = ImmutableMap.of();
         private String transactionId;
         private Duration clientRequestTimeout;
         private boolean compressionDisabled;
+        private Optional<String> encoding = Optional.empty();
+
+        private Builder() {}
 
         private Builder(ClientSession clientSession)
         {
             requireNonNull(clientSession, "clientSession is null");
             server = clientSession.getServer();
-            principal = clientSession.getPrincipal();
             user = clientSession.getUser();
+            sessionUser = clientSession.getSessionUser();
+            authorizationUser = clientSession.getAuthorizationUser();
             source = clientSession.getSource();
             traceToken = clientSession.getTraceToken();
             clientTags = clientSession.getClientTags();
             clientInfo = clientSession.getClientInfo();
-            catalog = clientSession.getCatalog();
-            schema = clientSession.getSchema();
+            catalog = clientSession.getCatalog().orElse(null);
+            schema = clientSession.getSchema().orElse(null);
             path = clientSession.getPath();
             timeZone = clientSession.getTimeZone();
             locale = clientSession.getLocale();
@@ -313,65 +347,138 @@ public class ClientSession
             transactionId = clientSession.getTransactionId();
             clientRequestTimeout = clientSession.getClientRequestTimeout();
             compressionDisabled = clientSession.isCompressionDisabled();
+            encoding = clientSession.getEncoding();
         }
 
-        public Builder withCatalog(String catalog)
+        public Builder server(URI server)
         {
-            this.catalog = requireNonNull(catalog, "catalog is null");
+            this.server = server;
             return this;
         }
 
-        public Builder withSchema(String schema)
+        public Builder user(Optional<String> user)
         {
-            this.schema = requireNonNull(schema, "schema is null");
+            this.user = user;
             return this;
         }
 
-        public Builder withPath(String path)
+        public Builder sessionUser(Optional<String> sessionUser)
         {
-            this.path = requireNonNull(path, "path is null");
+            this.sessionUser = sessionUser;
             return this;
         }
 
-        public Builder withProperties(Map<String, String> properties)
+        public Builder authorizationUser(Optional<String> authorizationUser)
         {
-            this.properties = requireNonNull(properties, "properties is null");
+            this.authorizationUser = authorizationUser;
             return this;
         }
 
-        public Builder withRoles(Map<String, ClientSelectedRole> roles)
+        public Builder source(String source)
+        {
+            this.source = source;
+            return this;
+        }
+
+        public Builder traceToken(Optional<String> traceToken)
+        {
+            this.traceToken = traceToken;
+            return this;
+        }
+
+        public Builder clientTags(Set<String> clientTags)
+        {
+            this.clientTags = clientTags;
+            return this;
+        }
+
+        public Builder clientInfo(String clientInfo)
+        {
+            this.clientInfo = clientInfo;
+            return this;
+        }
+
+        public Builder catalog(String catalog)
+        {
+            this.catalog = catalog;
+            return this;
+        }
+
+        public Builder schema(String schema)
+        {
+            this.schema = schema;
+            return this;
+        }
+
+        public Builder path(List<String> path)
+        {
+            this.path = path;
+            return this;
+        }
+
+        public Builder timeZone(ZoneId timeZone)
+        {
+            this.timeZone = timeZone;
+            return this;
+        }
+
+        public Builder locale(Locale locale)
+        {
+            this.locale = locale;
+            return this;
+        }
+
+        public Builder resourceEstimates(Map<String, String> resourceEstimates)
+        {
+            this.resourceEstimates = resourceEstimates;
+            return this;
+        }
+
+        public Builder properties(Map<String, String> properties)
+        {
+            this.properties = properties;
+            return this;
+        }
+
+        public Builder roles(Map<String, ClientSelectedRole> roles)
         {
             this.roles = roles;
             return this;
         }
 
-        public Builder withCredentials(Map<String, String> credentials)
+        public Builder credentials(Map<String, String> credentials)
         {
-            this.credentials = requireNonNull(credentials, "credentials is null");
+            this.credentials = credentials;
             return this;
         }
 
-        public Builder withPreparedStatements(Map<String, String> preparedStatements)
+        public Builder preparedStatements(Map<String, String> preparedStatements)
         {
-            this.preparedStatements = requireNonNull(preparedStatements, "preparedStatements is null");
+            this.preparedStatements = preparedStatements;
             return this;
         }
 
-        public Builder withTransactionId(String transactionId)
+        public Builder transactionId(String transactionId)
         {
-            this.transactionId = requireNonNull(transactionId, "transactionId is null");
+            this.transactionId = transactionId;
             return this;
         }
 
-        public Builder withoutTransactionId()
+        public Builder clientRequestTimeout(Duration clientRequestTimeout)
         {
-            this.transactionId = null;
+            this.clientRequestTimeout = clientRequestTimeout;
             return this;
         }
 
-        public Builder withCompressionDisabled(boolean compressionDisabled)
+        public Builder compressionDisabled(boolean compressionDisabled)
         {
             this.compressionDisabled = compressionDisabled;
+            return this;
+        }
+
+        public Builder encoding(Optional<String> encoding)
+        {
+            this.encoding = encoding;
             return this;
         }
 
@@ -379,14 +486,15 @@ public class ClientSession
         {
             return new ClientSession(
                     server,
-                    principal,
                     user,
+                    sessionUser,
+                    authorizationUser,
                     source,
                     traceToken,
                     clientTags,
                     clientInfo,
-                    catalog,
-                    schema,
+                    Optional.ofNullable(catalog),
+                    Optional.ofNullable(schema),
                     path,
                     timeZone,
                     locale,
@@ -397,7 +505,8 @@ public class ClientSession
                     credentials,
                     transactionId,
                     clientRequestTimeout,
-                    compressionDisabled);
+                    compressionDisabled,
+                    encoding);
         }
     }
 }

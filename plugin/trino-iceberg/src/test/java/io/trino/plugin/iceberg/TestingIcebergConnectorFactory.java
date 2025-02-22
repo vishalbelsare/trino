@@ -13,29 +13,47 @@
  */
 package io.trino.plugin.iceberg;
 
-import io.trino.plugin.hive.metastore.HiveMetastore;
+import com.google.common.collect.ImmutableMap;
+import com.google.inject.Module;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.filesystem.local.LocalFileSystemFactory;
+import io.trino.plugin.hive.metastore.file.FileHiveMetastoreConfig;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
-import io.trino.spi.connector.ConnectorHandleResolver;
 
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
 
-import static com.google.inject.util.Modules.EMPTY_MODULE;
-import static io.trino.plugin.iceberg.InternalIcebergConnectorFactory.createConnector;
+import static com.google.inject.multibindings.MapBinder.newMapBinder;
+import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.trino.plugin.iceberg.IcebergConnectorFactory.createConnector;
 import static java.util.Objects.requireNonNull;
 
 public class TestingIcebergConnectorFactory
         implements ConnectorFactory
 {
-    private final Optional<HiveMetastore> metastore;
-    private final Optional<FileIoProvider> fileIoProvider;
+    private final Optional<Module> icebergCatalogModule;
+    private final Module module;
 
-    public TestingIcebergConnectorFactory(Optional<HiveMetastore> metastore, Optional<FileIoProvider> fileIoProvider)
+    public TestingIcebergConnectorFactory(Path localFileSystemRootPath)
     {
-        this.metastore = requireNonNull(metastore, "metastore is null");
-        this.fileIoProvider = requireNonNull(fileIoProvider, "fileIoProvider is null");
+        this(localFileSystemRootPath, Optional.empty());
+    }
+
+    @Deprecated
+    public TestingIcebergConnectorFactory(
+            Path localFileSystemRootPath,
+            Optional<Module> icebergCatalogModule)
+    {
+        boolean ignored = localFileSystemRootPath.toFile().mkdirs();
+        this.icebergCatalogModule = requireNonNull(icebergCatalogModule, "icebergCatalogModule is null");
+        this.module = binder -> {
+            newMapBinder(binder, String.class, TrinoFileSystemFactory.class)
+                    .addBinding("local").toInstance(new LocalFileSystemFactory(localFileSystemRootPath));
+            configBinder(binder).bindConfigDefaults(FileHiveMetastoreConfig.class, config -> config.setCatalogDirectory("local:///"));
+        };
     }
 
     @Override
@@ -45,14 +63,14 @@ public class TestingIcebergConnectorFactory
     }
 
     @Override
-    public ConnectorHandleResolver getHandleResolver()
-    {
-        return new IcebergHandleResolver();
-    }
-
-    @Override
     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
     {
-        return createConnector(catalogName, config, context, EMPTY_MODULE, metastore, fileIoProvider);
+        if (!config.containsKey("iceberg.catalog.type")) {
+            config = ImmutableMap.<String, String>builder()
+                    .putAll(config)
+                    .put("iceberg.catalog.type", "TESTING_FILE_METASTORE")
+                    .buildOrThrow();
+        }
+        return createConnector(catalogName, config, context, module, icebergCatalogModule);
     }
 }

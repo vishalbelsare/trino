@@ -15,13 +15,15 @@
 package io.trino.operator.aggregation.groupby;
 
 import io.trino.block.BlockAssertions;
-import io.trino.operator.aggregation.GroupedAccumulator;
+import io.trino.operator.aggregation.GroupedAggregator;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.type.Type;
 
 import java.util.function.BiConsumer;
 
 import static java.lang.String.format;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.offset;
 
 public class AggregationTestOutput
 {
@@ -32,29 +34,30 @@ public class AggregationTestOutput
         this.expectedValue = expectedValue;
     }
 
-    public void validateAccumulator(GroupedAccumulator groupedAccumulator, long groupId)
+    public void validateAggregator(Type finalType, GroupedAggregator groupedAggregator, long groupId)
     {
-        createEqualAssertion(expectedValue, groupId).accept(getGroupValue(groupedAccumulator, (int) groupId), expectedValue);
+        createEqualAssertion(expectedValue, groupId).accept(getGroupValue(finalType, groupedAggregator, (int) groupId), expectedValue);
     }
 
     private static BiConsumer<Object, Object> createEqualAssertion(Object expectedValue, long groupId)
-
     {
-        BiConsumer<Object, Object> equalAssertion = (actual, expected) -> assertEquals(actual, expected, format("failure on group %s", groupId));
+        BiConsumer<Object, Object> equalAssertion = (actual, expected) -> assertThat(actual)
+                .describedAs(format("failure on group %s", groupId))
+                .isEqualTo(expected);
 
         if (expectedValue instanceof Double && !expectedValue.equals(Double.NaN)) {
-            equalAssertion = (actual, expected) -> assertEquals((double) actual, (double) expected, 1e-10);
+            equalAssertion = (actual, expected) -> assertThat((double) actual).isCloseTo((double) expected, offset(1e-10));
         }
         if (expectedValue instanceof Float && !expectedValue.equals(Float.NaN)) {
-            equalAssertion = (actual, expected) -> assertEquals((float) actual, (float) expected, 1e-10f);
+            equalAssertion = (actual, expected) -> assertThat((float) actual).isCloseTo((float) expected, offset(1e-10f));
         }
         return equalAssertion;
     }
 
-    private static Object getGroupValue(GroupedAccumulator groupedAggregation, int groupId)
+    private static Object getGroupValue(Type finalType, GroupedAggregator groupedAggregator, int groupId)
     {
-        BlockBuilder out = groupedAggregation.getFinalType().createBlockBuilder(null, 1);
-        groupedAggregation.evaluateFinal(groupId, out);
-        return BlockAssertions.getOnlyValue(groupedAggregation.getFinalType(), out.build());
+        BlockBuilder out = finalType.createBlockBuilder(null, 1);
+        groupedAggregator.evaluate(groupId, out);
+        return BlockAssertions.getOnlyValue(finalType, out.build());
     }
 }

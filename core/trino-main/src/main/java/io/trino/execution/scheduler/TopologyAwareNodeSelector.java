@@ -14,7 +14,7 @@
 package io.trino.execution.scheduler;
 
 import com.google.common.base.Suppliers;
-import com.google.common.collect.HashMultimap;
+import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.log.Logger;
@@ -27,8 +27,7 @@ import io.trino.metadata.Split;
 import io.trino.spi.HostAddress;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.util.HashSet;
 import java.util.Iterator;
@@ -120,7 +119,7 @@ public class TopologyAwareNodeSelector
     public SplitPlacementResult computeAssignments(Set<Split> splits, List<RemoteTask> existingTasks)
     {
         NodeMap nodeMap = this.nodeMap.get().get();
-        Multimap<InternalNode, Split> assignment = HashMultimap.create();
+        Multimap<InternalNode, Split> assignment = LinkedHashMultimap.create();
         NodeAssignmentStats assignmentStats = new NodeAssignmentStats(nodeTaskMap, nodeMap, existingTasks);
 
         int[] topologicCounters = new int[topologicalSplitCounters.size()];
@@ -172,7 +171,7 @@ public class TopologyAwareNodeSelector
                         continue;
                     }
                     Set<InternalNode> nodes = nodeMap.getWorkersByNetworkPath().get(location);
-                    chosenNode = bestNodeSplitCount(splitWeight, new ResettableRandomizedIterator<>(nodes), minCandidates, calculateMaxPendingSplitsWeightPerTask(i, depth), assignmentStats);
+                    chosenNode = bestNodeSplitCount(splitWeight, new ResettableRandomizedIterator<>(nodes), minCandidates, calculateMinPendingSplitsWeightPerTask(i, depth), assignmentStats);
                     if (chosenNode != null) {
                         chosenDepth = i;
                         break;
@@ -196,12 +195,12 @@ public class TopologyAwareNodeSelector
         }
 
         ListenableFuture<Void> blocked;
-        long maxPendingForWildcardNetworkAffinity = calculateMaxPendingSplitsWeightPerTask(0, topologicalSplitCounters.size() - 1);
+        long minPendingForWildcardNetworkAffinity = calculateMinPendingSplitsWeightPerTask(0, topologicalSplitCounters.size() - 1);
         if (splitWaitingForAnyNode) {
-            blocked = toWhenHasSplitQueueSpaceFuture(existingTasks, calculateLowWatermark(maxPendingForWildcardNetworkAffinity));
+            blocked = toWhenHasSplitQueueSpaceFuture(existingTasks, calculateLowWatermark(minPendingForWildcardNetworkAffinity));
         }
         else {
-            blocked = toWhenHasSplitQueueSpaceFuture(blockedExactNodes, existingTasks, calculateLowWatermark(maxPendingForWildcardNetworkAffinity));
+            blocked = toWhenHasSplitQueueSpaceFuture(blockedExactNodes, existingTasks, calculateLowWatermark(minPendingForWildcardNetworkAffinity));
         }
         return new SplitPlacementResult(blocked, assignment);
     }
@@ -211,7 +210,7 @@ public class TopologyAwareNodeSelector
      * splitAffinity. A split with zero affinity can only fill half the queue, whereas one that matches
      * exactly can fill the entire queue.
      */
-    private long calculateMaxPendingSplitsWeightPerTask(int splitAffinity, int totalDepth)
+    private long calculateMinPendingSplitsWeightPerTask(int splitAffinity, int totalDepth)
     {
         if (totalDepth == 0) {
             return maxPendingSplitsWeightPerTask;
@@ -229,7 +228,7 @@ public class TopologyAwareNodeSelector
     }
 
     @Nullable
-    private InternalNode bestNodeSplitCount(SplitWeight splitWeight, Iterator<InternalNode> candidates, int minCandidatesWhenFull, long maxPendingSplitsWeightPerTask, NodeAssignmentStats assignmentStats)
+    private InternalNode bestNodeSplitCount(SplitWeight splitWeight, Iterator<InternalNode> candidates, int minCandidatesWhenFull, long minPendingSplitsWeightPerTask, NodeAssignmentStats assignmentStats)
     {
         InternalNode bestQueueNotFull = null;
         long minWeight = Long.MAX_VALUE;
@@ -246,7 +245,7 @@ public class TopologyAwareNodeSelector
             }
             fullCandidatesConsidered++;
             long taskQueuedWeight = assignmentStats.getQueuedSplitsWeightForStage(node);
-            if (taskQueuedWeight < minWeight && canAssignSplitBasedOnWeight(taskQueuedWeight, maxPendingSplitsWeightPerTask, splitWeight)) {
+            if (taskQueuedWeight < minWeight && canAssignSplitBasedOnWeight(taskQueuedWeight, minPendingSplitsWeightPerTask, splitWeight)) {
                 minWeight = taskQueuedWeight;
                 bestQueueNotFull = node;
             }

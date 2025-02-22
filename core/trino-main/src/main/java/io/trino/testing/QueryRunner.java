@@ -13,16 +13,22 @@
  */
 package io.trino.testing;
 
+import com.google.common.collect.ImmutableMap;
+import io.opentelemetry.sdk.trace.data.SpanData;
 import io.trino.Session;
 import io.trino.cost.StatsCalculator;
-import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
+import io.trino.execution.FailureInjector.InjectedFailureType;
+import io.trino.metadata.FunctionBundle;
 import io.trino.metadata.QualifiedObjectName;
-import io.trino.metadata.SqlFunction;
+import io.trino.metadata.SessionPropertyManager;
+import io.trino.server.testing.TestingTrinoServer;
+import io.trino.spi.ErrorType;
 import io.trino.spi.Plugin;
+import io.trino.spi.QueryId;
 import io.trino.split.PageSourceManager;
 import io.trino.split.SplitManager;
-import io.trino.sql.analyzer.AnalyzerFactory;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.analyzer.QueryExplainer;
 import io.trino.sql.planner.NodePartitioningManager;
 import io.trino.sql.planner.Plan;
 import io.trino.transaction.TransactionManager;
@@ -31,7 +37,11 @@ import org.intellij.lang.annotations.Language;
 import java.io.Closeable;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.locks.Lock;
+import java.util.function.Function;
+
+import static io.trino.testing.TransactionBuilder.transaction;
 
 public interface QueryRunner
         extends Closeable
@@ -39,15 +49,19 @@ public interface QueryRunner
     @Override
     void close();
 
+    TestingTrinoServer getCoordinator();
+
     int getNodeCount();
 
     Session getDefaultSession();
 
     TransactionManager getTransactionManager();
 
-    Metadata getMetadata();
+    PlannerContext getPlannerContext();
 
-    AnalyzerFactory getAnalyzerFactory();
+    QueryExplainer getQueryExplainer();
+
+    SessionPropertyManager getSessionPropertyManager();
 
     SplitManager getSplitManager();
 
@@ -57,23 +71,34 @@ public interface QueryRunner
 
     StatsCalculator getStatsCalculator();
 
-    TestingGroupProvider getGroupProvider();
+    TestingGroupProviderManager getGroupProvider();
 
     TestingAccessControlManager getAccessControl();
 
-    MaterializedResult execute(@Language("SQL") String sql);
+    List<SpanData> getSpans();
+
+    default MaterializedResult execute(@Language("SQL") String sql)
+    {
+        return execute(getDefaultSession(), sql);
+    }
 
     MaterializedResult execute(Session session, @Language("SQL") String sql);
 
-    default MaterializedResultWithPlan executeWithPlan(Session session, @Language("SQL") String sql, WarningCollector warningCollector)
+    MaterializedResultWithPlan executeWithPlan(Session session, @Language("SQL") String sql);
+
+    default <T> T inTransaction(Function<Session, T> transactionSessionConsumer)
     {
-        throw new UnsupportedOperationException();
+        return inTransaction(getDefaultSession(), transactionSessionConsumer);
     }
 
-    default Plan createPlan(Session session, @Language("SQL") String sql, WarningCollector warningCollector)
+    default <T> T inTransaction(Session session, Function<Session, T> transactionSessionConsumer)
     {
-        throw new UnsupportedOperationException();
+        return transaction(getTransactionManager(), getPlannerContext().getMetadata(), getAccessControl())
+                .singleStatement()
+                .execute(session, transactionSessionConsumer);
     }
+
+    Plan createPlan(Session session, @Language("SQL") String sql);
 
     List<QualifiedObjectName> listTables(Session session, String catalog, String schema);
 
@@ -81,31 +106,28 @@ public interface QueryRunner
 
     void installPlugin(Plugin plugin);
 
-    void addFunctions(List<? extends SqlFunction> functions);
+    void addFunctions(FunctionBundle functionBundle);
+
+    default void createCatalog(String catalogName, String connectorName)
+    {
+        createCatalog(catalogName, connectorName, ImmutableMap.of());
+    }
 
     void createCatalog(String catalogName, String connectorName, Map<String, String> properties);
 
     Lock getExclusiveLock();
 
-    class MaterializedResultWithPlan
-    {
-        private final MaterializedResult materializedResult;
-        private final Plan queryPlan;
+    void injectTaskFailure(
+            String traceToken,
+            int stageId,
+            int partitionId,
+            int attemptId,
+            InjectedFailureType injectionType,
+            Optional<ErrorType> errorType);
 
-        public MaterializedResultWithPlan(MaterializedResult materializedResult, Plan queryPlan)
-        {
-            this.materializedResult = materializedResult;
-            this.queryPlan = queryPlan;
-        }
+    void loadExchangeManager(String name, Map<String, String> properties);
 
-        public MaterializedResult getMaterializedResult()
-        {
-            return materializedResult;
-        }
+    void loadSpoolingManager(String name, Map<String, String> properties);
 
-        public Plan getQueryPlan()
-        {
-            return queryPlan;
-        }
-    }
+    record MaterializedResultWithPlan(QueryId queryId, Optional<Plan> queryPlan, MaterializedResult result) {}
 }

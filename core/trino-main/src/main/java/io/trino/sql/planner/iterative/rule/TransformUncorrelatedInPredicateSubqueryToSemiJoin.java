@@ -19,8 +19,6 @@ import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.InPredicate;
 
 import java.util.Optional;
 
@@ -30,8 +28,8 @@ import static io.trino.sql.planner.plan.Patterns.Apply.correlation;
 import static io.trino.sql.planner.plan.Patterns.applyNode;
 
 /**
- * This optimizers looks for InPredicate expressions in ApplyNodes and replaces the nodes with SemiJoin nodes.
- * <p/>
+ * This optimizer looks for InPredicate expressions in ApplyNodes and replaces the nodes with SemiJoin nodes.
+ * <p>
  * Plan before optimizer:
  * <pre>
  * Filter(a IN b):
@@ -40,14 +38,14 @@ import static io.trino.sql.planner.plan.Patterns.applyNode;
  *     - input: some plan A producing symbol a
  *     - subquery: some plan B producing symbol b
  * </pre>
- * <p/>
+ * <p>
  * Plan after optimizer:
  * <pre>
  * Filter(semijoinresult):
  *   SemiJoin
  *     - source: plan A
- *     - filteringSource: symbol a
- *     - sourceJoinSymbol: plan B
+ *     - filteringSource: plan B
+ *     - sourceJoinSymbol: symbol a
  *     - filteringSourceJoinSymbol: symbol b
  *     - semiJoinOutput: semijoinresult
  * </pre>
@@ -71,19 +69,18 @@ public class TransformUncorrelatedInPredicateSubqueryToSemiJoin
             return Result.empty();
         }
 
-        Expression expression = getOnlyElement(applyNode.getSubqueryAssignments().getExpressions());
-        if (!(expression instanceof InPredicate)) {
+        ApplyNode.SetExpression expression = getOnlyElement(applyNode.getSubqueryAssignments().values());
+        if (!(expression instanceof ApplyNode.In inPredicate)) {
             return Result.empty();
         }
 
-        InPredicate inPredicate = (InPredicate) expression;
-        Symbol semiJoinSymbol = getOnlyElement(applyNode.getSubqueryAssignments().getSymbols());
+        Symbol semiJoinSymbol = getOnlyElement(applyNode.getSubqueryAssignments().keySet());
 
         SemiJoinNode replacement = new SemiJoinNode(context.getIdAllocator().getNextId(),
                 applyNode.getInput(),
                 applyNode.getSubquery(),
-                Symbol.from(inPredicate.getValue()),
-                Symbol.from(inPredicate.getValueList()),
+                inPredicate.value(),
+                inPredicate.reference(),
                 semiJoinSymbol,
                 Optional.empty(),
                 Optional.empty(),

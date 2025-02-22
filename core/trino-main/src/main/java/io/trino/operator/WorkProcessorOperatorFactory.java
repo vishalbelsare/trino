@@ -13,7 +13,6 @@
  */
 package io.trino.operator;
 
-import io.trino.execution.Lifespan;
 import io.trino.spi.Page;
 import io.trino.sql.planner.plan.PlanNodeId;
 
@@ -29,10 +28,7 @@ public interface WorkProcessorOperatorFactory
             ProcessorContext processorContext,
             WorkProcessor<Page> sourcePages);
 
-    default void lifespanFinished(Lifespan lifespan)
-    {
-        //do nothing
-    }
+    WorkProcessorOperatorFactory duplicate();
 
     default void close()
     {

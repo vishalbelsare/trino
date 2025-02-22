@@ -15,8 +15,9 @@ package io.trino.sql.planner.iterative.rule;
 
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.BoundSignature;
 import io.trino.metadata.Metadata;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.WindowNode;
@@ -24,11 +25,14 @@ import io.trino.sql.planner.plan.WindowNode;
 import java.util.Optional;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.sql.planner.plan.Patterns.window;
 
 public class ReplaceWindowWithRowNumber
         implements Rule<WindowNode>
 {
+    private static final CatalogSchemaFunctionName ROW_NUMBER_NAME = builtinFunctionName("row_number");
+
     private final Pattern<WindowNode> pattern;
 
     public ReplaceWindowWithRowNumber(Metadata metadata)
@@ -38,8 +42,8 @@ public class ReplaceWindowWithRowNumber
                     if (window.getWindowFunctions().size() != 1) {
                         return false;
                     }
-                    BoundSignature signature = getOnlyElement(window.getWindowFunctions().values()).getResolvedFunction().getSignature();
-                    return signature.getArgumentTypes().isEmpty() && signature.getName().equals("row_number");
+                    BoundSignature signature = getOnlyElement(window.getWindowFunctions().values()).getResolvedFunction().signature();
+                    return signature.getArgumentTypes().isEmpty() && signature.getName().equals(ROW_NUMBER_NAME);
                 })
                 .matching(window -> window.getOrderingScheme().isEmpty());
     }

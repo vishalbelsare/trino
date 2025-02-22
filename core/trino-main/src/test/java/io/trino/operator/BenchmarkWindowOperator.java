@@ -23,6 +23,7 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
 import io.trino.testing.TestingTaskContext;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -34,7 +35,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.RunnerException;
-import org.testng.annotations.Test;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -55,9 +55,9 @@ import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.openjdk.jmh.annotations.Mode.AverageTime;
 import static org.openjdk.jmh.annotations.Scope.Thread;
-import static org.testng.Assert.assertEquals;
 
 @State(Thread)
 @OutputTimeUnit(MILLISECONDS)
@@ -79,7 +79,7 @@ public class BenchmarkWindowOperator
         public int rowsPerPartition;
 
         @Param({"0", "1", "2", "3"})
-        public int numberOfPregroupedColumns;
+        public int numberOfPreGroupedColumns;
 
         @Param({"10", "50", "100"})
         public int partitionsPerGroup;
@@ -96,7 +96,7 @@ public class BenchmarkWindowOperator
             executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
             scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
 
-            createOperatorFactoryAndGenerateTestData(numberOfPregroupedColumns);
+            createOperatorFactoryAndGenerateTestData(numberOfPreGroupedColumns);
         }
 
         @TearDown
@@ -175,8 +175,8 @@ public class BenchmarkWindowOperator
             RowPagesBuilder rowPagesBuilder = RowPagesBuilder.rowPagesBuilder(false, ImmutableList.of(0), typesArray);
 
             for (int i = 0; i < TOTAL_PAGES; i++) {
-                BlockBuilder firstColumnBlockBuilder = BIGINT.createBlockBuilder(null, ROWS_PER_PAGE);
-                BlockBuilder secondColumnBlockBuilder = BIGINT.createBlockBuilder(null, ROWS_PER_PAGE);
+                BlockBuilder firstColumnBlockBuilder = BIGINT.createFixedSizeBlockBuilder(ROWS_PER_PAGE);
+                BlockBuilder secondColumnBlockBuilder = BIGINT.createFixedSizeBlockBuilder(ROWS_PER_PAGE);
                 int currentNumberOfRowsInPartition = 0;
                 int numberOfPartitionsInCurrentGroup = 0;
                 int currentGroupIdentifier = groupIdentifier++;
@@ -193,8 +193,8 @@ public class BenchmarkWindowOperator
                         currentGroupIdentifier = groupIdentifier++;
                     }
 
-                    firstColumnBlockBuilder.writeLong(currentGroupIdentifier);
-                    secondColumnBlockBuilder.writeLong(currentPartitionIdentifier);
+                    BIGINT.writeLong(firstColumnBlockBuilder, currentGroupIdentifier);
+                    BIGINT.writeLong(secondColumnBlockBuilder, currentPartitionIdentifier);
                     ++currentNumberOfRowsInPartition;
                 }
 
@@ -311,7 +311,7 @@ public class BenchmarkWindowOperator
         Context context = new Context();
 
         context.rowsPerPartition = numberOfRowsPerPartition;
-        context.numberOfPregroupedColumns = numberOfPreGroupedColumns;
+        context.numberOfPreGroupedColumns = numberOfPreGroupedColumns;
 
         if (useSinglePartition) {
             context.partitionsPerGroup = 1;
@@ -320,9 +320,9 @@ public class BenchmarkWindowOperator
 
         context.setup();
 
-        assertEquals(TOTAL_PAGES, context.getPages().size());
+        assertThat(TOTAL_PAGES).isEqualTo(context.getPages().size());
         for (int i = 0; i < TOTAL_PAGES; i++) {
-            assertEquals(ROWS_PER_PAGE, context.getPages().get(i).getPositionCount());
+            assertThat(ROWS_PER_PAGE).isEqualTo(context.getPages().get(i).getPositionCount());
         }
 
         benchmark(context);

@@ -14,10 +14,10 @@
 package io.trino.array;
 
 import io.airlift.slice.SizeOf;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.Arrays;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static io.trino.array.BigArrays.INITIAL_SEGMENTS;
 import static io.trino.array.BigArrays.SEGMENT_SIZE;
@@ -28,7 +28,7 @@ import static io.trino.array.BigArrays.segment;
 // Copyright (C) 2010-2013 Sebastiano Vigna
 public final class ObjectBigArray<T>
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(ObjectBigArray.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(ObjectBigArray.class);
     private static final long SIZE_OF_SEGMENT = sizeOfObjectArray(SEGMENT_SIZE);
 
     private final Object initialValue;
@@ -84,11 +84,28 @@ public final class ObjectBigArray<T>
      * Sets the element of this big array at specified index.
      *
      * @param index a position in this big array.
-     * @return true if the previous value was null
      */
     public void set(long index, T value)
     {
         array[segment(index)][offset(index)] = value;
+    }
+
+    /**
+     * Sets the element of this big array at the specified index, returning the previous element at that index
+     *
+     * @param index a position in this big array
+     * @param value the new value to store at the specified position
+     * @return the previous element at the specified position
+     */
+    @SuppressWarnings("unchecked")
+    public T getAndSet(long index, T value)
+    {
+        Object[] segment = array[segment(index)];
+
+        int offset = offset(index);
+        T oldValue = (T) segment[offset];
+        segment[offset] = value;
+        return oldValue;
     }
 
     /**
@@ -99,12 +116,7 @@ public final class ObjectBigArray<T>
      */
     public boolean replace(long index, T value)
     {
-        Object[] segment = array[segment(index)];
-
-        boolean existed = segment[offset(index)] != null;
-        segment[offset(index)] = value;
-
-        return existed;
+        return getAndSet(index, value) != null;
     }
 
     /**

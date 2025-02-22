@@ -16,39 +16,51 @@ package io.trino.plugin.kudu;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
+import io.trino.spi.connector.SchemaTableName;
 
 import java.util.List;
+import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 public class KuduSplit
         implements ConnectorSplit
 {
-    private final KuduTableHandle tableHandle;
+    private static final int INSTANCE_SIZE = instanceSize(KuduSplit.class);
+
+    private final SchemaTableName schemaTableName;
     private final int primaryKeyColumnCount;
     private final byte[] serializedScanToken;
     private final int bucketNumber;
+    private final List<HostAddress> addresses;
 
     @JsonCreator
-    public KuduSplit(@JsonProperty("tableHandle") KuduTableHandle tableHandle,
+    public KuduSplit(
+            @JsonProperty("schemaTableName") SchemaTableName schemaTableName,
             @JsonProperty("primaryKeyColumnCount") int primaryKeyColumnCount,
             @JsonProperty("serializedScanToken") byte[] serializedScanToken,
-            @JsonProperty("bucketNumber") int bucketNumber)
+            @JsonProperty("bucketNumber") int bucketNumber,
+            @JsonProperty("addresses") List<HostAddress> addresses)
     {
-        this.tableHandle = requireNonNull(tableHandle, "tableHandle is null");
+        this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
         this.primaryKeyColumnCount = primaryKeyColumnCount;
         this.serializedScanToken = requireNonNull(serializedScanToken, "serializedScanToken is null");
         checkArgument(bucketNumber >= 0, "bucketNumber is negative");
         this.bucketNumber = bucketNumber;
+        this.addresses = ImmutableList.copyOf(requireNonNull(addresses, "addresses is null"));
     }
 
     @JsonProperty
-    public KuduTableHandle getTableHandle()
+    public SchemaTableName getSchemaTableName()
     {
-        return tableHandle;
+        return schemaTableName;
     }
 
     @JsonProperty
@@ -69,21 +81,24 @@ public class KuduSplit
         return bucketNumber;
     }
 
-    @Override
-    public boolean isRemotelyAccessible()
-    {
-        return true;
-    }
-
+    @JsonProperty
     @Override
     public List<HostAddress> getAddresses()
     {
-        return ImmutableList.of();
+        return addresses;
     }
 
     @Override
-    public Object getInfo()
+    public Map<String, String> getSplitInfo()
     {
-        return this;
+        return ImmutableMap.of("bucketNumber", String.valueOf(bucketNumber), "addresses", addresses.stream().map(HostAddress::toString).collect(joining(",")));
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + schemaTableName.getRetainedSizeInBytes()
+                + sizeOf(serializedScanToken);
     }
 }

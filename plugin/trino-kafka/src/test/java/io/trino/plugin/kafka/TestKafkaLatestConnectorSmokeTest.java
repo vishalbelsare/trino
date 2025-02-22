@@ -17,7 +17,8 @@ import io.trino.testing.BaseConnectorSmokeTest;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.kafka.TestingKafka;
-import org.testng.SkipException;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -28,7 +29,8 @@ public class TestKafkaLatestConnectorSmokeTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        TestingKafka testingKafka = closeAfterClass(TestingKafka.create("6.0.1"));
+        TestingKafka testingKafka = closeAfterClass(TestingKafka.create("7.1.1"));
+        testingKafka.start();
         return KafkaQueryRunner.builder(testingKafka)
                 .setTables(REQUIRED_TPCH_TABLES)
                 .build();
@@ -37,27 +39,26 @@ public class TestKafkaLatestConnectorSmokeTest
     @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
-        switch (connectorBehavior) {
-            case SUPPORTS_CREATE_SCHEMA:
-                return false;
-
-            case SUPPORTS_CREATE_TABLE:
-                return false;
-
-            case SUPPORTS_RENAME_TABLE:
-                return false;
-
-            default:
-                return super.hasBehavior(connectorBehavior);
-        }
+        return switch (connectorBehavior) {
+            case SUPPORTS_CREATE_MATERIALIZED_VIEW,
+                 SUPPORTS_CREATE_SCHEMA,
+                 SUPPORTS_CREATE_TABLE,
+                 SUPPORTS_CREATE_VIEW,
+                 SUPPORTS_DELETE,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_RENAME_TABLE,
+                 SUPPORTS_UPDATE -> false;
+            default -> super.hasBehavior(connectorBehavior);
+        };
     }
 
     @Override
+    @Test
     public void testInsert()
     {
         assertThatThrownBy(super::testInsert)
                 .hasMessage("Cannot test INSERT without CREATE TABLE, the test needs to be implemented in a connector-specific way");
         // TODO implement the test for Kafka
-        throw new SkipException("TODO");
+        Assumptions.abort();
     }
 }

@@ -15,7 +15,6 @@ package io.trino.cost;
 
 import io.airlift.log.Logger;
 import io.trino.Session;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.iterative.GroupReference;
 import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.iterative.Memo;
@@ -40,22 +39,30 @@ public final class CachingStatsProvider
     private final Optional<Memo> memo;
     private final Lookup lookup;
     private final Session session;
-    private final TypeProvider types;
+    private final TableStatsProvider tableStatsProvider;
+    private final RuntimeInfoProvider runtimeInfoProvider;
 
     private final Map<PlanNode, PlanNodeStatsEstimate> cache = new IdentityHashMap<>();
 
-    public CachingStatsProvider(StatsCalculator statsCalculator, Session session, TypeProvider types)
+    public CachingStatsProvider(StatsCalculator statsCalculator, Session session, TableStatsProvider tableStatsProvider)
     {
-        this(statsCalculator, Optional.empty(), noLookup(), session, types);
+        this(statsCalculator, Optional.empty(), noLookup(), session, tableStatsProvider, RuntimeInfoProvider.noImplementation());
     }
 
-    public CachingStatsProvider(StatsCalculator statsCalculator, Optional<Memo> memo, Lookup lookup, Session session, TypeProvider types)
+    public CachingStatsProvider(
+            StatsCalculator statsCalculator,
+            Optional<Memo> memo,
+            Lookup lookup,
+            Session session,
+            TableStatsProvider tableStatsProvider,
+            RuntimeInfoProvider runtimeInfoProvider)
     {
         this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
         this.memo = requireNonNull(memo, "memo is null");
         this.lookup = requireNonNull(lookup, "lookup is null");
         this.session = requireNonNull(session, "session is null");
-        this.types = requireNonNull(types, "types is null");
+        this.tableStatsProvider = requireNonNull(tableStatsProvider, "tableStatsProvider is null");
+        this.runtimeInfoProvider = requireNonNull(runtimeInfoProvider, "runtimeInfoProvider is null");
     }
 
     @Override
@@ -68,8 +75,8 @@ public final class CachingStatsProvider
         requireNonNull(node, "node is null");
 
         try {
-            if (node instanceof GroupReference) {
-                return getGroupStats((GroupReference) node);
+            if (node instanceof GroupReference group) {
+                return getGroupStats(group);
             }
 
             PlanNodeStatsEstimate stats = cache.get(node);
@@ -77,13 +84,13 @@ public final class CachingStatsProvider
                 return stats;
             }
 
-            stats = statsCalculator.calculateStats(node, this, lookup, session, types);
+            stats = statsCalculator.calculateStats(node, new StatsCalculator.Context(this, lookup, session, tableStatsProvider, runtimeInfoProvider));
             verify(cache.put(node, stats) == null, "Stats already set");
             return stats;
         }
         catch (RuntimeException e) {
             if (isIgnoreStatsCalculatorFailures(session)) {
-                log.error(e, "Error occurred when computing stats for query %s", session.getQueryId());
+                log.warn(e, "Error occurred when computing stats for query %s", session.getQueryId());
                 return PlanNodeStatsEstimate.unknown();
             }
             throw e;
@@ -100,7 +107,7 @@ public final class CachingStatsProvider
             return stats.get();
         }
 
-        PlanNodeStatsEstimate groupStats = statsCalculator.calculateStats(memo.getNode(group), this, lookup, session, types);
+        PlanNodeStatsEstimate groupStats = getStats(memo.getNode(group));
         verify(memo.getStats(group).isEmpty(), "Group stats already set");
         memo.storeStats(group, groupStats);
         return groupStats;

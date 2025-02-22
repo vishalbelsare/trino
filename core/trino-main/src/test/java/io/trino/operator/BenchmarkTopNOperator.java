@@ -19,10 +19,12 @@ import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
+import io.trino.sql.gen.OrderingCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.TestingTaskContext;
 import io.trino.tpch.LineItem;
 import io.trino.tpch.LineItemGenerator;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Measurement;
@@ -34,7 +36,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.RunnerException;
-import org.testng.annotations.Test;
 
 import java.util.Iterator;
 import java.util.List;
@@ -42,6 +43,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.trino.SessionTestUtils.TEST_SESSION;
@@ -50,10 +52,9 @@ import static io.trino.spi.connector.SortOrder.ASC_NULLS_FIRST;
 import static io.trino.spi.connector.SortOrder.DESC_NULLS_LAST;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @State(Scope.Thread)
 @OutputTimeUnit(TimeUnit.SECONDS)
@@ -88,16 +89,22 @@ public class BenchmarkTopNOperator
             executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
             scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
 
-            List<Type> types = ImmutableList.of(DOUBLE, DOUBLE, VARCHAR, DOUBLE);
+            List<Type> types = ImmutableList.of(DOUBLE, DOUBLE, DATE, DOUBLE);
             pages = createInputPages(Integer.valueOf(positionsPerPage), types);
+            OrderingCompiler orderingCompiler = new OrderingCompiler(new TypeOperators());
+            List<Integer> sortChannels = ImmutableList.of(0, 2);
+            List<Type> sortTypes = sortChannels.stream()
+                    .map(types::get)
+                    .collect(toImmutableList());
             operatorFactory = TopNOperator.createOperatorFactory(
                     0,
                     new PlanNodeId("test"),
                     types,
                     Integer.valueOf(topN),
-                    ImmutableList.of(0, 2),
-                    ImmutableList.of(DESC_NULLS_LAST, ASC_NULLS_FIRST),
-                    new TypeOperators());
+                    orderingCompiler.compilePageWithPositionComparator(
+                            sortTypes,
+                            sortChannels,
+                            ImmutableList.of(DESC_NULLS_LAST, ASC_NULLS_FIRST)));
         }
 
         @TearDown
@@ -132,10 +139,10 @@ public class BenchmarkTopNOperator
                 pageBuilder.declarePosition();
 
                 LineItem lineItem = iterator.next();
-                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(EXTENDED_PRICE), lineItem.getExtendedPrice());
-                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(DISCOUNT), lineItem.getDiscount());
-                DATE.writeLong(pageBuilder.getBlockBuilder(SHIP_DATE), lineItem.getShipDate());
-                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(QUANTITY), lineItem.getQuantity());
+                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(EXTENDED_PRICE), lineItem.extendedPrice());
+                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(DISCOUNT), lineItem.discount());
+                DATE.writeLong(pageBuilder.getBlockBuilder(SHIP_DATE), lineItem.shipDate());
+                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(QUANTITY), lineItem.quantity());
 
                 if (pageBuilder.getPositionCount() == positionsPerPage) {
                     pages.add(pageBuilder.build());
@@ -189,7 +196,7 @@ public class BenchmarkTopNOperator
         context.setup();
 
         List<Page> outputPages = topN(context);
-        assertEquals(123, outputPages.stream().mapToInt(Page::getPositionCount).sum());
+        assertThat(123).isEqualTo(outputPages.stream().mapToInt(Page::getPositionCount).sum());
 
         context.cleanup();
     }

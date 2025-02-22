@@ -19,15 +19,24 @@ import io.airlift.slice.SliceInput;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
 import io.airlift.slice.XxHash64;
+import io.trino.execution.buffer.PageCodecMarker.MarkerSet;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockEncodingSerde;
 
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.util.Iterator;
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Verify.verify;
 import static io.trino.block.BlockSerdeUtil.readBlock;
 import static io.trino.block.BlockSerdeUtil.writeBlock;
+import static io.trino.execution.buffer.PageCodecMarker.COMPRESSED;
+import static io.trino.execution.buffer.PageCodecMarker.ENCRYPTED;
 import static java.util.Arrays.asList;
 import static java.util.Objects.requireNonNull;
 
@@ -35,10 +44,19 @@ public final class PagesSerdeUtil
 {
     private PagesSerdeUtil() {}
 
+    static final int SERIALIZED_PAGE_POSITION_COUNT_OFFSET = 0;
+    static final int SERIALIZED_PAGE_CODEC_MARKERS_OFFSET = SERIALIZED_PAGE_POSITION_COUNT_OFFSET + Integer.BYTES;
+    static final int SERIALIZED_PAGE_UNCOMPRESSED_SIZE_OFFSET = SERIALIZED_PAGE_CODEC_MARKERS_OFFSET + Byte.BYTES;
+    static final int SERIALIZED_PAGE_COMPRESSED_SIZE_OFFSET = SERIALIZED_PAGE_UNCOMPRESSED_SIZE_OFFSET + Integer.BYTES;
+    static final int SERIALIZED_PAGE_HEADER_SIZE = SERIALIZED_PAGE_COMPRESSED_SIZE_OFFSET + Integer.BYTES;
+    static final String SERIALIZED_PAGE_CIPHER_NAME = "AES/CBC/PKCS5Padding";
+    static final int SERIALIZED_PAGE_COMPRESSED_BLOCK_MASK = 1 << (Integer.SIZE - 1);
+    static final int ESTIMATED_AES_CIPHER_RETAINED_SIZE = 1024;
+
     /**
      * Special checksum value used to verify configuration consistency across nodes (all nodes need to have data integrity configured the same way).
      *
-     * @implNote It's not just 0, so that hypothetical zero-ed out data is not treated as valid payload with no checksum.
+     * Note: It's not just 0, so that hypothetical zero-ed out data is not treated as valid payload with no checksum.
      */
     public static final long NO_CHECKSUM = 0x0123456789abcdefL;
 
@@ -61,53 +79,11 @@ public final class PagesSerdeUtil
         return new Page(positionCount, blocks);
     }
 
-    public static void writeSerializedPage(SliceOutput output, SerializedPage page)
-    {
-        // Every new field being written here must be added in updateChecksum() too.
-        output.writeInt(page.getPositionCount());
-        output.writeByte(page.getPageCodecMarkers());
-        output.writeInt(page.getUncompressedSizeInBytes());
-        output.writeInt(page.getSizeInBytes());
-        output.writeBytes(page.getSlice());
-    }
-
-    private static void updateChecksum(XxHash64 hash, SerializedPage page)
-    {
-        hash.update(Slices.wrappedIntArray(
-                page.getPositionCount(),
-                page.getPageCodecMarkers(),
-                page.getUncompressedSizeInBytes(),
-                page.getSizeInBytes()));
-        hash.update(page.getSlice());
-    }
-
-    private static SerializedPage readSerializedPage(SliceInput sliceInput)
-    {
-        int positionCount = sliceInput.readInt();
-        PageCodecMarker.MarkerSet markers = PageCodecMarker.MarkerSet.fromByteValue(sliceInput.readByte());
-        int uncompressedSizeInBytes = sliceInput.readInt();
-        int sizeInBytes = sliceInput.readInt();
-        Slice slice = sliceInput.readSlice(sizeInBytes);
-        return new SerializedPage(slice, markers, positionCount, uncompressedSizeInBytes);
-    }
-
-    public static long writeSerializedPages(SliceOutput sliceOutput, Iterable<SerializedPage> pages)
-    {
-        Iterator<SerializedPage> pageIterator = pages.iterator();
-        long size = 0;
-        while (pageIterator.hasNext()) {
-            SerializedPage page = pageIterator.next();
-            writeSerializedPage(sliceOutput, page);
-            size += page.getSizeInBytes();
-        }
-        return size;
-    }
-
-    public static long calculateChecksum(List<SerializedPage> pages)
+    public static long calculateChecksum(List<Slice> pages)
     {
         XxHash64 hash = new XxHash64();
-        for (SerializedPage page : pages) {
-            updateChecksum(hash, page);
+        for (Slice page : pages) {
+            hash.update(page);
         }
         long checksum = hash.hash();
         // Since NO_CHECKSUM is assigned a special meaning, it is not a valid checksum.
@@ -117,78 +93,133 @@ public final class PagesSerdeUtil
         return checksum;
     }
 
-    public static long writePages(PagesSerde serde, SliceOutput sliceOutput, Page... pages)
+    public static long writePages(PageSerializer serializer, SliceOutput sliceOutput, Page... pages)
     {
-        return writePages(serde, sliceOutput, asList(pages).iterator());
+        return writePages(serializer, sliceOutput, asList(pages).iterator());
     }
 
-    public static long writePages(PagesSerde serde, SliceOutput sliceOutput, Iterator<Page> pages)
+    public static long writePages(PageSerializer serializer, SliceOutput sliceOutput, Iterator<Page> pages)
     {
         long size = 0;
-        try (PagesSerde.PagesSerdeContext context = serde.newContext()) {
-            while (pages.hasNext()) {
-                Page page = pages.next();
-                writeSerializedPage(sliceOutput, serde.serialize(context, page));
-                size += page.getSizeInBytes();
-            }
+        while (pages.hasNext()) {
+            Page page = pages.next();
+            sliceOutput.writeBytes(serializer.serialize(page));
+            size += page.getSizeInBytes();
         }
         return size;
     }
 
-    public static Iterator<Page> readPages(PagesSerde serde, SliceInput sliceInput)
+    public static Iterator<Page> readPages(PageDeserializer deserializer, InputStream inputStream)
     {
-        return new PageReader(serde, sliceInput);
+        return new PageReader(deserializer, inputStream);
+    }
+
+    public static int getSerializedPagePositionCount(Slice serializedPage)
+    {
+        return serializedPage.getInt(SERIALIZED_PAGE_POSITION_COUNT_OFFSET);
+    }
+
+    public static int getSerializedPageUncompressedSizeInBytes(Slice serializedPage)
+    {
+        return serializedPage.getInt(SERIALIZED_PAGE_UNCOMPRESSED_SIZE_OFFSET);
+    }
+
+    public static boolean isSerializedPageEncrypted(Slice serializedPage)
+    {
+        return getSerializedPageMarkerSet(serializedPage).contains(ENCRYPTED);
+    }
+
+    public static boolean isSerializedPageCompressed(Slice serializedPage)
+    {
+        return getSerializedPageMarkerSet(serializedPage).contains(COMPRESSED);
+    }
+
+    private static MarkerSet getSerializedPageMarkerSet(Slice serializedPage)
+    {
+        return MarkerSet.fromByteValue(serializedPage.getByte(Integer.BYTES));
     }
 
     private static class PageReader
             extends AbstractIterator<Page>
     {
-        private final PagesSerde serde;
-        private final PagesSerde.PagesSerdeContext context;
-        private final SliceInput input;
+        private final PageDeserializer deserializer;
+        private final InputStream inputStream;
+        private final byte[] headerBuffer = new byte[SERIALIZED_PAGE_HEADER_SIZE];
+        private final Slice headerSlice = Slices.wrappedBuffer(headerBuffer);
 
-        PageReader(PagesSerde serde, SliceInput input)
+        PageReader(PageDeserializer deserializer, InputStream inputStream)
         {
-            this.serde = requireNonNull(serde, "serde is null");
-            this.input = requireNonNull(input, "input is null");
-            this.context = serde.newContext();
+            this.deserializer = requireNonNull(deserializer, "deserializer is null");
+            this.inputStream = requireNonNull(inputStream, "inputStream is null");
         }
 
         @Override
         protected Page computeNext()
         {
-            if (!input.isReadable()) {
-                context.close(); // Release context buffers
-                return endOfData();
-            }
+            try {
+                int read = inputStream.readNBytes(headerBuffer, 0, headerBuffer.length);
+                if (read <= 0) {
+                    return endOfData();
+                }
+                if (read != headerBuffer.length) {
+                    throw new EOFException();
+                }
 
-            return serde.deserialize(context, readSerializedPage(input));
+                return deserializer.deserialize(readSerializedPage(headerSlice, inputStream));
+            }
+            catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
     }
 
-    public static Iterator<SerializedPage> readSerializedPages(SliceInput sliceInput)
+    public static Iterator<Slice> readSerializedPages(InputStream inputStream)
     {
-        return new SerializedPageReader(sliceInput);
+        return new SerializedPageReader(inputStream);
     }
 
     private static class SerializedPageReader
-            extends AbstractIterator<SerializedPage>
+            extends AbstractIterator<Slice>
     {
-        private final SliceInput input;
+        private final InputStream inputStream;
+        private final byte[] headerBuffer = new byte[SERIALIZED_PAGE_HEADER_SIZE];
+        private final Slice headerSlice = Slices.wrappedBuffer(headerBuffer);
 
-        SerializedPageReader(SliceInput input)
+        SerializedPageReader(InputStream input)
         {
-            this.input = requireNonNull(input, "input is null");
+            this.inputStream = requireNonNull(input, "inputStream is null");
         }
 
         @Override
-        protected SerializedPage computeNext()
+        protected Slice computeNext()
         {
-            if (!input.isReadable()) {
-                return endOfData();
-            }
+            try {
+                int read = inputStream.readNBytes(headerBuffer, 0, headerBuffer.length);
+                if (read <= 0) {
+                    return endOfData();
+                }
+                if (read != headerBuffer.length) {
+                    throw new EOFException();
+                }
 
-            return readSerializedPage(input);
+                return readSerializedPage(headerSlice, inputStream);
+            }
+            catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
+    }
+
+    public static Slice readSerializedPage(Slice headerSlice, InputStream inputStream)
+            throws IOException
+    {
+        checkArgument(headerSlice.length() == SERIALIZED_PAGE_HEADER_SIZE, "headerSlice length should equal to %s", SERIALIZED_PAGE_HEADER_SIZE);
+
+        int compressedSize = headerSlice.getIntUnchecked(SERIALIZED_PAGE_COMPRESSED_SIZE_OFFSET);
+        byte[] outputBuffer = new byte[SERIALIZED_PAGE_HEADER_SIZE + compressedSize];
+        headerSlice.getBytes(0, outputBuffer, 0, SERIALIZED_PAGE_HEADER_SIZE);
+        int bytes = inputStream.readNBytes(outputBuffer, SERIALIZED_PAGE_HEADER_SIZE, compressedSize);
+        verify(bytes == compressedSize, "expected to read %s bytes, but read %s", compressedSize, bytes);
+        return Slices.wrappedBuffer(outputBuffer);
     }
 }

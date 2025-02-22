@@ -19,14 +19,12 @@ import io.trino.RowPagesBuilder;
 import io.trino.spi.Page;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.MaterializedResult;
-import io.trino.type.BlockTypeOperators;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.List;
 import java.util.Optional;
@@ -34,7 +32,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.airlift.testing.Assertions.assertGreaterThan;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.operator.GroupByHashYieldAssertion.createPagesWithDistinctHashKeys;
@@ -46,59 +43,49 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestDistinctLimitOperator
 {
-    private ExecutorService executor;
-    private ScheduledExecutorService scheduledExecutor;
-    private DriverContext driverContext;
-    private JoinCompiler joinCompiler;
-    private BlockTypeOperators blockTypeOperators;
+    private final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+    private final ScheduledExecutorService scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
+    private final FlatHashStrategyCompiler hashStrategyCompiler = new FlatHashStrategyCompiler(new TypeOperators());
 
-    @BeforeMethod
-    public void setUp()
-    {
-        executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
-        driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
-                .addPipelineContext(0, true, true, false)
-                .addDriverContext();
-        TypeOperators typeOperators = new TypeOperators();
-        blockTypeOperators = new BlockTypeOperators(typeOperators);
-        joinCompiler = new JoinCompiler(typeOperators);
-    }
-
-    @AfterMethod(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         executor.shutdownNow();
         scheduledExecutor.shutdownNow();
     }
 
-    @DataProvider
-    public Object[][] dataType()
+    @Test
+    public void testDistinctLimit()
     {
-        return new Object[][] {{VARCHAR}, {BIGINT}};
+        testDistinctLimit(true);
+        testDistinctLimit(false);
     }
 
-    @DataProvider(name = "hashEnabledValues")
-    public static Object[][] hashEnabledValuesProvider()
-    {
-        return new Object[][] {{true}, {false}};
-    }
-
-    @Test(dataProvider = "hashEnabledValues")
     public void testDistinctLimit(boolean hashEnabled)
     {
+        DriverContext driverContext = newDriverContext();
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, Ints.asList(0), BIGINT);
         List<Page> input = rowPagesBuilder
                 .addSequencePage(3, 1)
                 .addSequencePage(5, 2)
                 .build();
 
-        OperatorFactory operatorFactory = new DistinctLimitOperator.DistinctLimitOperatorFactory(0, new PlanNodeId("test"), rowPagesBuilder.getTypes(), Ints.asList(0), 5, rowPagesBuilder.getHashChannel(), joinCompiler, blockTypeOperators);
+        OperatorFactory operatorFactory = new DistinctLimitOperator.DistinctLimitOperatorFactory(
+                0,
+                new PlanNodeId("test"),
+                rowPagesBuilder.getTypes(),
+                Ints.asList(0),
+                5,
+                rowPagesBuilder.getHashChannel(),
+                hashStrategyCompiler);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT)
                 .row(1L)
@@ -111,16 +98,30 @@ public class TestDistinctLimitOperator
         assertOperatorEquals(operatorFactory, driverContext, input, expected, hashEnabled, ImmutableList.of(1));
     }
 
-    @Test(dataProvider = "hashEnabledValues")
+    @Test
+    public void testDistinctLimitWithPageAlignment()
+    {
+        testDistinctLimitWithPageAlignment(true);
+        testDistinctLimitWithPageAlignment(false);
+    }
+
     public void testDistinctLimitWithPageAlignment(boolean hashEnabled)
     {
+        DriverContext driverContext = newDriverContext();
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, Ints.asList(0), BIGINT);
         List<Page> input = rowPagesBuilder
                 .addSequencePage(3, 1)
                 .addSequencePage(3, 2)
                 .build();
 
-        OperatorFactory operatorFactory = new DistinctLimitOperator.DistinctLimitOperatorFactory(0, new PlanNodeId("test"), rowPagesBuilder.getTypes(), Ints.asList(0), 3, rowPagesBuilder.getHashChannel(), joinCompiler, blockTypeOperators);
+        OperatorFactory operatorFactory = new DistinctLimitOperator.DistinctLimitOperatorFactory(
+                0,
+                new PlanNodeId("test"),
+                rowPagesBuilder.getTypes(),
+                Ints.asList(0),
+                3,
+                rowPagesBuilder.getHashChannel(),
+                hashStrategyCompiler);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT)
                 .row(1L)
@@ -131,16 +132,31 @@ public class TestDistinctLimitOperator
         assertOperatorEquals(operatorFactory, driverContext, input, expected, hashEnabled, ImmutableList.of(1));
     }
 
-    @Test(dataProvider = "hashEnabledValues")
+    @Test
+    public void testDistinctLimitValuesLessThanLimit()
+    {
+        testDistinctLimitValuesLessThanLimit(true);
+        testDistinctLimitValuesLessThanLimit(false);
+    }
+
     public void testDistinctLimitValuesLessThanLimit(boolean hashEnabled)
     {
+        DriverContext driverContext = newDriverContext();
+
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, Ints.asList(0), BIGINT);
         List<Page> input = rowPagesBuilder
                 .addSequencePage(3, 1)
                 .addSequencePage(3, 2)
                 .build();
 
-        OperatorFactory operatorFactory = new DistinctLimitOperator.DistinctLimitOperatorFactory(0, new PlanNodeId("test"), rowPagesBuilder.getTypes(), Ints.asList(0), 5, rowPagesBuilder.getHashChannel(), joinCompiler, blockTypeOperators);
+        OperatorFactory operatorFactory = new DistinctLimitOperator.DistinctLimitOperatorFactory(
+                0,
+                new PlanNodeId("test"),
+                rowPagesBuilder.getTypes(),
+                Ints.asList(0),
+                5,
+                rowPagesBuilder.getHashChannel(),
+                hashStrategyCompiler);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), BIGINT)
                 .row(1L)
@@ -152,7 +168,13 @@ public class TestDistinctLimitOperator
         assertOperatorEquals(operatorFactory, driverContext, input, expected, hashEnabled, ImmutableList.of(1));
     }
 
-    @Test(dataProvider = "dataType")
+    @Test
+    public void testMemoryReservationYield()
+    {
+        testMemoryReservationYield(VARCHAR);
+        testMemoryReservationYield(BIGINT);
+    }
+
     public void testMemoryReservationYield(Type type)
     {
         List<Page> input = createPagesWithDistinctHashKeys(type, 6_000, 600);
@@ -164,12 +186,18 @@ public class TestDistinctLimitOperator
                 ImmutableList.of(0),
                 Integer.MAX_VALUE,
                 Optional.of(1),
-                joinCompiler,
-                blockTypeOperators);
+                hashStrategyCompiler);
 
-        GroupByHashYieldAssertion.GroupByHashYieldResult result = finishOperatorWithYieldingGroupByHash(input, type, operatorFactory, operator -> ((DistinctLimitOperator) operator).getCapacity(), 1_400_000);
-        assertGreaterThan(result.getYieldCount(), 5);
-        assertGreaterThan(result.getMaxReservedBytes(), 20L << 20);
-        assertEquals(result.getOutput().stream().mapToInt(Page::getPositionCount).sum(), 6_000 * 600);
+        GroupByHashYieldAssertion.GroupByHashYieldResult result = finishOperatorWithYieldingGroupByHash(input, type, operatorFactory, operator -> ((DistinctLimitOperator) operator).getCapacity(), 450_000);
+        assertThat(result.getYieldCount()).isGreaterThanOrEqualTo(5);
+        assertThat(result.getMaxReservedBytes()).isGreaterThanOrEqualTo(20L << 20);
+        assertThat(result.getOutput().stream().mapToInt(Page::getPositionCount).sum()).isEqualTo(6_000 * 600);
+    }
+
+    private DriverContext newDriverContext()
+    {
+        return createTaskContext(executor, scheduledExecutor, TEST_SESSION)
+                .addPipelineContext(0, true, true, false)
+                .addDriverContext();
     }
 }

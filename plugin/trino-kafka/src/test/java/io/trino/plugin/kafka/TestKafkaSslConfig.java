@@ -14,10 +14,10 @@
 package io.trino.plugin.kafka;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.inject.ConfigurationException;
 import io.trino.plugin.kafka.security.KafkaEndpointIdentificationAlgorithm;
 import io.trino.plugin.kafka.security.KafkaSslConfig;
-import org.testng.annotations.Test;
+import jakarta.validation.constraints.AssertTrue;
+import org.junit.jupiter.api.Test;
 
 import java.io.FileWriter;
 import java.io.IOException;
@@ -28,11 +28,13 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static io.trino.plugin.kafka.security.KafkaEndpointIdentificationAlgorithm.DISABLED;
 import static io.trino.plugin.kafka.security.KafkaEndpointIdentificationAlgorithm.HTTPS;
 import static io.trino.plugin.kafka.security.KafkaKeystoreTruststoreType.JKS;
 import static io.trino.plugin.kafka.security.KafkaKeystoreTruststoreType.PKCS12;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.kafka.clients.CommonClientConfigs.SECURITY_PROTOCOL_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_KEYSTORE_LOCATION_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_KEYSTORE_PASSWORD_CONFIG;
@@ -41,8 +43,8 @@ import static org.apache.kafka.common.config.SslConfigs.SSL_KEY_PASSWORD_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_TRUSTSTORE_TYPE_CONFIG;
+import static org.apache.kafka.common.security.auth.SecurityProtocol.SSL;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestKafkaSslConfig
 {
@@ -71,7 +73,7 @@ public class TestKafkaSslConfig
         writeToFile(keystorePath, secret);
         writeToFile(truststorePath, secret);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("kafka.ssl.keystore.location", keystorePath.toString())
                 .put("kafka.ssl.keystore.password", "keystore-password")
                 .put("kafka.ssl.keystore.type", "PKCS12")
@@ -80,7 +82,7 @@ public class TestKafkaSslConfig
                 .put("kafka.ssl.truststore.type", "PKCS12")
                 .put("kafka.ssl.key.password", "key-password")
                 .put("kafka.ssl.endpoint-identification-algorithm", "disabled")
-                .build();
+                .buildOrThrow();
         KafkaSslConfig expected = new KafkaSslConfig()
                 .setKeystoreLocation(keystorePath.toString())
                 .setKeystorePassword("keystore-password")
@@ -119,6 +121,7 @@ public class TestKafkaSslConfig
                         SSL_TRUSTSTORE_PASSWORD_CONFIG, "superSavePasswordForTruststore",
                         SSL_TRUSTSTORE_TYPE_CONFIG, JKS.name(),
                         SSL_KEY_PASSWORD_CONFIG, "aSslKeyPassword",
+                        SECURITY_PROTOCOL_CONFIG, SSL.name(),
                         SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, HTTPS.getValue())));
     }
 
@@ -131,7 +134,7 @@ public class TestKafkaSslConfig
         }
         Map<String, Object> securityProperties = config.getKafkaClientProperties();
         assertThat(securityProperties).containsKey(SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG);
-        assertThat(securityProperties.get(SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG)).isEqualTo("");
+        assertThat(securityProperties).containsEntry(SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, "");
     }
 
     @Test
@@ -145,9 +148,12 @@ public class TestKafkaSslConfig
 
         KafkaSslConfig config = new KafkaSslConfig();
         config.setKeystoreLocation(keystorePath.toString());
-        assertThatThrownBy(config::validate)
-                .isInstanceOf(ConfigurationException.class)
-                .hasMessageContaining("kafka.ssl.keystore.password must set when kafka.ssl.keystore.location is given");
+
+        assertFailsValidation(
+                config,
+                "keystorePasswordValid",
+                "kafka.ssl.keystore.password must be set when kafka.ssl.keystore.location is given",
+                AssertTrue.class);
     }
 
     @Test
@@ -161,9 +167,12 @@ public class TestKafkaSslConfig
 
         KafkaSslConfig config = new KafkaSslConfig();
         config.setTruststoreLocation(truststorePath.toString());
-        assertThatThrownBy(config::validate)
-                .isInstanceOf(ConfigurationException.class)
-                .hasMessageContaining("kafka.ssl.truststore.password must set when kafka.ssl.truststore.location is given");
+
+        assertFailsValidation(
+                config,
+                "truststorePasswordValid",
+                "kafka.ssl.truststore.password must be set when kafka.ssl.truststore.location is given",
+                AssertTrue.class);
     }
 
     private void writeToFile(Path filepath, String content)

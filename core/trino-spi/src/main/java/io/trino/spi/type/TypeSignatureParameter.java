@@ -13,7 +13,7 @@
  */
 package io.trino.spi.type;
 
-import javax.annotation.concurrent.Immutable;
+import com.google.errorprone.annotations.Immutable;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -77,8 +77,7 @@ public final class TypeSignatureParameter
         }
 
         String valueJson;
-        if (value instanceof TypeSignature) {
-            TypeSignature typeSignature = (TypeSignature) value;
+        if (value instanceof TypeSignature typeSignature) {
             valueJson = typeSignature.jsonValue();
         }
         else {
@@ -142,29 +141,21 @@ public final class TypeSignatureParameter
 
     public Optional<TypeSignature> getTypeSignatureOrNamedTypeSignature()
     {
-        switch (kind) {
-            case TYPE:
-                return Optional.of(getTypeSignature());
-            case NAMED_TYPE:
-                return Optional.of(getNamedTypeSignature().getTypeSignature());
-            default:
-                return Optional.empty();
-        }
+        return switch (kind) {
+            case TYPE -> Optional.of(getTypeSignature());
+            case NAMED_TYPE -> Optional.of(getNamedTypeSignature().getTypeSignature());
+            default -> Optional.empty();
+        };
     }
 
     public boolean isCalculated()
     {
-        switch (kind) {
-            case TYPE:
-                return getTypeSignature().isCalculated();
-            case NAMED_TYPE:
-                return getNamedTypeSignature().getTypeSignature().isCalculated();
-            case LONG:
-                return false;
-            case VARIABLE:
-                return true;
-        }
-        throw new IllegalArgumentException("Unexpected parameter kind: " + kind);
+        return switch (kind) {
+            case TYPE -> getTypeSignature().isCalculated();
+            case NAMED_TYPE -> getNamedTypeSignature().getTypeSignature().isCalculated();
+            case LONG -> false;
+            case VARIABLE -> true;
+        };
     }
 
     @Override

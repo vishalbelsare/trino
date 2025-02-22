@@ -14,12 +14,11 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.session.PropertyMetadata;
-
-import javax.inject.Inject;
 
 import java.util.List;
 
@@ -34,6 +33,8 @@ public class JdbcWriteSessionProperties
 {
     public static final String WRITE_BATCH_SIZE = "write_batch_size";
     public static final String NON_TRANSACTIONAL_INSERT = "non_transactional_insert";
+    public static final String NON_TRANSACTIONAL_MERGE = "non_transactional_merge";
+    public static final String WRITE_PARALLELISM = "write_parallelism";
 
     private final List<PropertyMetadata<?>> properties;
 
@@ -49,8 +50,18 @@ public class JdbcWriteSessionProperties
                         false))
                 .add(booleanProperty(
                         NON_TRANSACTIONAL_INSERT,
-                        "Do not use temporary table on insert to table",
+                        "Enables support for non-transactional INSERT",
                         writeConfig.isNonTransactionalInsert(),
+                        false))
+                .add(booleanProperty(
+                        NON_TRANSACTIONAL_MERGE,
+                        "Enables support for non-transactional MERGE",
+                        writeConfig.isNonTransactionalMerge(),
+                        false))
+                .add(integerProperty(
+                        WRITE_PARALLELISM,
+                        "Maximum number of parallel write tasks",
+                        writeConfig.getWriteParallelism(),
                         false))
                 .build();
     }
@@ -66,9 +77,19 @@ public class JdbcWriteSessionProperties
         return session.getProperty(WRITE_BATCH_SIZE, Integer.class);
     }
 
+    public static int getWriteParallelism(ConnectorSession session)
+    {
+        return session.getProperty(WRITE_PARALLELISM, Integer.class);
+    }
+
     public static boolean isNonTransactionalInsert(ConnectorSession session)
     {
         return session.getProperty(NON_TRANSACTIONAL_INSERT, Boolean.class);
+    }
+
+    public static boolean isNonTransactionalMerge(ConnectorSession session)
+    {
+        return session.getProperty(NON_TRANSACTIONAL_MERGE, Boolean.class);
     }
 
     private static void validateWriteBatchSize(int maxBatchSize)

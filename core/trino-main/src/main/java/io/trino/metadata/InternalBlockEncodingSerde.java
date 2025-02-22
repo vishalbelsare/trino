@@ -13,6 +13,7 @@
  */
 package io.trino.metadata;
 
+import com.google.inject.Inject;
 import io.airlift.slice.SliceInput;
 import io.airlift.slice.SliceOutput;
 import io.trino.spi.block.Block;
@@ -20,22 +21,34 @@ import io.trino.spi.block.BlockEncoding;
 import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeId;
+import io.trino.spi.type.TypeManager;
+import org.assertj.core.util.VisibleForTesting;
 
 import java.util.Optional;
 import java.util.function.Function;
 
+import static io.airlift.slice.SizeOf.SIZE_OF_INT;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 
-final class InternalBlockEncodingSerde
+public final class InternalBlockEncodingSerde
         implements BlockEncodingSerde
 {
-    private final Function<String, BlockEncoding> blockEncodings;
+    private final Function<String, BlockEncoding> nameToEncoding; // for deserialization
+    private final Function<Class<? extends Block>, BlockEncoding> blockToEncoding; // for serialization
     private final Function<TypeId, Type> types;
 
-    public InternalBlockEncodingSerde(Function<String, BlockEncoding> blockEncodings, Function<TypeId, Type> types)
+    @Inject
+    public InternalBlockEncodingSerde(BlockEncodingManager blockEncodingManager, TypeManager typeManager)
     {
-        this.blockEncodings = requireNonNull(blockEncodings, "blockEncodings is null");
+        this(blockEncodingManager::getBlockEncodingByName, blockEncodingManager::getBlockEncodingByBlockClass, typeManager::getType);
+    }
+
+    @VisibleForTesting
+    InternalBlockEncodingSerde(Function<String, BlockEncoding> nameToEncoding, Function<Class<? extends Block>, BlockEncoding> blockToEncoding, Function<TypeId, Type> types)
+    {
+        this.nameToEncoding = requireNonNull(nameToEncoding, "nameToEncoding is null");
+        this.blockToEncoding = requireNonNull(blockToEncoding, "blockToEncoding is null");
         this.types = requireNonNull(types, "types is null");
     }
 
@@ -46,7 +59,7 @@ final class InternalBlockEncodingSerde
         String encodingName = readLengthPrefixedString(input);
 
         // look up the encoding factory
-        BlockEncoding blockEncoding = blockEncodings.apply(encodingName);
+        BlockEncoding blockEncoding = nameToEncoding.apply(encodingName);
 
         // load read the encoding factory from the output stream
         return blockEncoding.readBlock(this, input);
@@ -56,11 +69,8 @@ final class InternalBlockEncodingSerde
     public void writeBlock(SliceOutput output, Block block)
     {
         while (true) {
-            // get the encoding name
-            String encodingName = block.getEncodingName();
-
             // look up the BlockEncoding
-            BlockEncoding blockEncoding = blockEncodings.apply(encodingName);
+            BlockEncoding blockEncoding = blockToEncoding.apply(block.getClass());
 
             // see if a replacement block should be written instead
             Optional<Block> replacementBlock = blockEncoding.replacementBlockForWrite(block);
@@ -70,12 +80,30 @@ final class InternalBlockEncodingSerde
             }
 
             // write the name to the output
-            writeLengthPrefixedString(output, encodingName);
+            writeLengthPrefixedString(output, blockEncoding.getName());
 
             // write the block to the output
             blockEncoding.writeBlock(this, output, block);
 
             break;
+        }
+    }
+
+    @Override
+    public long estimatedWriteSize(Block block)
+    {
+        while (true) {
+            BlockEncoding blockEncoding = blockToEncoding.apply(block.getClass());
+            // see if a replacement block should be written instead
+            Optional<Block> replacementBlock = blockEncoding.replacementBlockForWrite(block);
+            if (replacementBlock.isPresent()) {
+                block = replacementBlock.get();
+                continue;
+            }
+
+            // length of encoding name + encoding name + block size
+            // TODO: improve this estimate by adding estimatedWriteSize to BlockEncoding interface
+            return SIZE_OF_INT + blockEncoding.getName().length() + block.getSizeInBytes();
         }
     }
 

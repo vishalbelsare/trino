@@ -13,7 +13,6 @@
  */
 package io.trino.operator;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -46,7 +45,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiPredicate;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -58,11 +56,12 @@ import static com.google.common.collect.Iterables.concat;
 import static com.google.common.collect.Iterators.peekingIterator;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.concurrent.MoreFutures.checkSuccess;
+import static io.trino.operator.PositionSearcher.findEndPosition;
 import static io.trino.operator.WorkProcessor.TransformationState.needsMoreData;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_LAST;
-import static io.trino.sql.tree.FrameBound.Type.FOLLOWING;
-import static io.trino.sql.tree.FrameBound.Type.PRECEDING;
-import static io.trino.sql.tree.WindowFrame.Type.RANGE;
+import static io.trino.sql.planner.plan.FrameBoundType.FOLLOWING;
+import static io.trino.sql.planner.plan.FrameBoundType.PRECEDING;
+import static io.trino.sql.planner.plan.WindowFrameType.RANGE;
 import static io.trino.util.MergeSortedPages.mergeSortedPages;
 import static java.util.Collections.nCopies;
 import static java.util.Objects.requireNonNull;
@@ -329,6 +328,9 @@ public class WindowOperator
                     sortChannels,
                     windowFunctionDefinitions);
 
+            List<Type> unGroupedOrderTypes = unGroupedOrderChannels.stream()
+                    .map(sourceTypes::get)
+                    .collect(toImmutableList());
             this.spillablePagesToPagesIndexes = Optional.of(new SpillablePagesToPagesIndexes(
                     inMemoryPagesIndexWithHashStrategies,
                     mergedPagesIndexWithHashStrategies,
@@ -336,7 +338,7 @@ public class WindowOperator
                     orderChannels,
                     ordering,
                     spillerFactory,
-                    orderingCompiler.compilePageWithPositionComparator(sourceTypes, unGroupedOrderChannels, unGroupedOrdering)));
+                    orderingCompiler.compilePageWithPositionComparator(unGroupedOrderTypes, unGroupedOrderChannels, unGroupedOrdering)));
 
             this.outputPages = pageBuffer.pages()
                     .flatTransform(spillablePagesToPagesIndexes.get())
@@ -478,7 +480,7 @@ public class WindowOperator
             }
         }
 
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     public static class FrameBoundKey
@@ -790,7 +792,7 @@ public class WindowOperator
                 spiller = Optional.of(spillerFactory.create(
                         sourceTypes,
                         operatorContext.getSpillContext(),
-                        operatorContext.newAggregateSystemMemoryContext()));
+                        operatorContext.newAggregateUserMemoryContext()));
             }
 
             verify(inMemoryPagesIndexWithHashStrategies.pagesIndex.getPositionCount() > 0);
@@ -871,12 +873,12 @@ public class WindowOperator
         PagesIndex pagesIndex = pagesIndexWithHashStrategies.pagesIndex;
         PagesHashStrategy preGroupedPartitionHashStrategy = pagesIndexWithHashStrategies.preGroupedPartitionHashStrategy;
         if (currentSpillGroupRowPage.isPresent()) {
-            if (!preGroupedPartitionHashStrategy.rowNotDistinctFromRow(0, currentSpillGroupRowPage.get().getColumns(pagesIndexWithHashStrategies.preGroupedPartitionChannels), startPosition, preGroupedPage)) {
+            if (!preGroupedPartitionHashStrategy.rowIdenticalToRow(0, currentSpillGroupRowPage.get().getColumns(pagesIndexWithHashStrategies.preGroupedPartitionChannels), startPosition, preGroupedPage)) {
                 return startPosition;
             }
         }
 
-        if (pagesIndex.getPositionCount() == 0 || pagesIndex.positionNotDistinctFromRow(preGroupedPartitionHashStrategy, 0, startPosition, preGroupedPage)) {
+        if (pagesIndex.getPositionCount() == 0 || pagesIndex.positionIdenticalToRow(preGroupedPartitionHashStrategy, 0, startPosition, preGroupedPage)) {
             // Find the position where the pre-grouped columns change
             int groupEnd = findGroupEnd(preGroupedPage, preGroupedPartitionHashStrategy, startPosition);
 
@@ -912,7 +914,7 @@ public class WindowOperator
         checkArgument(page.getPositionCount() > 0, "Must have at least one position");
         checkPositionIndex(startPosition, page.getPositionCount(), "startPosition out of bounds");
 
-        return findEndPosition(startPosition, page.getPositionCount(), (firstPosition, secondPosition) -> pagesHashStrategy.rowNotDistinctFromRow(firstPosition, page, secondPosition, page));
+        return findEndPosition(startPosition, page.getPositionCount(), (firstPosition, secondPosition) -> pagesHashStrategy.rowIdenticalToRow(firstPosition, page, secondPosition, page));
     }
 
     // Assumes input grouped on relevant pagesHashStrategy columns
@@ -921,36 +923,7 @@ public class WindowOperator
         checkArgument(pagesIndex.getPositionCount() > 0, "Must have at least one position");
         checkPositionIndex(startPosition, pagesIndex.getPositionCount(), "startPosition out of bounds");
 
-        return findEndPosition(startPosition, pagesIndex.getPositionCount(), (firstPosition, secondPosition) -> pagesIndex.positionNotDistinctFromPosition(pagesHashStrategy, firstPosition, secondPosition));
-    }
-
-    /**
-     * @param startPosition - inclusive
-     * @param endPosition - exclusive
-     * @param comparator - returns true if positions given as parameters are equal
-     * @return the end of the group position exclusive (the position the very next group starts)
-     */
-    @VisibleForTesting
-    static int findEndPosition(int startPosition, int endPosition, BiPredicate<Integer, Integer> comparator)
-    {
-        checkArgument(startPosition >= 0, "startPosition must be greater or equal than zero: %s", startPosition);
-        checkArgument(startPosition < endPosition, "startPosition (%s) must be less than endPosition (%s)", startPosition, endPosition);
-
-        int left = startPosition;
-        int right = endPosition;
-
-        while (left + 1 < right) {
-            int middle = (left + right) >>> 1;
-
-            if (comparator.test(startPosition, middle)) {
-                left = middle;
-            }
-            else {
-                right = middle;
-            }
-        }
-
-        return right;
+        return findEndPosition(startPosition, pagesIndex.getPositionCount(), (firstPosition, secondPosition) -> pagesIndex.positionIdenticalToPosition(pagesHashStrategy, firstPosition, secondPosition));
     }
 
     @Override

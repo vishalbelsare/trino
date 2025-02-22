@@ -27,13 +27,13 @@ import io.trino.spi.type.CharType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.ZoneId;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DICTIONARY;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DICTIONARY_V2;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT;
@@ -46,14 +46,14 @@ import static java.util.Objects.requireNonNull;
 public class SliceColumnReader
         implements ColumnReader
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(SliceColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(SliceColumnReader.class);
 
     private final OrcColumn column;
     private final SliceDirectColumnReader directReader;
     private final SliceDictionaryColumnReader dictionaryReader;
     private ColumnReader currentReader;
 
-    public SliceColumnReader(Type type, OrcColumn column, AggregatedMemoryContext systemMemoryContext)
+    public SliceColumnReader(Type type, OrcColumn column, AggregatedMemoryContext memoryContext)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -64,7 +64,7 @@ public class SliceColumnReader
         int maxCodePointCount = getMaxCodePointCount(type);
         boolean charType = type instanceof CharType;
         directReader = new SliceDirectColumnReader(column, maxCodePointCount, charType);
-        dictionaryReader = new SliceDictionaryColumnReader(column, systemMemoryContext.newLocalMemoryContext(SliceColumnReader.class.getSimpleName()), maxCodePointCount, charType);
+        dictionaryReader = new SliceDictionaryColumnReader(column, memoryContext.newLocalMemoryContext(SliceColumnReader.class.getSimpleName()), maxCodePointCount, charType);
     }
 
     @Override
@@ -115,12 +115,11 @@ public class SliceColumnReader
 
     private static int getMaxCodePointCount(Type type)
     {
-        if (type instanceof VarcharType) {
-            VarcharType varcharType = (VarcharType) type;
+        if (type instanceof VarcharType varcharType) {
             return varcharType.isUnbounded() ? -1 : varcharType.getBoundedLength();
         }
-        if (type instanceof CharType) {
-            return ((CharType) type).getLength();
+        if (type instanceof CharType charType) {
+            return charType.getLength();
         }
         if (type instanceof VarbinaryType) {
             return -1;

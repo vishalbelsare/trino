@@ -16,7 +16,7 @@ package io.trino.server;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.resolver.ArtifactResolver;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -30,19 +30,19 @@ public class TestDevelopmentLoaderConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(DevelopmentLoaderConfig.class)
-                .setPlugins("")
+                .setPlugins(ImmutableList.of())
                 .setMavenLocalRepository(ArtifactResolver.USER_LOCAL_REPO)
-                .setMavenRemoteRepository(ArtifactResolver.MAVEN_CENTRAL_URI));
+                .setMavenRemoteRepository(ImmutableList.of(ArtifactResolver.MAVEN_CENTRAL_URI)));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("plugin.bundles", "a,b,c")
                 .put("maven.repo.local", "local-repo")
                 .put("maven.repo.remote", "remote-a,remote-b")
-                .build();
+                .buildOrThrow();
 
         DevelopmentLoaderConfig expected = new DevelopmentLoaderConfig()
                 .setPlugins(ImmutableList.of("a", "b", "c"))

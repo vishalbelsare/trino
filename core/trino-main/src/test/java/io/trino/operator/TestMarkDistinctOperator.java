@@ -22,14 +22,12 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.MaterializedResult;
-import io.trino.type.BlockTypeOperators;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.List;
 import java.util.Optional;
@@ -38,8 +36,6 @@ import java.util.concurrent.ScheduledExecutorService;
 
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.airlift.testing.Assertions.assertGreaterThan;
-import static io.airlift.testing.Assertions.assertInstanceOf;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.operator.GroupByHashYieldAssertion.createPagesWithDistinctHashKeys;
@@ -51,51 +47,34 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestMarkDistinctOperator
 {
-    private ExecutorService executor;
-    private ScheduledExecutorService scheduledExecutor;
-    private DriverContext driverContext;
+    private final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+    private final ScheduledExecutorService scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
     private final TypeOperators typeOperators = new TypeOperators();
-    private final BlockTypeOperators blockTypeOperators = new BlockTypeOperators(typeOperators);
-    private final JoinCompiler joinCompiler = new JoinCompiler(typeOperators);
+    private final FlatHashStrategyCompiler hashStrategyCompiler = new FlatHashStrategyCompiler(typeOperators);
 
-    @BeforeMethod
-    public void setUp()
-    {
-        executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
-        driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
-                .addPipelineContext(0, true, true, false)
-                .addDriverContext();
-    }
-
-    @AfterMethod(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         executor.shutdownNow();
         scheduledExecutor.shutdownNow();
     }
 
-    @DataProvider
-    public Object[][] dataType()
+    @Test
+    public void testMarkDistinct()
     {
-        return new Object[][] {{VARCHAR}, {BIGINT}};
+        testMarkDistinct(true, newDriverContext());
+        testMarkDistinct(false, newDriverContext());
     }
 
-    @DataProvider(name = "hashEnabledValues")
-    public static Object[][] hashEnabledValuesProvider()
-    {
-        return new Object[][] {{true}, {false}};
-    }
-
-    @Test(dataProvider = "hashEnabledValues")
-    public void testMarkDistinct(boolean hashEnabled)
+    private void testMarkDistinct(boolean hashEnabled, DriverContext driverContext)
     {
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, Ints.asList(0), BIGINT);
         List<Page> input = rowPagesBuilder
@@ -103,7 +82,13 @@ public class TestMarkDistinctOperator
                 .addSequencePage(100, 0)
                 .build();
 
-        OperatorFactory operatorFactory = new MarkDistinctOperatorFactory(0, new PlanNodeId("test"), rowPagesBuilder.getTypes(), ImmutableList.of(0), rowPagesBuilder.getHashChannel(), joinCompiler, blockTypeOperators);
+        OperatorFactory operatorFactory = new MarkDistinctOperatorFactory(
+                0,
+                new PlanNodeId("test"),
+                rowPagesBuilder.getTypes(),
+                ImmutableList.of(0),
+                rowPagesBuilder.getHashChannel(),
+                hashStrategyCompiler);
 
         MaterializedResult.Builder expected = resultBuilder(driverContext.getSession(), BIGINT, BOOLEAN);
         for (long i = 0; i < 100; i++) {
@@ -114,8 +99,14 @@ public class TestMarkDistinctOperator
         OperatorAssertion.assertOperatorEqualsIgnoreOrder(operatorFactory, driverContext, input, expected.build(), hashEnabled, Optional.of(1));
     }
 
-    @Test(dataProvider = "hashEnabledValues")
-    public void testRleDistinctMask(boolean hashEnabled)
+    @Test
+    public void testRleDistinctMask()
+    {
+        testRleDistinctMask(true, newDriverContext());
+        testRleDistinctMask(false, newDriverContext());
+    }
+
+    private void testRleDistinctMask(boolean hashEnabled, DriverContext driverContext)
     {
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, Ints.asList(0), BIGINT);
         List<Page> inputs = rowPagesBuilder
@@ -128,7 +119,13 @@ public class TestMarkDistinctOperator
         Page secondInput = inputs.get(1);
         Page singleDistinctPage = inputs.get(2);
         Page singleNotDistinctPage = inputs.get(3);
-        OperatorFactory operatorFactory = new MarkDistinctOperatorFactory(0, new PlanNodeId("test"), rowPagesBuilder.getTypes(), ImmutableList.of(0), rowPagesBuilder.getHashChannel(), joinCompiler, blockTypeOperators);
+        OperatorFactory operatorFactory = new MarkDistinctOperatorFactory(
+                0,
+                new PlanNodeId("test"),
+                rowPagesBuilder.getTypes(),
+                ImmutableList.of(0),
+                rowPagesBuilder.getHashChannel(),
+                hashStrategyCompiler);
 
         int maskChannel = firstInput.getChannelCount(); // mask channel is appended to the input
         try (Operator operator = operatorFactory.createOperator(driverContext)) {
@@ -137,30 +134,34 @@ public class TestMarkDistinctOperator
             operator.addInput(firstInput);
             Block noDistinctOutput = operator.getOutput().getBlock(maskChannel);
             // all distinct and no distinct conditions produce RLE blocks
-            assertInstanceOf(allDistinctOutput, RunLengthEncodedBlock.class);
-            assertTrue(BOOLEAN.getBoolean(allDistinctOutput, 0));
-            assertInstanceOf(noDistinctOutput, RunLengthEncodedBlock.class);
-            assertFalse(BOOLEAN.getBoolean(noDistinctOutput, 0));
+            assertThat(allDistinctOutput).isInstanceOf(RunLengthEncodedBlock.class);
+            assertThat(BOOLEAN.getBoolean(allDistinctOutput, 0)).isTrue();
+            assertThat(noDistinctOutput).isInstanceOf(RunLengthEncodedBlock.class);
+            assertThat(BOOLEAN.getBoolean(noDistinctOutput, 0)).isFalse();
 
             operator.addInput(secondInput);
             Block halfDistinctOutput = operator.getOutput().getBlock(maskChannel);
             // [0,50) is not distinct
             for (int position = 0; position < 50; position++) {
-                assertFalse(BOOLEAN.getBoolean(halfDistinctOutput, position));
+                assertThat(BOOLEAN.getBoolean(halfDistinctOutput, position)).isFalse();
             }
             for (int position = 50; position < 100; position++) {
-                assertTrue(BOOLEAN.getBoolean(halfDistinctOutput, position));
+                assertThat(BOOLEAN.getBoolean(halfDistinctOutput, position)).isTrue();
             }
 
             operator.addInput(singleDistinctPage);
             Block singleDistinctBlock = operator.getOutput().getBlock(maskChannel);
-            assertFalse(singleDistinctBlock instanceof RunLengthEncodedBlock, "single position inputs should not be RLE");
-            assertTrue(BOOLEAN.getBoolean(singleDistinctBlock, 0));
+            assertThat(singleDistinctBlock instanceof RunLengthEncodedBlock)
+                    .describedAs("single position inputs should not be RLE")
+                    .isFalse();
+            assertThat(BOOLEAN.getBoolean(singleDistinctBlock, 0)).isTrue();
 
             operator.addInput(singleNotDistinctPage);
             Block singleNotDistinctBlock = operator.getOutput().getBlock(maskChannel);
-            assertFalse(singleNotDistinctBlock instanceof RunLengthEncodedBlock, "single position inputs should not be RLE");
-            assertFalse(BOOLEAN.getBoolean(singleNotDistinctBlock, 0));
+            assertThat(singleNotDistinctBlock instanceof RunLengthEncodedBlock)
+                    .describedAs("single position inputs should not be RLE")
+                    .isFalse();
+            assertThat(BOOLEAN.getBoolean(singleNotDistinctBlock, 0)).isFalse();
         }
         catch (Exception e) {
             throwIfUnchecked(e);
@@ -168,26 +169,39 @@ public class TestMarkDistinctOperator
         }
     }
 
-    @Test(dataProvider = "dataType")
-    public void testMemoryReservationYield(Type type)
+    @Test
+    public void testMemoryReservationYield()
+    {
+        testMemoryReservationYield(BIGINT);
+        testMemoryReservationYield(VARCHAR);
+    }
+
+    private void testMemoryReservationYield(Type type)
     {
         List<Page> input = createPagesWithDistinctHashKeys(type, 6_000, 600);
 
-        OperatorFactory operatorFactory = new MarkDistinctOperatorFactory(0, new PlanNodeId("test"), ImmutableList.of(type), ImmutableList.of(0), Optional.of(1), joinCompiler, blockTypeOperators);
+        OperatorFactory operatorFactory = new MarkDistinctOperatorFactory(0, new PlanNodeId("test"), ImmutableList.of(type), ImmutableList.of(0), Optional.of(1), hashStrategyCompiler);
 
         // get result with yield; pick a relatively small buffer for partitionRowCount's memory usage
-        GroupByHashYieldAssertion.GroupByHashYieldResult result = finishOperatorWithYieldingGroupByHash(input, type, operatorFactory, operator -> ((MarkDistinctOperator) operator).getCapacity(), 1_400_000);
-        assertGreaterThan(result.getYieldCount(), 5);
-        assertGreaterThan(result.getMaxReservedBytes(), 20L << 20);
+        GroupByHashYieldAssertion.GroupByHashYieldResult result = finishOperatorWithYieldingGroupByHash(input, type, operatorFactory, operator -> ((MarkDistinctOperator) operator).getCapacity(), 450_000);
+        assertThat(result.getYieldCount()).isGreaterThanOrEqualTo(5);
+        assertThat(result.getMaxReservedBytes()).isGreaterThanOrEqualTo(20L << 20);
 
         int count = 0;
         for (Page page : result.getOutput()) {
-            assertEquals(page.getChannelCount(), 3);
+            assertThat(page.getChannelCount()).isEqualTo(3);
             for (int i = 0; i < page.getPositionCount(); i++) {
-                assertEquals(page.getBlock(2).getByte(i, 0), 1);
+                assertThat(BOOLEAN.getBoolean(page.getBlock(2), i)).isTrue();
                 count++;
             }
         }
-        assertEquals(count, 6_000 * 600);
+        assertThat(count).isEqualTo(6_000 * 600);
+    }
+
+    private DriverContext newDriverContext()
+    {
+        return createTaskContext(executor, scheduledExecutor, TEST_SESSION)
+                .addPipelineContext(0, true, true, false)
+                .addDriverContext();
     }
 }

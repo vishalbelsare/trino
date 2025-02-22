@@ -14,7 +14,7 @@
 package io.trino.server;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -34,9 +34,7 @@ public class TestJmxNamingConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("jmx.base-name", "my.stuff")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("jmx.base-name", "my.stuff");
 
         JmxNamingConfig expected = new JmxNamingConfig()
                 .setDomainBase("my.stuff");

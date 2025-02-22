@@ -13,15 +13,13 @@
  */
 package io.trino.sql.analyzer;
 
+import com.google.inject.Inject;
+import io.trino.client.NodeVersion;
 import io.trino.cost.CostCalculator;
 import io.trino.cost.StatsCalculator;
-import io.trino.metadata.Metadata;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.parser.SqlParser;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.PlanFragmenter;
 import io.trino.sql.planner.PlanOptimizersFactory;
-
-import javax.inject.Inject;
 
 import static java.util.Objects.requireNonNull;
 
@@ -29,29 +27,26 @@ public class QueryExplainerFactory
 {
     private final PlanOptimizersFactory planOptimizersFactory;
     private final PlanFragmenter planFragmenter;
-    private final Metadata metadata;
-    private final TypeOperators typeOperators;
-    private final SqlParser sqlParser;
+    private final PlannerContext plannerContext;
     private final StatsCalculator statsCalculator;
     private final CostCalculator costCalculator;
+    private final NodeVersion version;
 
     @Inject
     public QueryExplainerFactory(
             PlanOptimizersFactory planOptimizersFactory,
             PlanFragmenter planFragmenter,
-            Metadata metadata,
-            TypeOperators typeOperators,
-            SqlParser sqlParser,
+            PlannerContext plannerContext,
             StatsCalculator statsCalculator,
-            CostCalculator costCalculator)
+            CostCalculator costCalculator,
+            NodeVersion version)
     {
         this.planOptimizersFactory = requireNonNull(planOptimizersFactory, "planOptimizersFactory is null");
         this.planFragmenter = requireNonNull(planFragmenter, "planFragmenter is null");
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
-        this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
+        this.plannerContext = requireNonNull(plannerContext, "metadata is null");
         this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
         this.costCalculator = requireNonNull(costCalculator, "costCalculator is null");
+        this.version = requireNonNull(version, "version is null");
     }
 
     public QueryExplainer createQueryExplainer(AnalyzerFactory analyzerFactory)
@@ -59,11 +54,10 @@ public class QueryExplainerFactory
         return new QueryExplainer(
                 planOptimizersFactory,
                 planFragmenter,
-                metadata,
-                typeOperators,
-                sqlParser,
+                plannerContext,
                 analyzerFactory,
                 statsCalculator,
-                costCalculator);
+                costCalculator,
+                version);
     }
 }

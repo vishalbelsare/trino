@@ -14,7 +14,7 @@
 package io.trino.plugin.elasticsearch;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -35,10 +35,10 @@ public class TestPasswordConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("elasticsearch.auth.user", "user")
                 .put("elasticsearch.auth.password", "password")
-                .build();
+                .buildOrThrow();
 
         PasswordConfig expected = new PasswordConfig()
                 .setUser("user")

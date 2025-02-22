@@ -14,6 +14,8 @@
 package io.trino.execution;
 
 import io.airlift.concurrent.SetThreadName;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.Tracer;
 import io.trino.Session;
 import io.trino.event.SplitMonitor;
 import io.trino.execution.buffer.OutputBuffer;
@@ -23,12 +25,11 @@ import io.trino.operator.TaskContext;
 import io.trino.sql.planner.LocalExecutionPlanner;
 import io.trino.sql.planner.LocalExecutionPlanner.LocalExecutionPlan;
 import io.trino.sql.planner.PlanFragment;
-import io.trino.sql.planner.TypeProvider;
 
 import java.util.concurrent.Executor;
 
 import static com.google.common.base.Throwables.throwIfUnchecked;
-import static io.trino.execution.SqlTaskExecution.createSqlTaskExecution;
+import static io.trino.tracing.ScopedSpan.scopedSpan;
 import static java.util.Objects.requireNonNull;
 
 public class SqlTaskExecutionFactory
@@ -39,6 +40,7 @@ public class SqlTaskExecutionFactory
 
     private final LocalExecutionPlanner planner;
     private final SplitMonitor splitMonitor;
+    private final Tracer tracer;
     private final boolean perOperatorCpuTimerEnabled;
     private final boolean cpuTimerEnabled;
 
@@ -47,19 +49,21 @@ public class SqlTaskExecutionFactory
             TaskExecutor taskExecutor,
             LocalExecutionPlanner planner,
             SplitMonitor splitMonitor,
+            Tracer tracer,
             TaskManagerConfig config)
     {
         this.taskNotificationExecutor = requireNonNull(taskNotificationExecutor, "taskNotificationExecutor is null");
         this.taskExecutor = requireNonNull(taskExecutor, "taskExecutor is null");
         this.planner = requireNonNull(planner, "planner is null");
         this.splitMonitor = requireNonNull(splitMonitor, "splitMonitor is null");
-        requireNonNull(config, "config is null");
+        this.tracer = requireNonNull(tracer, "tracer is null");
         this.perOperatorCpuTimerEnabled = config.isPerOperatorCpuTimerEnabled();
         this.cpuTimerEnabled = config.isTaskCpuTimerEnabled();
     }
 
     public SqlTaskExecution create(
             Session session,
+            Span taskSpan,
             QueryContext queryContext,
             TaskStateMachine taskStateMachine,
             OutputBuffer outputBuffer,
@@ -74,14 +78,12 @@ public class SqlTaskExecutionFactory
                 cpuTimerEnabled);
 
         LocalExecutionPlan localExecutionPlan;
-        try (SetThreadName ignored = new SetThreadName("Task-%s", taskStateMachine.getTaskId())) {
-            try {
+        try (SetThreadName _ = new SetThreadName("Task-" + taskStateMachine.getTaskId())) {
+            try (var ignoredSpan = scopedSpan(tracer, "local-planner")) {
                 localExecutionPlan = planner.plan(
                         taskContext,
                         fragment.getRoot(),
-                        TypeProvider.copyOf(fragment.getSymbols()),
-                        fragment.getPartitioningScheme(),
-                        fragment.getStageExecutionDescriptor(),
+                        fragment.getOutputPartitioningScheme(),
                         fragment.getPartitionedSources(),
                         outputBuffer);
             }
@@ -92,13 +94,15 @@ public class SqlTaskExecutionFactory
                 throw new RuntimeException(e);
             }
         }
-        return createSqlTaskExecution(
+        return new SqlTaskExecution(
                 taskStateMachine,
                 taskContext,
+                taskSpan,
                 outputBuffer,
                 localExecutionPlan,
                 taskExecutor,
-                taskNotificationExecutor,
-                splitMonitor);
+                splitMonitor,
+                tracer,
+                taskNotificationExecutor);
     }
 }

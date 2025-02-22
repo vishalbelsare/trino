@@ -14,31 +14,53 @@
 package io.trino.execution.resourcegroups;
 
 import com.google.common.collect.ImmutableList;
-import org.testng.annotations.Test;
+import io.trino.execution.resourcegroups.IndexedPriorityQueue.Prioritized;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import static io.trino.testing.assertions.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static io.trino.execution.resourcegroups.IndexedPriorityQueue.PriorityOrdering.HIGH_TO_LOW;
+import static io.trino.execution.resourcegroups.IndexedPriorityQueue.PriorityOrdering.LOW_TO_HIGH;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestUpdateablePriorityQueue
 {
     @Test
     public void testFifoQueue()
     {
-        assertEquals(populateAndExtract(new FifoQueue<>()), ImmutableList.of(1, 2, 3));
+        assertThat(populateAndExtract(new FifoQueue<>())).isEqualTo(ImmutableList.of(1, 2, 3));
     }
 
     @Test
     public void testIndexedPriorityQueue()
     {
-        assertEquals(populateAndExtract(new IndexedPriorityQueue<>()), ImmutableList.of(3, 2, 1));
+        assertThat(populateAndExtract(new IndexedPriorityQueue<>())).isEqualTo(ImmutableList.of(3, 2, 1));
+        assertThat(populateAndExtract(new IndexedPriorityQueue<>(HIGH_TO_LOW))).isEqualTo(ImmutableList.of(3, 2, 1));
+        assertThat(populateAndExtract(new IndexedPriorityQueue<>(LOW_TO_HIGH))).isEqualTo(ImmutableList.of(1, 2, 3));
+    }
+
+    @Test
+    public void testPrioritizedPeekPollIndexedPriorityQueue()
+    {
+        IndexedPriorityQueue<Object> queue = new IndexedPriorityQueue<>();
+        queue.addOrUpdate("a", 1);
+        queue.addOrUpdate("b", 3);
+        queue.addOrUpdate("c", 2);
+
+        assertThat(queue.peekPrioritized()).isEqualTo(new Prioritized<>("b", 3));
+        assertThat(queue.pollPrioritized()).isEqualTo(new Prioritized<>("b", 3));
+        assertThat(queue.peekPrioritized()).isEqualTo(new Prioritized<>("c", 2));
+        assertThat(queue.pollPrioritized()).isEqualTo(new Prioritized<>("c", 2));
+        assertThat(queue.peekPrioritized()).isEqualTo(new Prioritized<>("a", 1));
+        assertThat(queue.pollPrioritized()).isEqualTo(new Prioritized<>("a", 1));
+        assertThat(queue.peekPrioritized()).isNull();
+        assertThat(queue.pollPrioritized()).isNull();
     }
 
     @Test
     public void testStochasticPriorityQueue()
     {
-        assertTrue(populateAndExtract(new StochasticPriorityQueue<>()).size() == 3);
+        assertThat(populateAndExtract(new StochasticPriorityQueue<>()).size() == 3).isTrue();
     }
 
     private static List<Integer> populateAndExtract(UpdateablePriorityQueue<Integer> queue)

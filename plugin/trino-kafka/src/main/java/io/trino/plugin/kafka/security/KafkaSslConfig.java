@@ -13,22 +13,19 @@
  */
 package io.trino.plugin.kafka.security;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.inject.ConfigurationException;
-import com.google.inject.spi.Message;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.validation.FileExists;
-
-import javax.annotation.PostConstruct;
+import jakarta.validation.constraints.AssertTrue;
 
 import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.plugin.kafka.security.KafkaEndpointIdentificationAlgorithm.HTTPS;
 import static io.trino.plugin.kafka.security.KafkaKeystoreTruststoreType.JKS;
+import static org.apache.kafka.clients.CommonClientConfigs.SECURITY_PROTOCOL_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_KEYSTORE_LOCATION_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_KEYSTORE_PASSWORD_CONFIG;
@@ -37,9 +34,10 @@ import static org.apache.kafka.common.config.SslConfigs.SSL_KEY_PASSWORD_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG;
 import static org.apache.kafka.common.config.SslConfigs.SSL_TRUSTSTORE_TYPE_CONFIG;
+import static org.apache.kafka.common.security.auth.SecurityProtocol.SSL;
 
 /**
- *  {@KafkaSslConfig} manages Kafka SSL authentication and encryption between clients and brokers.
+ *  Manages Kafka SSL authentication and encryption between clients and brokers.
  */
 public class KafkaSslConfig
 {
@@ -170,18 +168,20 @@ public class KafkaSslConfig
         getTruststoreType().ifPresent(v -> properties.put(SSL_TRUSTSTORE_TYPE_CONFIG, v.name()));
         getKeyPassword().ifPresent(v -> properties.put(SSL_KEY_PASSWORD_CONFIG, v));
         getEndpointIdentificationAlgorithm().ifPresent(v -> properties.put(SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, v.getValue()));
+        properties.put(SECURITY_PROTOCOL_CONFIG, SSL.name());
 
-        return properties.build();
+        return properties.buildOrThrow();
     }
 
-    @PostConstruct
-    public void validate()
+    @AssertTrue(message = "kafka.ssl.keystore.password must be set when kafka.ssl.keystore.location is given")
+    public boolean isKeystorePasswordValid()
     {
-        if (getKeystoreLocation().isPresent() && getKeystorePassword().isEmpty()) {
-            throw new ConfigurationException(ImmutableList.of(new Message("kafka.ssl.keystore.password must set when kafka.ssl.keystore.location is given")));
-        }
-        if (getTruststoreLocation().isPresent() && getTruststorePassword().isEmpty()) {
-            throw new ConfigurationException(ImmutableList.of(new Message("kafka.ssl.truststore.password must set when kafka.ssl.truststore.location is given")));
-        }
+        return getKeystoreLocation().isEmpty() || getKeystorePassword().isPresent();
+    }
+
+    @AssertTrue(message = "kafka.ssl.truststore.password must be set when kafka.ssl.truststore.location is given")
+    public boolean isTruststorePasswordValid()
+    {
+        return getTruststoreLocation().isEmpty() || getTruststorePassword().isPresent();
     }
 }

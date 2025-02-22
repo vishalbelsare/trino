@@ -18,31 +18,32 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.SessionRepresentation;
+import io.trino.client.NodeVersion;
+import io.trino.operator.RetryPolicy;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorType;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoWarning;
 import io.trino.spi.eventlistener.RoutineInfo;
 import io.trino.spi.eventlistener.TableInfo;
-import io.trino.spi.memory.MemoryPoolId;
 import io.trino.spi.resourcegroups.QueryType;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.spi.security.SelectedRole;
 import io.trino.sql.analyzer.Output;
 import io.trino.transaction.TransactionId;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.Immutable;
+import jakarta.annotation.Nullable;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
-import static io.trino.execution.StageInfo.getAllStages;
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
@@ -51,8 +52,6 @@ public class QueryInfo
     private final QueryId queryId;
     private final SessionRepresentation session;
     private final QueryState state;
-    private final MemoryPoolId memoryPool;
-    private final boolean scheduled;
     private final URI self;
     private final List<String> fieldNames;
     private final String query;
@@ -61,6 +60,8 @@ public class QueryInfo
     private final Optional<String> setCatalog;
     private final Optional<String> setSchema;
     private final Optional<String> setPath;
+    private final Optional<String> setAuthorizationUser;
+    private final boolean resetAuthorizationUser;
     private final Map<String, String> setSessionProperties;
     private final Set<String> resetSessionProperties;
     private final Map<String, SelectedRole> setRoles;
@@ -78,17 +79,18 @@ public class QueryInfo
     private final List<TrinoWarning> warnings;
     private final Set<Input> inputs;
     private final Optional<Output> output;
-    private final boolean completeInfo;
+    private final boolean finalQueryInfo;
     private final Optional<ResourceGroupId> resourceGroupId;
     private final Optional<QueryType> queryType;
+    private final RetryPolicy retryPolicy;
+    private final boolean pruned;
+    private final NodeVersion version;
 
     @JsonCreator
     public QueryInfo(
             @JsonProperty("queryId") QueryId queryId,
             @JsonProperty("session") SessionRepresentation session,
             @JsonProperty("state") QueryState state,
-            @JsonProperty("memoryPool") MemoryPoolId memoryPool,
-            @JsonProperty("scheduled") boolean scheduled,
             @JsonProperty("self") URI self,
             @JsonProperty("fieldNames") List<String> fieldNames,
             @JsonProperty("query") String query,
@@ -97,6 +99,8 @@ public class QueryInfo
             @JsonProperty("setCatalog") Optional<String> setCatalog,
             @JsonProperty("setSchema") Optional<String> setSchema,
             @JsonProperty("setPath") Optional<String> setPath,
+            @JsonProperty("setAuthorizationUser") Optional<String> setAuthorizationUser,
+            @JsonProperty("resetAuthorizationUser") boolean resetAuthorizationUser,
             @JsonProperty("setSessionProperties") Map<String, String> setSessionProperties,
             @JsonProperty("resetSessionProperties") Set<String> resetSessionProperties,
             @JsonProperty("setRoles") Map<String, SelectedRole> setRoles,
@@ -113,9 +117,12 @@ public class QueryInfo
             @JsonProperty("output") Optional<Output> output,
             @JsonProperty("referencedTables") List<TableInfo> referencedTables,
             @JsonProperty("routines") List<RoutineInfo> routines,
-            @JsonProperty("completeInfo") boolean completeInfo,
+            @JsonProperty("finalQueryInfo") boolean finalQueryInfo,
             @JsonProperty("resourceGroupId") Optional<ResourceGroupId> resourceGroupId,
-            @JsonProperty("queryType") Optional<QueryType> queryType)
+            @JsonProperty("queryType") Optional<QueryType> queryType,
+            @JsonProperty("retryPolicy") RetryPolicy retryPolicy,
+            @JsonProperty("pruned") boolean pruned,
+            @JsonProperty("version") NodeVersion version)
     {
         requireNonNull(queryId, "queryId is null");
         requireNonNull(session, "session is null");
@@ -126,6 +133,7 @@ public class QueryInfo
         requireNonNull(setCatalog, "setCatalog is null");
         requireNonNull(setSchema, "setSchema is null");
         requireNonNull(setPath, "setPath is null");
+        requireNonNull(setAuthorizationUser, "setAuthorizationUser is null");
         requireNonNull(setSessionProperties, "setSessionProperties is null");
         requireNonNull(resetSessionProperties, "resetSessionProperties is null");
         requireNonNull(addedPreparedStatements, "addedPreparedStatements is null");
@@ -141,12 +149,12 @@ public class QueryInfo
         requireNonNull(resourceGroupId, "resourceGroupId is null");
         requireNonNull(warnings, "warnings is null");
         requireNonNull(queryType, "queryType is null");
+        requireNonNull(retryPolicy, "retryPolicy is null");
+        requireNonNull(version, "version is null");
 
         this.queryId = queryId;
         this.session = session;
         this.state = state;
-        this.memoryPool = requireNonNull(memoryPool, "memoryPool is null");
-        this.scheduled = scheduled;
         this.self = self;
         this.fieldNames = ImmutableList.copyOf(fieldNames);
         this.query = query;
@@ -155,6 +163,8 @@ public class QueryInfo
         this.setCatalog = setCatalog;
         this.setSchema = setSchema;
         this.setPath = setPath;
+        this.setAuthorizationUser = setAuthorizationUser;
+        this.resetAuthorizationUser = resetAuthorizationUser;
         this.setSessionProperties = ImmutableMap.copyOf(setSessionProperties);
         this.resetSessionProperties = ImmutableSet.copyOf(resetSessionProperties);
         this.setRoles = ImmutableMap.copyOf(setRoles);
@@ -172,9 +182,13 @@ public class QueryInfo
         this.output = output;
         this.referencedTables = ImmutableList.copyOf(referencedTables);
         this.routines = ImmutableList.copyOf(routines);
-        this.completeInfo = completeInfo;
+        this.finalQueryInfo = finalQueryInfo;
+        checkArgument(!finalQueryInfo || state.isDone(), "finalQueryInfo without a terminal query state");
         this.resourceGroupId = resourceGroupId;
         this.queryType = queryType;
+        this.retryPolicy = retryPolicy;
+        this.pruned = pruned;
+        this.version = version;
     }
 
     @JsonProperty
@@ -196,15 +210,21 @@ public class QueryInfo
     }
 
     @JsonProperty
-    public MemoryPoolId getMemoryPool()
+    public boolean isScheduled()
     {
-        return memoryPool;
+        return queryStats.isScheduled();
     }
 
     @JsonProperty
-    public boolean isScheduled()
+    public OptionalDouble getProgressPercentage()
     {
-        return scheduled;
+        return queryStats.getProgressPercentage();
+    }
+
+    @JsonProperty
+    public OptionalDouble getRunningPercentage()
+    {
+        return queryStats.getRunningPercentage();
     }
 
     @JsonProperty
@@ -253,6 +273,18 @@ public class QueryInfo
     public Optional<String> getSetPath()
     {
         return setPath;
+    }
+
+    @JsonProperty
+    public Optional<String> getSetAuthorizationUser()
+    {
+        return setAuthorizationUser;
+    }
+
+    @JsonProperty
+    public boolean isResetAuthorizationUser()
+    {
+        return resetAuthorizationUser;
     }
 
     @JsonProperty
@@ -340,7 +372,7 @@ public class QueryInfo
     @JsonProperty
     public boolean isFinalQueryInfo()
     {
-        return state.isDone() && getAllStages(outputStage).stream().allMatch(StageInfo::isFinalStageInfo);
+        return finalQueryInfo;
     }
 
     @JsonProperty
@@ -379,6 +411,24 @@ public class QueryInfo
         return queryType;
     }
 
+    @JsonProperty
+    public RetryPolicy getRetryPolicy()
+    {
+        return retryPolicy;
+    }
+
+    @JsonProperty
+    public boolean isPruned()
+    {
+        return pruned;
+    }
+
+    @JsonProperty
+    public NodeVersion getVersion()
+    {
+        return version;
+    }
+
     @Override
     public String toString()
     {
@@ -389,8 +439,43 @@ public class QueryInfo
                 .toString();
     }
 
-    public boolean isCompleteInfo()
+    public QueryInfo pruneDigests()
     {
-        return completeInfo;
+        return new QueryInfo(
+                queryId,
+                session,
+                state,
+                self,
+                fieldNames,
+                query,
+                preparedQuery,
+                queryStats,
+                setCatalog,
+                setSchema,
+                setPath,
+                setAuthorizationUser,
+                resetAuthorizationUser,
+                setSessionProperties,
+                resetSessionProperties,
+                setRoles,
+                addedPreparedStatements,
+                deallocatedPreparedStatements,
+                startedTransactionId,
+                clearTransactionId,
+                updateType,
+                outputStage.map(StageInfo::pruneDigests),
+                failureInfo,
+                errorCode,
+                warnings,
+                inputs,
+                output,
+                referencedTables,
+                routines,
+                finalQueryInfo,
+                resourceGroupId,
+                queryType,
+                retryPolicy,
+                pruned,
+                version);
     }
 }

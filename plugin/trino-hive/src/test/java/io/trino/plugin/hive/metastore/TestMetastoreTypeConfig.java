@@ -14,13 +14,15 @@
 package io.trino.plugin.hive.metastore;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.trino.plugin.hive.metastore.MetastoreTypeConfig.MetastoreType.GLUE;
+import static io.trino.plugin.hive.metastore.MetastoreTypeConfig.MetastoreType.THRIFT;
 
 public class TestMetastoreTypeConfig
 {
@@ -28,18 +30,16 @@ public class TestMetastoreTypeConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(MetastoreTypeConfig.class)
-                .setMetastoreType("thrift"));
+                .setMetastoreType(THRIFT));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("hive.metastore", "foo")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("hive.metastore", "glue");
 
         MetastoreTypeConfig expected = new MetastoreTypeConfig()
-                .setMetastoreType("foo");
+                .setMetastoreType(GLUE);
 
         assertFullMapping(properties, expected);
     }

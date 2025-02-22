@@ -15,8 +15,20 @@ package io.trino.plugin.bigquery;
 
 import io.trino.spi.connector.ConnectorTransactionHandle;
 
-public enum BigQueryTransactionHandle
+import java.util.UUID;
+
+import static java.util.Objects.requireNonNull;
+
+public record BigQueryTransactionHandle(UUID uuid)
         implements ConnectorTransactionHandle
 {
-    INSTANCE
+    public BigQueryTransactionHandle()
+    {
+        this(UUID.randomUUID());
+    }
+
+    public BigQueryTransactionHandle
+    {
+        requireNonNull(uuid, "uuid is null");
+    }
 }

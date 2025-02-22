@@ -13,8 +13,6 @@
  */
 package io.trino.orc.reader;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.orc.OrcColumn;
 import io.trino.orc.OrcCorruptionException;
@@ -31,11 +29,9 @@ import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128Math;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.UnscaledDecimal128Arithmetic;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.IOException;
 import java.time.ZoneId;
@@ -43,6 +39,7 @@ import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verifyNotNull;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.orc.metadata.Stream.StreamKind.DATA;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
@@ -52,13 +49,12 @@ import static io.trino.orc.reader.ReaderUtils.unpackInt128Nulls;
 import static io.trino.orc.reader.ReaderUtils.unpackLongNulls;
 import static io.trino.orc.reader.ReaderUtils.verifyStreamType;
 import static io.trino.orc.stream.MissingInputStreamSource.missingStreamSource;
-import static io.trino.spi.type.DoubleType.DOUBLE;
 import static java.util.Objects.requireNonNull;
 
 public class DecimalColumnReader
         implements ColumnReader
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(DecimalColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(DecimalColumnReader.class);
 
     private final DecimalType type;
     private final OrcColumn column;
@@ -82,9 +78,9 @@ public class DecimalColumnReader
 
     private long[] nonNullValueTemp = new long[0];
 
-    private final LocalMemoryContext systemMemoryContext;
+    private final LocalMemoryContext memoryContext;
 
-    public DecimalColumnReader(Type type, OrcColumn column, LocalMemoryContext systemMemoryContext)
+    public DecimalColumnReader(Type type, OrcColumn column, LocalMemoryContext memoryContext)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -92,7 +88,7 @@ public class DecimalColumnReader
         this.type = (DecimalType) type;
 
         this.column = requireNonNull(column, "column is null");
-        this.systemMemoryContext = requireNonNull(systemMemoryContext, "systemMemoryContext is null");
+        this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
     }
 
     @Override
@@ -135,7 +131,7 @@ public class DecimalColumnReader
                 block = readNullBlock(isNull, nextBatchSize - nullCount);
             }
             else {
-                block = RunLengthEncodedBlock.create(DOUBLE, null, nextBatchSize);
+                block = RunLengthEncodedBlock.create(type, null, nextBatchSize);
             }
         }
 
@@ -199,8 +195,7 @@ public class DecimalColumnReader
         for (int offset = 0; offset < data.length; offset += 2) {
             long sourceScale = scaleStream.next();
             if (sourceScale != type.getScale()) {
-                Slice decimal = Slices.wrappedLongArray(data[offset], data[offset + 1]);
-                UnscaledDecimal128Arithmetic.rescale(decimal, (int) (type.getScale() - sourceScale), Slices.wrappedLongArray(data, offset, 2));
+                Int128Math.rescale(data[offset], data[offset + 1], (int) (type.getScale() - sourceScale), data, offset);
             }
         }
         return new Int128ArrayBlock(nextBatchSize, Optional.empty(), data);
@@ -228,7 +223,7 @@ public class DecimalColumnReader
         int minNonNullValueSize = minNonNullValueSize(nonNullCount);
         if (nonNullValueTemp.length < minNonNullValueSize) {
             nonNullValueTemp = new long[minNonNullValueSize];
-            systemMemoryContext.setBytes(sizeOf(nonNullValueTemp));
+            memoryContext.setBytes(sizeOf(nonNullValueTemp));
         }
 
         decimalStream.nextShortDecimal(nonNullValueTemp, nonNullCount);
@@ -254,7 +249,7 @@ public class DecimalColumnReader
         int minTempSize = minNonNullValueSize(nonNullCount) * 2;
         if (nonNullValueTemp.length < minTempSize) {
             nonNullValueTemp = new long[minTempSize];
-            systemMemoryContext.setBytes(sizeOf(nonNullValueTemp));
+            memoryContext.setBytes(sizeOf(nonNullValueTemp));
         }
 
         decimalStream.nextLongDecimal(nonNullValueTemp, nonNullCount);
@@ -263,8 +258,7 @@ public class DecimalColumnReader
         for (int offset = 0; offset < nonNullCount * 2; offset += 2) {
             long sourceScale = scaleStream.next();
             if (sourceScale != type.getScale()) {
-                Slice decimal = Slices.wrappedLongArray(nonNullValueTemp[offset], nonNullValueTemp[offset + 1]);
-                UnscaledDecimal128Arithmetic.rescale(decimal, (int) (type.getScale() - sourceScale), Slices.wrappedLongArray(nonNullValueTemp, offset, 2));
+                Int128Math.rescale(nonNullValueTemp[offset], nonNullValueTemp[offset + 1], (int) (type.getScale() - sourceScale), nonNullValueTemp, offset);
             }
         }
 
@@ -347,7 +341,7 @@ public class DecimalColumnReader
     @Override
     public void close()
     {
-        systemMemoryContext.close();
+        memoryContext.close();
     }
 
     @Override

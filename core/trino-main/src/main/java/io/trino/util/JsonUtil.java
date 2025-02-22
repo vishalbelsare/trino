@@ -14,7 +14,6 @@
 package io.trino.util;
 
 import com.fasterxml.jackson.core.JsonFactory;
-import com.fasterxml.jackson.core.JsonFactoryBuilder;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
@@ -25,11 +24,14 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DuplicateMapKeyException;
-import io.trino.spi.block.SingleMapBlockWriter;
-import io.trino.spi.block.SingleRowBlockWriter;
+import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
@@ -37,6 +39,7 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.MapType;
@@ -60,6 +63,7 @@ import io.trino.type.VarcharOperators;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.StringReader;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -76,14 +80,12 @@ import static com.fasterxml.jackson.core.JsonToken.FIELD_NAME;
 import static com.fasterxml.jackson.core.JsonToken.START_ARRAY;
 import static com.fasterxml.jackson.core.JsonToken.START_OBJECT;
 import static com.google.common.base.Verify.verify;
+import static io.trino.plugin.base.util.JsonUtils.jsonFactoryBuilder;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
-import static io.trino.spi.type.Decimals.decodeUnscaledValue;
-import static io.trino.spi.type.Decimals.encodeUnscaledValue;
-import static io.trino.spi.type.Decimals.isShortDecimal;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
@@ -92,10 +94,10 @@ import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.UNBOUNDED_LENGTH;
 import static io.trino.type.DateTimes.formatTimestamp;
 import static io.trino.type.JsonType.JSON;
+import static io.trino.type.UnknownType.UNKNOWN;
 import static io.trino.util.DateTimeUtils.printDate;
 import static io.trino.util.JsonUtil.ObjectKeyProvider.createObjectKeyProvider;
 import static java.lang.Float.floatToRawIntBits;
-import static java.lang.Float.intBitsToFloat;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.math.RoundingMode.HALF_UP;
@@ -104,22 +106,36 @@ import static java.time.ZoneOffset.UTC;
 
 public final class JsonUtil
 {
-    public static final JsonFactory JSON_FACTORY = new JsonFactoryBuilder().disable(CANONICALIZE_FIELD_NAMES).build();
+    // StringReader outperforms InputStreamReader for small inputs. Limit based on Jackson benchmarks {@link https://github.com/FasterXML/jackson-benchmarks/pull/9}
+    private static final int STRING_READER_LENGTH_LIMIT = 8192;
+
+    private JsonUtil() {}
 
     // This object mapper is constructed without .configure(ORDER_MAP_ENTRIES_BY_KEYS, true) because
     // `OBJECT_MAPPER.writeValueAsString(parser.readValueAsTree());` preserves input order.
     // Be aware. Using it arbitrarily can produce invalid json (ordered by key is required in Trino).
-    private static final ObjectMapper OBJECT_MAPPED_UNORDERED = new ObjectMapper(JSON_FACTORY);
+    private static final ObjectMapper OBJECT_MAPPED_UNORDERED = new ObjectMapper(createJsonFactory());
 
     private static final int MAX_JSON_LENGTH_IN_ERROR_MESSAGE = 10_000;
 
-    private JsonUtil() {}
+    // Note: JsonFactory is mutable, instances cannot be shared openly.
+    public static JsonFactory createJsonFactory()
+    {
+        return jsonFactoryBuilder().disable(CANONICALIZE_FIELD_NAMES).build();
+    }
 
     public static JsonParser createJsonParser(JsonFactory factory, Slice json)
             throws IOException
     {
         // Jackson tries to detect the character encoding automatically when using InputStream
-        // so we pass an InputStreamReader instead.
+        // so we pass StringReader or an InputStreamReader instead.
+        // Despite the https://github.com/FasterXML/jackson-core/pull/1081, the below performance optimization
+        // is still valid for small inputs.
+        if (json.length() < STRING_READER_LENGTH_LIMIT) {
+            // StringReader is more performant than InputStreamReader for small inputs
+            return factory.createParser(new StringReader(json.toStringUtf8()));
+        }
+
         return factory.createParser(new InputStreamReader(json.getInput(), UTF_8));
     }
 
@@ -134,9 +150,7 @@ public final class JsonUtil
         if (json.length() <= MAX_JSON_LENGTH_IN_ERROR_MESSAGE) {
             return json.toStringUtf8();
         }
-        else {
-            return json.slice(0, MAX_JSON_LENGTH_IN_ERROR_MESSAGE).toStringUtf8() + "...(truncated)";
-        }
+        return json.slice(0, MAX_JSON_LENGTH_IN_ERROR_MESSAGE).toStringUtf8() + "...(truncated)";
     }
 
     public static boolean canCastToJson(Type type)
@@ -159,8 +173,7 @@ public final class JsonUtil
         if (type instanceof ArrayType) {
             return canCastToJson(((ArrayType) type).getElementType());
         }
-        if (type instanceof MapType) {
-            MapType mapType = (MapType) type;
+        if (type instanceof MapType mapType) {
             return (mapType.getKeyType() instanceof UnknownType ||
                     isValidJsonObjectKeyType(mapType.getKeyType())) &&
                     canCastToJson(mapType.getValueType());
@@ -217,32 +230,40 @@ public final class JsonUtil
 
         static ObjectKeyProvider createObjectKeyProvider(Type type)
         {
-            if (type instanceof UnknownType) {
+            if (type.equals(UNKNOWN)) {
                 return (block, position) -> null;
             }
-            if (type instanceof BooleanType) {
-                return (block, position) -> type.getBoolean(block, position) ? "true" : "false";
+            if (type.equals(BOOLEAN)) {
+                return (block, position) -> BOOLEAN.getBoolean(block, position) ? "true" : "false";
             }
-            if (type instanceof TinyintType || type instanceof SmallintType || type instanceof IntegerType || type instanceof BigintType) {
-                return (block, position) -> String.valueOf(type.getLong(block, position));
+            if (type.equals(TINYINT)) {
+                return (block, position) -> String.valueOf(TINYINT.getByte(block, position));
             }
-            if (type instanceof RealType) {
-                return (block, position) -> String.valueOf(intBitsToFloat(toIntExact(type.getLong(block, position))));
+            if (type.equals(SMALLINT)) {
+                return (block, position) -> String.valueOf(SMALLINT.getShort(block, position));
             }
-            if (type instanceof DoubleType) {
-                return (block, position) -> String.valueOf(type.getDouble(block, position));
+            if (type.equals(INTEGER)) {
+                return (block, position) -> String.valueOf(INTEGER.getInt(block, position));
             }
-            if (type instanceof DecimalType) {
-                DecimalType decimalType = (DecimalType) type;
-                if (isShortDecimal(decimalType)) {
+            if (type.equals(BIGINT)) {
+                return (block, position) -> String.valueOf(BIGINT.getLong(block, position));
+            }
+            if (type.equals(REAL)) {
+                return (block, position) -> String.valueOf(REAL.getFloat(block, position));
+            }
+            if (type.equals(DOUBLE)) {
+                return (block, position) -> String.valueOf(DOUBLE.getDouble(block, position));
+            }
+            if (type instanceof DecimalType decimalType) {
+                if (decimalType.isShort()) {
                     return (block, position) -> Decimals.toString(decimalType.getLong(block, position), decimalType.getScale());
                 }
                 return (block, position) -> Decimals.toString(
-                        decodeUnscaledValue(type.getSlice(block, position)),
+                        ((Int128) decimalType.getObject(block, position)).toBigInteger(),
                         decimalType.getScale());
             }
-            if (type instanceof VarcharType) {
-                return (block, position) -> type.getSlice(block, position).toStringUtf8();
+            if (type instanceof VarcharType varcharType) {
+                return (block, position) -> varcharType.getSlice(block, position).toStringUtf8();
             }
 
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, format("Unsupported type: %s", type));
@@ -256,7 +277,7 @@ public final class JsonUtil
         void writeJsonValue(JsonGenerator jsonGenerator, Block block, int position)
                 throws IOException;
 
-        static JsonGeneratorWriter createJsonGeneratorWriter(Type type, boolean legacyRowToJson)
+        static JsonGeneratorWriter createJsonGeneratorWriter(Type type)
         {
             if (type instanceof UnknownType) {
                 return new UnknownJsonGeneratorWriter();
@@ -273,11 +294,11 @@ public final class JsonUtil
             if (type instanceof DoubleType) {
                 return new DoubleJsonGeneratorWriter();
             }
-            if (type instanceof DecimalType) {
-                if (isShortDecimal(type)) {
-                    return new ShortDecimalJsonGeneratorWriter((DecimalType) type);
+            if (type instanceof DecimalType decimalType) {
+                if (decimalType.isShort()) {
+                    return new ShortDecimalJsonGeneratorWriter(decimalType);
                 }
-                return new LongDeicmalJsonGeneratorWriter((DecimalType) type);
+                return new LongDecimalJsonGeneratorWriter(decimalType);
             }
             if (type instanceof VarcharType) {
                 return new VarcharJsonGeneratorWriter(type);
@@ -285,32 +306,30 @@ public final class JsonUtil
             if (type instanceof JsonType) {
                 return new JsonJsonGeneratorWriter();
             }
-            if (type instanceof TimestampType) {
-                return new TimestampJsonGeneratorWriter((TimestampType) type);
+            if (type instanceof TimestampType timestampType) {
+                return new TimestampJsonGeneratorWriter(timestampType);
             }
             if (type instanceof DateType) {
                 return new DateGeneratorWriter();
             }
-            if (type instanceof ArrayType) {
-                ArrayType arrayType = (ArrayType) type;
+            if (type instanceof ArrayType arrayType) {
                 return new ArrayJsonGeneratorWriter(
                         arrayType,
-                        createJsonGeneratorWriter(arrayType.getElementType(), legacyRowToJson));
+                        createJsonGeneratorWriter(arrayType.getElementType()));
             }
-            if (type instanceof MapType) {
-                MapType mapType = (MapType) type;
+            if (type instanceof MapType mapType) {
                 return new MapJsonGeneratorWriter(
                         mapType,
                         createObjectKeyProvider(mapType.getKeyType()),
-                        createJsonGeneratorWriter(mapType.getValueType(), legacyRowToJson));
+                        createJsonGeneratorWriter(mapType.getValueType()));
             }
-            if (type instanceof RowType) {
+            if (type instanceof RowType rowType) {
                 List<Type> fieldTypes = type.getTypeParameters();
                 List<JsonGeneratorWriter> fieldWriters = new ArrayList<>(fieldTypes.size());
                 for (int i = 0; i < fieldTypes.size(); i++) {
-                    fieldWriters.add(createJsonGeneratorWriter(fieldTypes.get(i), legacyRowToJson));
+                    fieldWriters.add(createJsonGeneratorWriter(fieldTypes.get(i)));
                 }
-                return new RowJsonGeneratorWriter((RowType) type, fieldWriters, legacyRowToJson);
+                return new RowJsonGeneratorWriter(rowType, fieldWriters);
             }
 
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, format("Unsupported type: %s", type));
@@ -380,7 +399,7 @@ public final class JsonUtil
                 jsonGenerator.writeNull();
             }
             else {
-                float value = intBitsToFloat(toIntExact(REAL.getLong(block, position)));
+                float value = REAL.getFloat(block, position);
                 jsonGenerator.writeNumber(value);
             }
         }
@@ -427,12 +446,12 @@ public final class JsonUtil
         }
     }
 
-    private static class LongDeicmalJsonGeneratorWriter
+    private static class LongDecimalJsonGeneratorWriter
             implements JsonGeneratorWriter
     {
         private final DecimalType type;
 
-        public LongDeicmalJsonGeneratorWriter(DecimalType type)
+        public LongDecimalJsonGeneratorWriter(DecimalType type)
         {
             this.type = type;
         }
@@ -446,7 +465,7 @@ public final class JsonUtil
             }
             else {
                 BigDecimal value = new BigDecimal(
-                        decodeUnscaledValue(type.getSlice(block, position)),
+                        ((Int128) type.getObject(block, position)).toBigInteger(),
                         type.getScale());
                 jsonGenerator.writeNumber(value);
             }
@@ -541,7 +560,7 @@ public final class JsonUtil
                 jsonGenerator.writeNull();
             }
             else {
-                int value = toIntExact(DATE.getLong(block, position));
+                int value = DATE.getInt(block, position);
                 jsonGenerator.writeString(printDate(value));
             }
         }
@@ -599,17 +618,22 @@ public final class JsonUtil
                 jsonGenerator.writeNull();
             }
             else {
-                Block mapBlock = type.getObject(block, position);
+                SqlMap sqlMap = type.getObject(block, position);
+
+                int rawOffset = sqlMap.getRawOffset();
+                Block rawKeyBlock = sqlMap.getRawKeyBlock();
+                Block rawValueBlock = sqlMap.getRawValueBlock();
+
                 Map<String, Integer> orderedKeyToValuePosition = new TreeMap<>();
-                for (int i = 0; i < mapBlock.getPositionCount(); i += 2) {
-                    String objectKey = keyProvider.getObjectKey(mapBlock, i);
-                    orderedKeyToValuePosition.put(objectKey, i + 1);
+                for (int i = 0; i < sqlMap.getSize(); i++) {
+                    String objectKey = keyProvider.getObjectKey(rawKeyBlock, rawOffset + i);
+                    orderedKeyToValuePosition.put(objectKey, i);
                 }
 
                 jsonGenerator.writeStartObject();
                 for (Map.Entry<String, Integer> entry : orderedKeyToValuePosition.entrySet()) {
                     jsonGenerator.writeFieldName(entry.getKey());
-                    valueWriter.writeJsonValue(jsonGenerator, mapBlock, entry.getValue());
+                    valueWriter.writeJsonValue(jsonGenerator, rawValueBlock, rawOffset + entry.getValue());
                 }
                 jsonGenerator.writeEndObject();
             }
@@ -621,13 +645,11 @@ public final class JsonUtil
     {
         private final RowType type;
         private final List<JsonGeneratorWriter> fieldWriters;
-        private final boolean legacyRowToJson;
 
-        public RowJsonGeneratorWriter(RowType type, List<JsonGeneratorWriter> fieldWriters, boolean legacyRowToJson)
+        public RowJsonGeneratorWriter(RowType type, List<JsonGeneratorWriter> fieldWriters)
         {
             this.type = type;
             this.fieldWriters = fieldWriters;
-            this.legacyRowToJson = legacyRowToJson;
         }
 
         @Override
@@ -638,24 +660,16 @@ public final class JsonUtil
                 jsonGenerator.writeNull();
             }
             else {
-                Block rowBlock = type.getObject(block, position);
+                SqlRow sqlRow = type.getObject(block, position);
+                int rawIndex = sqlRow.getRawIndex();
 
-                if (legacyRowToJson) {
-                    jsonGenerator.writeStartArray();
-                    for (int i = 0; i < rowBlock.getPositionCount(); i++) {
-                        fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
-                    }
-                    jsonGenerator.writeEndArray();
+                List<TypeSignatureParameter> typeSignatureParameters = type.getTypeSignature().getParameters();
+                jsonGenerator.writeStartObject();
+                for (int i = 0; i < sqlRow.getFieldCount(); i++) {
+                    jsonGenerator.writeFieldName(typeSignatureParameters.get(i).getNamedTypeSignature().getName().orElse(""));
+                    fieldWriters.get(i).writeJsonValue(jsonGenerator, sqlRow.getRawFieldBlock(i), rawIndex);
                 }
-                else {
-                    List<TypeSignatureParameter> typeSignatureParameters = type.getTypeSignature().getParameters();
-                    jsonGenerator.writeStartObject();
-                    for (int i = 0; i < rowBlock.getPositionCount(); i++) {
-                        jsonGenerator.writeFieldName(typeSignatureParameters.get(i).getNamedTypeSignature().getName().orElse(""));
-                        fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
-                    }
-                    jsonGenerator.writeEndObject();
-                }
+                jsonGenerator.writeEndObject();
             }
         }
     }
@@ -664,184 +678,120 @@ public final class JsonUtil
     public static Slice currentTokenAsVarchar(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return Slices.utf8Slice(parser.getText());
-            case VALUE_NUMBER_FLOAT:
-                // Avoidance of loss of precision does not seem to be possible here because of Jackson implementation.
-                return DoubleOperators.castToVarchar(UNBOUNDED_LENGTH, parser.getDoubleValue());
-            case VALUE_NUMBER_INT:
-                // An alternative is calling getLongValue and then BigintOperators.castToVarchar.
-                // It doesn't work as well because it can result in overflow and underflow exceptions for large integral numbers.
-                return Slices.utf8Slice(parser.getText());
-            case VALUE_TRUE:
-                return BooleanOperators.castToVarchar(true);
-            case VALUE_FALSE:
-                return BooleanOperators.castToVarchar(false);
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.VARCHAR, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> Slices.utf8Slice(parser.getText());
+            // Avoidance of loss of precision does not seem to be possible here because of Jackson implementation.
+            case VALUE_NUMBER_FLOAT -> DoubleOperators.castToVarchar(UNBOUNDED_LENGTH, parser.getDoubleValue());
+            // An alternative is calling getLongValue and then BigintOperators.castToVarchar.
+            // It doesn't work as well because it can result in overflow and underflow exceptions for large integral numbers.
+            case VALUE_NUMBER_INT -> Slices.utf8Slice(parser.getText());
+            case VALUE_TRUE -> BooleanOperators.castToVarchar(true);
+            case VALUE_FALSE -> BooleanOperators.castToVarchar(false);
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.VARCHAR, parser.getText()));
+        };
     }
 
     public static Long currentTokenAsBigint(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return VarcharOperators.castToBigint(Slices.utf8Slice(parser.getText()));
-            case VALUE_NUMBER_FLOAT:
-                return DoubleOperators.castToLong(parser.getDoubleValue());
-            case VALUE_NUMBER_INT:
-                return parser.getLongValue();
-            case VALUE_TRUE:
-                return BooleanOperators.castToBigint(true);
-            case VALUE_FALSE:
-                return BooleanOperators.castToBigint(false);
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.BIGINT, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> VarcharOperators.castToBigint(Slices.utf8Slice(parser.getText()));
+            case VALUE_NUMBER_FLOAT -> DoubleOperators.castToLong(parser.getDoubleValue());
+            case VALUE_NUMBER_INT -> parser.getLongValue();
+            case VALUE_TRUE -> BooleanOperators.castToBigint(true);
+            case VALUE_FALSE -> BooleanOperators.castToBigint(false);
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.BIGINT, parser.getText()));
+        };
     }
 
     public static Long currentTokenAsInteger(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return VarcharOperators.castToInteger(Slices.utf8Slice(parser.getText()));
-            case VALUE_NUMBER_FLOAT:
-                return DoubleOperators.castToInteger(parser.getDoubleValue());
-            case VALUE_NUMBER_INT:
-                return (long) toIntExact(parser.getLongValue());
-            case VALUE_TRUE:
-                return BooleanOperators.castToInteger(true);
-            case VALUE_FALSE:
-                return BooleanOperators.castToInteger(false);
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.INTEGER, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> VarcharOperators.castToInteger(Slices.utf8Slice(parser.getText()));
+            case VALUE_NUMBER_FLOAT -> DoubleOperators.castToInteger(parser.getDoubleValue());
+            case VALUE_NUMBER_INT -> (long) toIntExact(parser.getLongValue());
+            case VALUE_TRUE -> BooleanOperators.castToInteger(true);
+            case VALUE_FALSE -> BooleanOperators.castToInteger(false);
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.INTEGER, parser.getText()));
+        };
     }
 
     public static Long currentTokenAsSmallint(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return VarcharOperators.castToSmallint(Slices.utf8Slice(parser.getText()));
-            case VALUE_NUMBER_FLOAT:
-                return DoubleOperators.castToSmallint(parser.getDoubleValue());
-            case VALUE_NUMBER_INT:
-                return (long) Shorts.checkedCast(parser.getLongValue());
-            case VALUE_TRUE:
-                return BooleanOperators.castToSmallint(true);
-            case VALUE_FALSE:
-                return BooleanOperators.castToSmallint(false);
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.SMALLINT, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> VarcharOperators.castToSmallint(Slices.utf8Slice(parser.getText()));
+            case VALUE_NUMBER_FLOAT -> DoubleOperators.castToSmallint(parser.getDoubleValue());
+            case VALUE_NUMBER_INT -> (long) Shorts.checkedCast(parser.getLongValue());
+            case VALUE_TRUE -> BooleanOperators.castToSmallint(true);
+            case VALUE_FALSE -> BooleanOperators.castToSmallint(false);
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.SMALLINT, parser.getText()));
+        };
     }
 
     public static Long currentTokenAsTinyint(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return VarcharOperators.castToTinyint(Slices.utf8Slice(parser.getText()));
-            case VALUE_NUMBER_FLOAT:
-                return DoubleOperators.castToTinyint(parser.getDoubleValue());
-            case VALUE_NUMBER_INT:
-                return (long) SignedBytes.checkedCast(parser.getLongValue());
-            case VALUE_TRUE:
-                return BooleanOperators.castToTinyint(true);
-            case VALUE_FALSE:
-                return BooleanOperators.castToTinyint(false);
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.TINYINT, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> VarcharOperators.castToTinyint(Slices.utf8Slice(parser.getText()));
+            case VALUE_NUMBER_FLOAT -> DoubleOperators.castToTinyint(parser.getDoubleValue());
+            case VALUE_NUMBER_INT -> (long) SignedBytes.checkedCast(parser.getLongValue());
+            case VALUE_TRUE -> BooleanOperators.castToTinyint(true);
+            case VALUE_FALSE -> BooleanOperators.castToTinyint(false);
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.TINYINT, parser.getText()));
+        };
     }
 
     public static Double currentTokenAsDouble(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return VarcharOperators.castToDouble(Slices.utf8Slice(parser.getText()));
-            case VALUE_NUMBER_FLOAT:
-                return parser.getDoubleValue();
-            case VALUE_NUMBER_INT:
-                // An alternative is calling getLongValue and then BigintOperators.castToDouble.
-                // It doesn't work as well because it can result in overflow and underflow exceptions for large integral numbers.
-                return parser.getDoubleValue();
-            case VALUE_TRUE:
-                return BooleanOperators.castToDouble(true);
-            case VALUE_FALSE:
-                return BooleanOperators.castToDouble(false);
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.DOUBLE, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> VarcharOperators.castToDouble(Slices.utf8Slice(parser.getText()));
+            case VALUE_NUMBER_FLOAT -> parser.getDoubleValue();
+            // An alternative is calling getLongValue and then BigintOperators.castToDouble.
+            // It doesn't work as well because it can result in overflow and underflow exceptions for large integral numbers.
+            case VALUE_NUMBER_INT -> parser.getDoubleValue();
+            case VALUE_TRUE -> BooleanOperators.castToDouble(true);
+            case VALUE_FALSE -> BooleanOperators.castToDouble(false);
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.DOUBLE, parser.getText()));
+        };
     }
 
     public static Long currentTokenAsReal(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return VarcharOperators.castToFloat(Slices.utf8Slice(parser.getText()));
-            case VALUE_NUMBER_FLOAT:
-                return (long) floatToRawIntBits(parser.getFloatValue());
-            case VALUE_NUMBER_INT:
-                // An alternative is calling getLongValue and then BigintOperators.castToReal.
-                // It doesn't work as well because it can result in overflow and underflow exceptions for large integral numbers.
-                return (long) floatToRawIntBits(parser.getFloatValue());
-            case VALUE_TRUE:
-                return BooleanOperators.castToReal(true);
-            case VALUE_FALSE:
-                return BooleanOperators.castToReal(false);
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.REAL, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> VarcharOperators.castToFloat(Slices.utf8Slice(parser.getText()));
+            case VALUE_NUMBER_FLOAT -> (long) floatToRawIntBits(parser.getFloatValue());
+            // An alternative is calling getLongValue and then BigintOperators.castToReal.
+            // It doesn't work as well because it can result in overflow and underflow exceptions for large integral numbers.
+            case VALUE_NUMBER_INT -> (long) floatToRawIntBits(parser.getFloatValue());
+            case VALUE_TRUE -> BooleanOperators.castToReal(true);
+            case VALUE_FALSE -> BooleanOperators.castToReal(false);
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.REAL, parser.getText()));
+        };
     }
 
     public static Boolean currentTokenAsBoolean(JsonParser parser)
             throws IOException
     {
-        switch (parser.currentToken()) {
-            case VALUE_NULL:
-                return null;
-            case VALUE_STRING:
-            case FIELD_NAME:
-                return VarcharOperators.castToBoolean(Slices.utf8Slice(parser.getText()));
-            case VALUE_NUMBER_FLOAT:
-                return DoubleOperators.castToBoolean(parser.getDoubleValue());
-            case VALUE_NUMBER_INT:
-                return BigintOperators.castToBoolean(parser.getLongValue());
-            case VALUE_TRUE:
-                return true;
-            case VALUE_FALSE:
-                return false;
-            default:
-                throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.BOOLEAN, parser.getText()));
-        }
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING, FIELD_NAME -> VarcharOperators.castToBoolean(Slices.utf8Slice(parser.getText()));
+            case VALUE_NUMBER_FLOAT -> DoubleOperators.castToBoolean(parser.getDoubleValue());
+            case VALUE_NUMBER_INT -> BigintOperators.castToBoolean(parser.getLongValue());
+            case VALUE_TRUE -> true;
+            case VALUE_FALSE -> false;
+            default -> throw new JsonCastException(format("Unexpected token when cast to %s: %s", StandardTypes.BOOLEAN, parser.getText()));
+        };
     }
 
     public static Long currentTokenAsShortDecimal(JsonParser parser, int precision, int scale)
@@ -851,14 +801,14 @@ public final class JsonUtil
         return bigDecimal != null ? bigDecimal.unscaledValue().longValue() : null;
     }
 
-    public static Slice currentTokenAsLongDecimal(JsonParser parser, int precision, int scale)
+    public static Int128 currentTokenAsLongDecimal(JsonParser parser, int precision, int scale)
             throws IOException
     {
         BigDecimal bigDecimal = currentTokenAsJavaDecimal(parser, precision, scale);
         if (bigDecimal == null) {
             return null;
         }
-        return encodeUnscaledValue(bigDecimal.unscaledValue());
+        return Int128.valueOf(bigDecimal.unscaledValue());
     }
 
     // TODO: Instead of having BigDecimal as an intermediate step,
@@ -928,12 +878,12 @@ public final class JsonUtil
             if (type instanceof DoubleType) {
                 return new DoubleBlockBuilderAppender();
             }
-            if (type instanceof DecimalType) {
-                if (isShortDecimal(type)) {
-                    return new ShortDecimalBlockBuilderAppender((DecimalType) type);
+            if (type instanceof DecimalType decimalType) {
+                if (decimalType.isShort()) {
+                    return new ShortDecimalBlockBuilderAppender(decimalType);
                 }
 
-                return new LongDecimalBlockBuilderAppender((DecimalType) type);
+                return new LongDecimalBlockBuilderAppender(decimalType);
             }
             if (type instanceof VarcharType) {
                 return new VarcharBlockBuilderAppender(type);
@@ -944,18 +894,15 @@ public final class JsonUtil
                     JSON.writeSlice(blockBuilder, Slices.utf8Slice(json));
                 };
             }
-            if (type instanceof ArrayType) {
-                return new ArrayBlockBuilderAppender(createBlockBuilderAppender(((ArrayType) type).getElementType()));
+            if (type instanceof ArrayType arrayType) {
+                return new ArrayBlockBuilderAppender(createBlockBuilderAppender(arrayType.getElementType()));
             }
-            if (type instanceof MapType) {
-                MapType mapType = (MapType) type;
+            if (type instanceof MapType mapType) {
                 return new MapBlockBuilderAppender(
                         createBlockBuilderAppender(mapType.getKeyType()),
-                        createBlockBuilderAppender(mapType.getValueType()),
-                        mapType.getKeyType());
+                        createBlockBuilderAppender(mapType.getValueType()));
             }
-            if (type instanceof RowType) {
-                RowType rowType = (RowType) type;
+            if (type instanceof RowType rowType) {
                 List<Field> rowFields = rowType.getFields();
                 BlockBuilderAppender[] fieldAppenders = new BlockBuilderAppender[rowFields.size()];
                 for (int i = 0; i < fieldAppenders.length; i++) {
@@ -1126,13 +1073,13 @@ public final class JsonUtil
         public void append(JsonParser parser, BlockBuilder blockBuilder)
                 throws IOException
         {
-            Slice result = currentTokenAsLongDecimal(parser, type.getPrecision(), type.getScale());
+            Int128 result = currentTokenAsLongDecimal(parser, type.getPrecision(), type.getScale());
 
             if (result == null) {
                 blockBuilder.appendNull();
             }
             else {
-                type.writeSlice(blockBuilder, result);
+                type.writeObject(blockBuilder, result);
             }
         }
     }
@@ -1183,11 +1130,11 @@ public final class JsonUtil
             if (parser.getCurrentToken() != START_ARRAY) {
                 throw new JsonCastException(format("Expected a json array, but got %s", parser.getText()));
             }
-            BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-            while (parser.nextToken() != END_ARRAY) {
-                elementAppender.append(parser, entryBuilder);
-            }
-            blockBuilder.closeEntry();
+            ((ArrayBlockBuilder) blockBuilder).buildEntry(elementBuilder -> {
+                while (parser.nextToken() != END_ARRAY) {
+                    elementAppender.append(parser, elementBuilder);
+                }
+            });
         }
     }
 
@@ -1196,13 +1143,11 @@ public final class JsonUtil
     {
         final BlockBuilderAppender keyAppender;
         final BlockBuilderAppender valueAppender;
-        final Type keyType;
 
-        MapBlockBuilderAppender(BlockBuilderAppender keyAppender, BlockBuilderAppender valueAppender, Type keyType)
+        MapBlockBuilderAppender(BlockBuilderAppender keyAppender, BlockBuilderAppender valueAppender)
         {
             this.keyAppender = keyAppender;
             this.valueAppender = valueAppender;
-            this.keyType = keyType;
         }
 
         @Override
@@ -1217,18 +1162,24 @@ public final class JsonUtil
             if (parser.getCurrentToken() != START_OBJECT) {
                 throw new JsonCastException(format("Expected a json object, but got %s", parser.getText()));
             }
-            SingleMapBlockWriter entryBuilder = (SingleMapBlockWriter) blockBuilder.beginBlockEntry();
-            entryBuilder.strict();
-            while (parser.nextToken() != END_OBJECT) {
-                keyAppender.append(parser, entryBuilder);
-                parser.nextToken();
-                valueAppender.append(parser, entryBuilder);
-            }
+
+            MapBlockBuilder mapBlockBuilder = (MapBlockBuilder) blockBuilder;
+            mapBlockBuilder.strict();
             try {
-                blockBuilder.closeEntry();
+                mapBlockBuilder.buildEntry((keyBuilder, valueBuilder) -> appendMap(parser, keyBuilder, valueBuilder));
             }
             catch (DuplicateMapKeyException e) {
                 throw new JsonCastException("Duplicate keys are not allowed");
+            }
+        }
+
+        private void appendMap(JsonParser parser, BlockBuilder keyBuilder, BlockBuilder valueBuilder)
+                throws IOException
+        {
+            while (parser.nextToken() != END_OBJECT) {
+                keyAppender.append(parser, keyBuilder);
+                parser.nextToken();
+                valueAppender.append(parser, valueBuilder);
             }
         }
     }
@@ -1258,12 +1209,7 @@ public final class JsonUtil
                 throw new JsonCastException(format("Expected a json array or object, but got %s", parser.getText()));
             }
 
-            parseJsonToSingleRowBlock(
-                    parser,
-                    (SingleRowBlockWriter) blockBuilder.beginBlockEntry(),
-                    fieldAppenders,
-                    fieldNameToIndex);
-            blockBuilder.closeEntry();
+            ((RowBlockBuilder) blockBuilder).buildEntry(fieldBuilders -> parseJsonToSingleRowBlock(parser, fieldBuilders, fieldAppenders, fieldNameToIndex));
         }
     }
 
@@ -1283,9 +1229,9 @@ public final class JsonUtil
     // TODO: Once CAST function supports cachedInstanceFactory or directly write to BlockBuilder,
     // JsonToRowCast::toRow can use RowBlockBuilderAppender::append to parse JSON and append to the block builder.
     // Thus there will be single call to this method, so this method can be inlined.
-    public static void parseJsonToSingleRowBlock(
+    private static void parseJsonToSingleRowBlock(
             JsonParser parser,
-            SingleRowBlockWriter singleRowBlockWriter,
+            List<BlockBuilder> fieldBuilders,
             BlockBuilderAppender[] fieldAppenders,
             Optional<Map<String, Integer>> fieldNameToIndex)
             throws IOException
@@ -1293,7 +1239,7 @@ public final class JsonUtil
         if (parser.getCurrentToken() == START_ARRAY) {
             for (int i = 0; i < fieldAppenders.length; i++) {
                 parser.nextToken();
-                fieldAppenders[i].append(parser, singleRowBlockWriter);
+                fieldAppenders[i].append(parser, fieldBuilders.get(i));
             }
             if (parser.nextToken() != JsonToken.END_ARRAY) {
                 throw new JsonCastException(format("Expected json array ending, but got %s", parser.getText()));
@@ -1320,7 +1266,7 @@ public final class JsonUtil
                     }
                     fieldWritten[fieldIndex] = true;
                     numFieldsWritten++;
-                    fieldAppenders[fieldIndex].append(parser, singleRowBlockWriter.getFieldBlockBuilder(fieldIndex));
+                    fieldAppenders[fieldIndex].append(parser, fieldBuilders.get(fieldIndex));
                 }
                 else {
                     parser.skipChildren();
@@ -1330,7 +1276,7 @@ public final class JsonUtil
             if (numFieldsWritten != fieldAppenders.length) {
                 for (int i = 0; i < fieldWritten.length; i++) {
                     if (!fieldWritten[i]) {
-                        singleRowBlockWriter.getFieldBlockBuilder(i).appendNull();
+                        fieldBuilders.get(i).appendNull();
                     }
                 }
             }

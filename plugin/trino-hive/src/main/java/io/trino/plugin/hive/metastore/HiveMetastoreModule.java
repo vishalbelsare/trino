@@ -14,18 +14,17 @@
 package io.trino.plugin.hive.metastore;
 
 import com.google.inject.Binder;
-import com.google.inject.Module;
+import com.google.inject.Key;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
-import io.trino.plugin.hive.metastore.alluxio.AlluxioMetastoreModule;
-import io.trino.plugin.hive.metastore.cache.CachingHiveMetastoreModule;
-import io.trino.plugin.hive.metastore.cache.ForCachingHiveMetastore;
+import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.HiveMetastoreFactory;
+import io.trino.metastore.RawHiveMetastoreFactory;
+import io.trino.plugin.hive.AllowHiveTableRename;
 import io.trino.plugin.hive.metastore.file.FileMetastoreModule;
 import io.trino.plugin.hive.metastore.glue.GlueMetastoreModule;
 import io.trino.plugin.hive.metastore.thrift.ThriftMetastoreModule;
 
 import java.util.Optional;
-
-import static io.airlift.configuration.ConditionalModule.conditionalModule;
 
 public class HiveMetastoreModule
         extends AbstractConfigurationAwareModule
@@ -41,22 +40,18 @@ public class HiveMetastoreModule
     protected void setup(Binder binder)
     {
         if (metastore.isPresent()) {
-            binder.bind(HiveMetastore.class).annotatedWith(ForCachingHiveMetastore.class).toInstance(metastore.get());
-            install(new CachingHiveMetastoreModule());
+            binder.bind(HiveMetastoreFactory.class).annotatedWith(RawHiveMetastoreFactory.class).toInstance(HiveMetastoreFactory.ofInstance(metastore.get()));
+            binder.bind(Key.get(boolean.class, AllowHiveTableRename.class)).toInstance(true);
         }
         else {
-            bindMetastoreModule("thrift", new ThriftMetastoreModule());
-            bindMetastoreModule("file", new FileMetastoreModule());
-            bindMetastoreModule("glue", new GlueMetastoreModule());
-            bindMetastoreModule("alluxio", new AlluxioMetastoreModule());
+            install(switch (buildConfigObject(MetastoreTypeConfig.class).getMetastoreType()) {
+                case THRIFT -> new ThriftMetastoreModule();
+                case FILE -> new FileMetastoreModule();
+                case GLUE -> new GlueMetastoreModule();
+                case GLUE_V1 -> new io.trino.plugin.hive.metastore.glue.v1.GlueMetastoreModule();
+            });
         }
-    }
 
-    private void bindMetastoreModule(String name, Module module)
-    {
-        install(conditionalModule(
-                MetastoreTypeConfig.class,
-                metastore -> name.equalsIgnoreCase(metastore.getMetastoreType()),
-                module));
+        install(new CachingHiveMetastoreModule());
     }
 }

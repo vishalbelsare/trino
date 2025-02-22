@@ -14,21 +14,22 @@
 package io.trino.tests.product.launcher.env.environment;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.tests.product.launcher.docker.DockerFiles;
 import io.trino.tests.product.launcher.docker.DockerFiles.ResourceProvider;
 import io.trino.tests.product.launcher.env.DockerContainer;
 import io.trino.tests.product.launcher.env.Environment;
 import io.trino.tests.product.launcher.env.EnvironmentProvider;
+import io.trino.tests.product.launcher.env.common.HttpProxy;
 import io.trino.tests.product.launcher.env.common.HydraIdentityProvider;
-import io.trino.tests.product.launcher.env.common.SeleniumChrome;
 import io.trino.tests.product.launcher.env.common.Standard;
 import io.trino.tests.product.launcher.env.common.TestsEnvironment;
 import io.trino.tests.product.launcher.testcontainers.PortBinder;
 
-import javax.inject.Inject;
-
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.COORDINATOR;
-import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_PRESTO_CONFIG_PROPERTIES;
+import static io.trino.tests.product.launcher.env.common.HttpProxy.PROXY;
+import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_TRINO_CONFIG_PROPERTIES;
+import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_TRINO_LOGGING_CONFIG;
 import static java.util.Objects.requireNonNull;
 import static org.testcontainers.utility.MountableFile.forHostPath;
 
@@ -41,9 +42,14 @@ public class EnvSinglenodeOauth2HttpProxy
     private final ResourceProvider configDir;
 
     @Inject
-    public EnvSinglenodeOauth2HttpProxy(DockerFiles dockerFiles, PortBinder binder, Standard standard, HydraIdentityProvider hydraIdentityProvider, SeleniumChrome seleniumChrome)
+    public EnvSinglenodeOauth2HttpProxy(
+            DockerFiles dockerFiles,
+            PortBinder binder,
+            Standard standard,
+            HydraIdentityProvider hydraIdentityProvider,
+            HttpProxy httpProxy)
     {
-        super(ImmutableList.of(standard, hydraIdentityProvider, seleniumChrome));
+        super(ImmutableList.of(standard, hydraIdentityProvider, httpProxy));
 
         this.binder = requireNonNull(binder, "binder is null");
         this.hydraIdentityProvider = requireNonNull(hydraIdentityProvider, "hydraIdentityProvider is null");
@@ -58,7 +64,10 @@ public class EnvSinglenodeOauth2HttpProxy
             dockerContainer
                     .withCopyFileToContainer(
                             forHostPath(configDir.getPath("config.properties")),
-                            CONTAINER_PRESTO_CONFIG_PROPERTIES);
+                            CONTAINER_TRINO_CONFIG_PROPERTIES)
+                    .withCopyFileToContainer(
+                            forHostPath(configDir.getPath("log.properties")),
+                            CONTAINER_TRINO_LOGGING_CONFIG);
 
             binder.exposePort(dockerContainer, 7778);
         });
@@ -68,14 +77,11 @@ public class EnvSinglenodeOauth2HttpProxy
                 "trinodb_client_id",
                 "trinodb_client_secret",
                 "client_secret_basic",
-                "trinodb_client_id/",
+                "trinodb_client_id",
                 "https://presto-master:7778/oauth2/callback,https://localhost:7778/oauth2/callback");
 
         builder.containerDependsOn(COORDINATOR, hydraClientConfig.getLogicalName());
 
-        DockerContainer proxy = new DockerContainer("httpd:2.4.51", "proxy");
-        proxy.withCopyFileToContainer(forHostPath(configDir.getPath("httpd.conf")), "/usr/local/apache2/conf/httpd.conf");
-        builder.addContainer(proxy);
-        builder.containerDependsOn(COORDINATOR, "proxy");
+        builder.containerDependsOn(COORDINATOR, PROXY);
     }
 }

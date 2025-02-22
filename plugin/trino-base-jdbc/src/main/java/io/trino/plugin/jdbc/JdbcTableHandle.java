@@ -18,14 +18,14 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.spi.connector.ColumnHandle;
-import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.expression.Constant;
 import io.trino.spi.predicate.TupleDomain;
 
-import javax.annotation.Nullable;
-
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -33,14 +33,17 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 public final class JdbcTableHandle
-        implements ConnectorTableHandle
+        extends BaseJdbcConnectorTableHandle
 {
     private final JdbcRelationHandle relationHandle;
 
     private final TupleDomain<ColumnHandle> constraint;
+    // Additional to constraint
+    private final List<ParameterizedExpression> constraintExpressions;
 
     // semantically sort order is applied after constraint
     private final Optional<List<JdbcSortItem>> sortOrder;
@@ -53,71 +56,88 @@ public final class JdbcTableHandle
 
     /**
      * Remote tables referenced by the query other than {@code this.relationHandle.schemaTableName}.
+     * {@link Optional#empty()} when unknown.
      */
-    private final Set<SchemaTableName> otherReferencedTables;
+    private final Optional<Set<SchemaTableName>> otherReferencedTables;
 
     private final int nextSyntheticColumnId;
+    private final Optional<String> authorization;
+    private final List<JdbcAssignmentItem> updateAssignments;
 
-    @Deprecated
-    public JdbcTableHandle(SchemaTableName schemaTableName, @Nullable String catalogName, @Nullable String schemaName, String tableName)
-    {
-        this(schemaTableName, new RemoteTableName(Optional.ofNullable(catalogName), Optional.ofNullable(schemaName), tableName));
-    }
-
-    public JdbcTableHandle(SchemaTableName schemaTableName, RemoteTableName remoteTableName)
+    public JdbcTableHandle(SchemaTableName schemaTableName, RemoteTableName remoteTableName, Optional<String> comment)
     {
         this(
-                new JdbcNamedRelationHandle(schemaTableName, remoteTableName),
+                new JdbcNamedRelationHandle(schemaTableName, remoteTableName, comment),
                 TupleDomain.all(),
+                ImmutableList.of(),
                 Optional.empty(),
                 OptionalLong.empty(),
                 Optional.empty(),
-                ImmutableSet.of(),
-                0);
+                Optional.of(ImmutableSet.of()),
+                0,
+                Optional.empty(),
+                ImmutableList.of());
     }
 
     @JsonCreator
     public JdbcTableHandle(
             @JsonProperty("relationHandle") JdbcRelationHandle relationHandle,
             @JsonProperty("constraint") TupleDomain<ColumnHandle> constraint,
+            @JsonProperty("constraintExpressions") List<ParameterizedExpression> constraintExpressions,
             @JsonProperty("sortOrder") Optional<List<JdbcSortItem>> sortOrder,
             @JsonProperty("limit") OptionalLong limit,
             @JsonProperty("columns") Optional<List<JdbcColumnHandle>> columns,
-            @JsonProperty("otherReferencedTables") Set<SchemaTableName> otherReferencedTables,
-            @JsonProperty("nextSyntheticColumnId") int nextSyntheticColumnId)
+            @JsonProperty("otherReferencedTables") Optional<Set<SchemaTableName>> otherReferencedTables,
+            @JsonProperty("nextSyntheticColumnId") int nextSyntheticColumnId,
+            @JsonProperty("authorization") Optional<String> authorization,
+            @JsonProperty("updateAssignments") List<JdbcAssignmentItem> updateAssignments)
     {
         this.relationHandle = requireNonNull(relationHandle, "relationHandle is null");
         this.constraint = requireNonNull(constraint, "constraint is null");
-        this.sortOrder = requireNonNull(sortOrder, "sortOrder is null")
-                .map(ImmutableList::copyOf);
+        this.constraintExpressions = ImmutableList.copyOf(requireNonNull(constraintExpressions, "constraintExpressions is null"));
+        this.sortOrder = sortOrder.map(ImmutableList::copyOf);
         this.limit = requireNonNull(limit, "limit is null");
 
-        requireNonNull(columns, "columns is null");
         this.columns = columns.map(ImmutableList::copyOf);
-        this.otherReferencedTables = ImmutableSet.copyOf(requireNonNull(otherReferencedTables, "otherReferencedTables is null"));
+        this.otherReferencedTables = otherReferencedTables.map(ImmutableSet::copyOf);
         this.nextSyntheticColumnId = nextSyntheticColumnId;
+        this.authorization = requireNonNull(authorization, "authorization is null");
+        this.updateAssignments = requireNonNull(updateAssignments, "updateAssignments is null");
     }
 
-    /**
-     * @deprecated Use {@code asPlainTable().getSchemaTableName()} instead, but see those methods for more information, as this is not a drop-in replacement.
-     */
-    @Deprecated
-    @JsonIgnore
-    // TODO (https://github.com/trinodb/trino/issues/6797) remove
-    public SchemaTableName getSchemaTableName()
+    public JdbcTableHandle intersectedWithConstraint(TupleDomain<ColumnHandle> newConstraint)
     {
-        return getRequiredNamedRelation().getSchemaTableName();
+        return new JdbcTableHandle(
+                relationHandle,
+                constraint.intersect(newConstraint),
+                constraintExpressions,
+                sortOrder,
+                limit,
+                columns,
+                otherReferencedTables,
+                nextSyntheticColumnId,
+                authorization,
+                updateAssignments);
     }
 
-    /**
-     * @deprecated Use {@code asPlainTable().getRemoteTableName()} instead, but see those methods for more information, as this is not a drop-in replacement.
-     */
-    @Deprecated
-    @JsonIgnore
-    // TODO (https://github.com/trinodb/trino/issues/6797) remove
-    public RemoteTableName getRemoteTableName()
+    public JdbcTableHandle withAssignments(Map<ColumnHandle, Constant> assignments)
     {
-        return getRequiredNamedRelation().getRemoteTableName();
+        return new JdbcTableHandle(
+                relationHandle,
+                constraint,
+                constraintExpressions,
+                sortOrder,
+                limit,
+                columns,
+                otherReferencedTables,
+                nextSyntheticColumnId,
+                authorization,
+                assignments.entrySet()
+                        .stream()
+                        .map(e -> {
+                            return new JdbcAssignmentItem((JdbcColumnHandle) e.getKey(), new QueryParameter(e.getValue().getType(), Optional.ofNullable(e.getValue().getValue())));
+                        })
+                        .collect(toImmutableList()));
     }
 
     public JdbcNamedRelationHandle asPlainTable()
@@ -139,45 +159,16 @@ public final class JdbcTableHandle
         return relationHandle;
     }
 
-    /**
-     * @deprecated Use {@code asPlainTable().getRemoteTableName().getCatalogName()} instead, but see those methods for more information, as this is not a drop-in replacement.
-     */
-    @Deprecated
-    @JsonIgnore
-    @Nullable
-    // TODO (https://github.com/trinodb/trino/issues/6797) remove
-    public String getCatalogName()
-    {
-        return getRemoteTableName().getCatalogName().orElse(null);
-    }
-
-    /**
-     * @deprecated Use {@code asPlainTable().getRemoteTableName().getSchemaName()} instead, but see those methods for more information, as this is not a drop-in replacement.
-     */
-    @Deprecated
-    @JsonIgnore
-    @Nullable
-    // TODO (https://github.com/trinodb/trino/issues/6797) remove
-    public String getSchemaName()
-    {
-        return getRemoteTableName().getSchemaName().orElse(null);
-    }
-
-    /**
-     * @deprecated Use {@code asPlainTable().getRemoteTableName().getTableName()} instead, but see those methods for more information, as this is not a drop-in replacement.
-     */
-    @Deprecated
-    @JsonIgnore
-    // TODO (https://github.com/trinodb/trino/issues/6797) remove
-    public String getTableName()
-    {
-        return getRemoteTableName().getTableName();
-    }
-
     @JsonProperty
     public TupleDomain<ColumnHandle> getConstraint()
     {
         return constraint;
+    }
+
+    @JsonProperty
+    public List<ParameterizedExpression> getConstraintExpressions()
+    {
+        return constraintExpressions;
     }
 
     @JsonProperty
@@ -186,6 +177,7 @@ public final class JdbcTableHandle
         return limit;
     }
 
+    @Override
     @JsonProperty
     public Optional<List<JdbcColumnHandle>> getColumns()
     {
@@ -199,29 +191,42 @@ public final class JdbcTableHandle
     }
 
     @JsonProperty
-    public Set<SchemaTableName> getOtherReferencedTables()
+    public Optional<Set<SchemaTableName>> getOtherReferencedTables()
     {
         return otherReferencedTables;
     }
 
-    @JsonIgnore // not a getter
-    public Set<SchemaTableName> getAllReferencedTables()
+    @JsonProperty
+    public List<JdbcAssignmentItem> getUpdateAssignments()
     {
-        if (!isNamedRelation()) {
-            return getOtherReferencedTables();
-        }
-        return ImmutableSet.<SchemaTableName>builder()
-                .addAll(getOtherReferencedTables())
-                .add(getRequiredNamedRelation().getSchemaTableName())
-                .build();
+        return updateAssignments;
     }
 
-    boolean references(SchemaTableName schemaTableName)
+    /**
+     * Remote tables referenced by the query. {@link Optional#empty()} when unknown.
+     */
+    @JsonIgnore // not a getter
+    public Optional<Set<SchemaTableName>> getAllReferencedTables()
+    {
+        return getOtherReferencedTables().map(otherReferencedTables -> {
+            if (!isNamedRelation()) {
+                return otherReferencedTables;
+            }
+            return ImmutableSet.<SchemaTableName>builder()
+                    .addAll(otherReferencedTables)
+                    .add(getRequiredNamedRelation().getSchemaTableName())
+                    .build();
+        });
+    }
+
+    boolean mayReference(SchemaTableName schemaTableName)
     {
         if (isNamedRelation() && getRequiredNamedRelation().getSchemaTableName().equals(schemaTableName)) {
             return true;
         }
-        return getOtherReferencedTables().contains(schemaTableName);
+        return getOtherReferencedTables()
+                .map(otherReferencedTables -> otherReferencedTables.contains(schemaTableName))
+                .orElse(true);
     }
 
     @JsonProperty
@@ -230,10 +235,16 @@ public final class JdbcTableHandle
         return nextSyntheticColumnId;
     }
 
+    @JsonProperty
+    public Optional<String> getAuthorization()
+    {
+        return authorization;
+    }
+
     @JsonIgnore
     public boolean isSynthetic()
     {
-        return !isNamedRelation() || !constraint.isAll() || sortOrder.isPresent() || limit.isPresent();
+        return !isNamedRelation() || !constraint.isAll() || !constraintExpressions.isEmpty() || sortOrder.isPresent() || limit.isPresent();
     }
 
     @JsonIgnore
@@ -254,16 +265,19 @@ public final class JdbcTableHandle
         JdbcTableHandle o = (JdbcTableHandle) obj;
         return Objects.equals(this.relationHandle, o.relationHandle) &&
                 Objects.equals(this.constraint, o.constraint) &&
+                Objects.equals(this.constraintExpressions, o.constraintExpressions) &&
                 Objects.equals(this.sortOrder, o.sortOrder) &&
                 Objects.equals(this.limit, o.limit) &&
                 Objects.equals(this.columns, o.columns) &&
-                this.nextSyntheticColumnId == o.nextSyntheticColumnId;
+                this.nextSyntheticColumnId == o.nextSyntheticColumnId &&
+                Objects.equals(this.authorization, o.authorization) &&
+                Objects.equals(this.updateAssignments, o.updateAssignments);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(relationHandle, constraint, sortOrder, limit, columns, nextSyntheticColumnId);
+        return Objects.hash(relationHandle, constraint, constraintExpressions, sortOrder, limit, columns, nextSyntheticColumnId, authorization, updateAssignments);
     }
 
     @Override
@@ -281,9 +295,17 @@ public final class JdbcTableHandle
                     .map(columnHandle -> ((JdbcColumnHandle) columnHandle).getColumnName())
                     .collect(Collectors.joining(", ", "[", "]")));
         }
+        if (!constraintExpressions.isEmpty()) {
+            builder.append(" constraints=").append(constraintExpressions);
+        }
         sortOrder.ifPresent(value -> builder.append(" sortOrder=").append(value));
         limit.ifPresent(value -> builder.append(" limit=").append(value));
         columns.ifPresent(value -> builder.append(" columns=").append(value));
+        authorization.ifPresent(value -> builder.append(" authorization=").append(value));
+        if (!updateAssignments.isEmpty()) {
+            builder.append(" updateAssignments=");
+            updateAssignments.forEach(builder::append);
+        }
         return builder.toString();
     }
 }

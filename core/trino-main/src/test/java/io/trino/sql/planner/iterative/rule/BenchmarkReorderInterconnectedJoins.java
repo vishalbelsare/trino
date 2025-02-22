@@ -15,10 +15,10 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
-import io.trino.plugin.tpch.TpchConnectorFactory;
-import io.trino.testing.LocalQueryRunner;
+import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
+import io.trino.testing.StandaloneQueryRunner;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -68,7 +68,7 @@ public class BenchmarkReorderInterconnectedJoins
         private int numberOfTables;
 
         private String query;
-        private LocalQueryRunner queryRunner;
+        private QueryRunner queryRunner;
 
         @Setup
         public void setup()
@@ -80,8 +80,9 @@ public class BenchmarkReorderInterconnectedJoins
                     .setCatalog("tpch")
                     .setSchema("tiny")
                     .build();
-            queryRunner = LocalQueryRunner.create(session);
-            queryRunner.createCatalog("tpch", new TpchConnectorFactory(1), ImmutableMap.of());
+            queryRunner = new StandaloneQueryRunner(session);
+            queryRunner.installPlugin(new TpchPlugin());
+            queryRunner.createCatalog("tpch", "tpch", ImmutableMap.of("tpch.splits-per-node", "1"));
             StringBuilder stringBuilder = new StringBuilder();
             stringBuilder.append("EXPLAIN SELECT * FROM nation n1");
             for (int i = 2; i <= numberOfTables; i++) {

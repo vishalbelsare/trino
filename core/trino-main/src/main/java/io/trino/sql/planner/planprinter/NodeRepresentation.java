@@ -13,14 +13,17 @@
  */
 package io.trino.sql.planner.planprinter;
 
+import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.FormatMethod;
+import io.trino.cost.LocalCostEstimate;
 import io.trino.cost.PlanCostEstimate;
 import io.trino.cost.PlanNodeStatsAndCostSummary;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -32,59 +35,55 @@ public class NodeRepresentation
     private final PlanNodeId id;
     private final String name;
     private final String type;
-    private final String identifier;
-    private final List<TypedSymbol> outputs;
+    private final Map<String, String> descriptor;
+    private final List<Symbol> outputs;
     private final List<PlanNodeId> children;
-    private final List<PlanFragmentId> remoteSources;
+    private final List<PlanNodeId> initialChildren;
     private final Optional<PlanNodeStats> stats;
     private final List<PlanNodeStatsEstimate> estimatedStats;
     private final List<PlanCostEstimate> estimatedCost;
     private final Optional<PlanNodeStatsAndCostSummary> reorderJoinStatsAndCost;
 
-    private final StringBuilder details = new StringBuilder();
+    private final ImmutableList.Builder<String> details = ImmutableList.builder();
 
     public NodeRepresentation(
             PlanNodeId id,
             String name,
             String type,
-            String identifier,
-            List<TypedSymbol> outputs,
+            Map<String, String> descriptor,
+            List<Symbol> outputs,
             Optional<PlanNodeStats> stats,
             List<PlanNodeStatsEstimate> estimatedStats,
             List<PlanCostEstimate> estimatedCost,
             Optional<PlanNodeStatsAndCostSummary> reorderJoinStatsAndCost,
             List<PlanNodeId> children,
-            List<PlanFragmentId> remoteSources)
+            // This is used in the case of adaptive plan node
+            List<PlanNodeId> initialChildren)
     {
         this.id = requireNonNull(id, "id is null");
         this.name = requireNonNull(name, "name is null");
         this.type = requireNonNull(type, "type is null");
-        this.identifier = requireNonNull(identifier, "identifier is null");
+        this.descriptor = requireNonNull(descriptor, "descriptor is null");
         this.outputs = requireNonNull(outputs, "outputs is null");
         this.stats = requireNonNull(stats, "stats is null");
         this.estimatedStats = requireNonNull(estimatedStats, "estimatedStats is null");
         this.estimatedCost = requireNonNull(estimatedCost, "estimatedCost is null");
         this.reorderJoinStatsAndCost = requireNonNull(reorderJoinStatsAndCost, "reorderJoinStatsAndCost is null");
         this.children = requireNonNull(children, "children is null");
-        this.remoteSources = requireNonNull(remoteSources, "remoteSources is null");
+        this.initialChildren = requireNonNull(initialChildren, "initialChildren is null");
 
         checkArgument(estimatedCost.size() == estimatedStats.size(), "size of cost and stats list does not match");
     }
 
+    @FormatMethod
     public void appendDetails(String string, Object... args)
     {
         if (args.length == 0) {
-            details.append(string);
+            details.add(string);
         }
         else {
-            details.append(format(string, args));
+            details.add(format(string, args));
         }
-    }
-
-    public void appendDetailsLine(String string, Object... args)
-    {
-        appendDetails(string, args);
-        details.append('\n');
     }
 
     public PlanNodeId getId()
@@ -102,12 +101,12 @@ public class NodeRepresentation
         return type;
     }
 
-    public String getIdentifier()
+    public Map<String, String> getDescriptor()
     {
-        return identifier;
+        return descriptor;
     }
 
-    public List<TypedSymbol> getOutputs()
+    public List<Symbol> getOutputs()
     {
         return outputs;
     }
@@ -117,14 +116,14 @@ public class NodeRepresentation
         return children;
     }
 
-    public List<PlanFragmentId> getRemoteSources()
+    public List<PlanNodeId> getInitialChildren()
     {
-        return remoteSources;
+        return initialChildren;
     }
 
-    public String getDetails()
+    public List<String> getDetails()
     {
-        return details.toString();
+        return details.build();
     }
 
     public Optional<PlanNodeStats> getStats()
@@ -147,25 +146,26 @@ public class NodeRepresentation
         return reorderJoinStatsAndCost;
     }
 
-    public static class TypedSymbol
+    public List<PlanNodeStatsAndCostSummary> getEstimates()
     {
-        private final Symbol symbol;
-        private final String type;
-
-        public TypedSymbol(Symbol symbol, String type)
-        {
-            this.symbol = symbol;
-            this.type = type;
+        if (getEstimatedStats().stream().allMatch(PlanNodeStatsEstimate::isOutputRowCountUnknown) &&
+                getEstimatedCost().stream().allMatch(c -> c.getRootNodeLocalCostEstimate().equals(LocalCostEstimate.unknown()))) {
+            return ImmutableList.of();
         }
 
-        public Symbol getSymbol()
-        {
-            return symbol;
+        ImmutableList.Builder<PlanNodeStatsAndCostSummary> estimates = ImmutableList.builder();
+        for (int i = 0; i < getEstimatedStats().size(); i++) {
+            PlanNodeStatsEstimate stats = getEstimatedStats().get(i);
+            LocalCostEstimate cost = getEstimatedCost().get(i).getRootNodeLocalCostEstimate();
+
+            estimates.add(new PlanNodeStatsAndCostSummary(
+                    stats.getOutputRowCount(),
+                    stats.getOutputSizeInBytes(getOutputs()),
+                    cost.getCpuCost(),
+                    cost.getMaxMemory(),
+                    cost.getNetworkCost()));
         }
 
-        public String getType()
-        {
-            return type;
-        }
+        return estimates.build();
     }
 }

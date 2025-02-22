@@ -15,19 +15,24 @@ package io.trino.plugin.jdbc;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
-
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 
 public class JdbcWriteConfig
 {
-    static final int MAX_ALLOWED_WRITE_BATCH_SIZE = 1_000_000;
+    public static final int MAX_ALLOWED_WRITE_BATCH_SIZE = 10_000_000;
+    static final int DEFAULT_WRITE_PARALLELISM = 8;
 
     private int writeBatchSize = 1000;
+    private int writeParallelism = DEFAULT_WRITE_PARALLELISM;
 
     // Do not create temporary table during insert.
     // This means that the write operation can fail and leave the table in an inconsistent state.
     private boolean nonTransactionalInsert;
+
+    // Do not create temporary table during merge.
+    // This means that the write operation can fail and leave the table in an inconsistent state.
+    private boolean nonTransactionalMerge;
 
     @Min(1)
     @Max(MAX_ALLOWED_WRITE_BATCH_SIZE)
@@ -50,11 +55,40 @@ public class JdbcWriteConfig
     }
 
     @Config("insert.non-transactional-insert.enabled")
-    @ConfigDescription("Do not create temporary table during insert. " +
+    @ConfigDescription("Enables support for non-transactional INSERT. " +
             "This means that the write operation can fail and leave the table in an inconsistent state.")
     public JdbcWriteConfig setNonTransactionalInsert(boolean nonTransactionalInsert)
     {
         this.nonTransactionalInsert = nonTransactionalInsert;
+        return this;
+    }
+
+    public boolean isNonTransactionalMerge()
+    {
+        return nonTransactionalMerge;
+    }
+
+    @Config("merge.non-transactional-merge.enabled")
+    @ConfigDescription("Enables support for non-transactional MERGE. " +
+            "This means that the write operation can fail and leave the table in an inconsistent state.")
+    public JdbcWriteConfig setNonTransactionalMerge(boolean nonTransactionalMerge)
+    {
+        this.nonTransactionalMerge = nonTransactionalMerge;
+        return this;
+    }
+
+    @Min(1)
+    @Max(128)
+    public int getWriteParallelism()
+    {
+        return writeParallelism;
+    }
+
+    @Config("write.parallelism")
+    @ConfigDescription("Maximum number of parallel write tasks")
+    public JdbcWriteConfig setWriteParallelism(int writeParallelism)
+    {
+        this.writeParallelism = writeParallelism;
         return this;
     }
 }

@@ -46,11 +46,12 @@ public class HiveOutputTableHandle
             @JsonProperty("tableStorageFormat") HiveStorageFormat tableStorageFormat,
             @JsonProperty("partitionStorageFormat") HiveStorageFormat partitionStorageFormat,
             @JsonProperty("partitionedBy") List<String> partitionedBy,
-            @JsonProperty("bucketProperty") Optional<HiveBucketProperty> bucketProperty,
+            @JsonProperty("bucketInfo") Optional<BucketInfo> bucketInfo,
             @JsonProperty("tableOwner") String tableOwner,
             @JsonProperty("additionalTableParameters") Map<String, String> additionalTableParameters,
             @JsonProperty("transaction") AcidTransaction transaction,
-            @JsonProperty("external") boolean external)
+            @JsonProperty("external") boolean external,
+            @JsonProperty("retriesEnabled") boolean retriesEnabled)
     {
         super(
                 schemaName,
@@ -58,10 +59,11 @@ public class HiveOutputTableHandle
                 inputColumns,
                 pageSinkMetadata,
                 locationHandle,
-                bucketProperty,
+                bucketInfo,
                 tableStorageFormat,
                 partitionStorageFormat,
-                transaction);
+                transaction,
+                retriesEnabled);
 
         this.partitionedBy = ImmutableList.copyOf(requireNonNull(partitionedBy, "partitionedBy is null"));
         this.tableOwner = requireNonNull(tableOwner, "tableOwner is null");

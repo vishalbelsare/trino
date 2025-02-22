@@ -14,7 +14,7 @@
 package io.trino.plugin.postgresql;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -30,22 +30,25 @@ public class TestPostgreSqlConfig
         assertRecordedDefaults(recordDefaults(PostgreSqlConfig.class)
                 .setArrayMapping(PostgreSqlConfig.ArrayMapping.DISABLED)
                 .setIncludeSystemTables(false)
-                .setEnableStringPushdownWithCollate(false));
+                .setEnableStringPushdownWithCollate(false)
+                .setFetchSize(null));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("postgresql.array-mapping", "AS_ARRAY")
                 .put("postgresql.include-system-tables", "true")
                 .put("postgresql.experimental.enable-string-pushdown-with-collate", "true")
-                .build();
+                .put("postgresql.fetch-size", "2000")
+                .buildOrThrow();
 
         PostgreSqlConfig expected = new PostgreSqlConfig()
                 .setArrayMapping(PostgreSqlConfig.ArrayMapping.AS_ARRAY)
                 .setIncludeSystemTables(true)
-                .setEnableStringPushdownWithCollate(true);
+                .setEnableStringPushdownWithCollate(true)
+                .setFetchSize(2000);
 
         assertFullMapping(properties, expected);
     }

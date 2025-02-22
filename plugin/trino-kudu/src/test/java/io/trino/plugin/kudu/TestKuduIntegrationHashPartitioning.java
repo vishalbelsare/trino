@@ -17,29 +17,18 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static io.trino.plugin.kudu.KuduQueryRunnerFactory.createKuduQueryRunner;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestKuduIntegrationHashPartitioning
         extends AbstractTestQueryFramework
 {
-    private TestingKuduServer kuduServer;
-
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        kuduServer = new TestingKuduServer();
-        return createKuduQueryRunner(kuduServer, "hash");
-    }
-
-    @AfterClass(alwaysRun = true)
-    public final void destroy()
-    {
-        kuduServer.close();
+        return KuduQueryRunnerFactory.builder(closeAfterClass(new TestingKuduServer())).build();
     }
 
     @Test
@@ -88,6 +77,6 @@ public class TestKuduIntegrationHashPartitioning
         assertUpdate(insert, 1);
 
         MaterializedResult result = computeActual("SELECT id FROM " + tableName);
-        assertEquals(result.getRowCount(), 1);
+        assertThat(result.getRowCount()).isEqualTo(1);
     }
 }

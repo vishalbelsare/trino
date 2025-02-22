@@ -13,28 +13,17 @@
  */
 package io.trino.testing;
 
-import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.Session.SessionBuilder;
-import io.trino.connector.CatalogName;
-import io.trino.connector.system.StaticSystemTablesProvider;
-import io.trino.connector.system.SystemTablesMetadata;
+import io.trino.client.ClientCapabilities;
 import io.trino.execution.QueryIdGenerator;
-import io.trino.metadata.Catalog;
-import io.trino.metadata.Catalog.SecurityManagement;
 import io.trino.metadata.SessionPropertyManager;
-import io.trino.spi.connector.Connector;
-import io.trino.spi.connector.ConnectorMetadata;
-import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.security.Identity;
-import io.trino.spi.transaction.IsolationLevel;
 import io.trino.spi.type.TimeZoneKey;
-import io.trino.sql.SqlPath;
 
-import java.util.Optional;
+import java.util.Arrays;
 
-import static io.trino.connector.CatalogName.createInformationSchemaCatalogName;
-import static io.trino.connector.CatalogName.createSystemTablesCatalogName;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Locale.ENGLISH;
 
 public final class TestingSession
@@ -54,6 +43,16 @@ public final class TestingSession
 
     private TestingSession() {}
 
+    public static Session testSession()
+    {
+        return testSessionBuilder().build();
+    }
+
+    public static Session testSession(Session session)
+    {
+        return testSessionBuilder(session).build();
+    }
+
     public static SessionBuilder testSessionBuilder()
     {
         return testSessionBuilder(new SessionPropertyManager());
@@ -64,46 +63,21 @@ public final class TestingSession
         return Session.builder(sessionPropertyManager)
                 .setQueryId(queryIdGenerator.createNextQueryId())
                 .setIdentity(Identity.ofUser("user"))
+                .setOriginalIdentity(Identity.ofUser("user"))
                 .setSource("test")
                 .setCatalog("catalog")
                 .setSchema("schema")
-                .setPath(new SqlPath(Optional.of("path")))
                 .setTimeZoneKey(DEFAULT_TIME_ZONE_KEY)
                 .setLocale(ENGLISH)
+                .setClientCapabilities(Arrays.stream(ClientCapabilities.values()).map(Enum::name)
+                        .collect(toImmutableSet()))
                 .setRemoteUserAddress("address")
                 .setUserAgent("agent");
     }
 
-    public static Catalog createBogusTestingCatalog(String catalogName)
+    public static SessionBuilder testSessionBuilder(Session session)
     {
-        CatalogName catalog = new CatalogName(catalogName);
-        return new Catalog(
-                catalogName,
-                catalog,
-                "test",
-                createTestSessionConnector(),
-                SecurityManagement.CONNECTOR,
-                createInformationSchemaCatalogName(catalog),
-                createTestSessionConnector(),
-                createSystemTablesCatalogName(catalog),
-                createTestSessionConnector());
-    }
-
-    private static Connector createTestSessionConnector()
-    {
-        return new Connector()
-        {
-            @Override
-            public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly, boolean autoCommit)
-            {
-                return new ConnectorTransactionHandle() {};
-            }
-
-            @Override
-            public ConnectorMetadata getMetadata(ConnectorTransactionHandle transaction)
-            {
-                return new SystemTablesMetadata(new StaticSystemTablesProvider(ImmutableSet.of()));
-            }
-        };
+        return Session.builder(session)
+                .setQueryId(queryIdGenerator.createNextQueryId());
     }
 }

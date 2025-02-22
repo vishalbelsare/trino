@@ -14,108 +14,91 @@
 package io.trino.cost;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.inject.Inject;
 import io.trino.Session;
-import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
-import io.trino.security.AllowAllAccessControl;
+import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
-import io.trino.sql.analyzer.ExpressionAnalyzer;
-import io.trino.sql.analyzer.Scope;
-import io.trino.sql.planner.ExpressionInterpreter;
-import io.trino.sql.planner.NoOpSymbolResolver;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Coalesce;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.IrVisitor;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
-import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.tree.ArithmeticBinaryExpression;
-import io.trino.sql.tree.ArithmeticUnaryExpression;
-import io.trino.sql.tree.AstVisitor;
-import io.trino.sql.tree.Cast;
-import io.trino.sql.tree.CoalesceExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.Literal;
-import io.trino.sql.tree.Node;
-import io.trino.sql.tree.NodeRef;
-import io.trino.sql.tree.NullLiteral;
-import io.trino.sql.tree.SymbolReference;
 
-import javax.inject.Inject;
-
-import java.util.Map;
 import java.util.OptionalDouble;
 
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
+import static io.trino.spi.function.OperatorType.ADD;
+import static io.trino.spi.function.OperatorType.DIVIDE;
+import static io.trino.spi.function.OperatorType.MODULUS;
+import static io.trino.spi.function.OperatorType.MULTIPLY;
+import static io.trino.spi.function.OperatorType.NEGATION;
+import static io.trino.spi.function.OperatorType.SUBTRACT;
 import static io.trino.spi.statistics.StatsUtil.toStatsRepresentation;
-import static io.trino.sql.analyzer.ExpressionAnalyzer.createConstantAnalyzer;
-import static io.trino.sql.planner.LiteralInterpreter.evaluate;
+import static io.trino.sql.ir.optimizer.IrExpressionOptimizer.newOptimizer;
 import static io.trino.util.MoreMath.max;
 import static io.trino.util.MoreMath.min;
 import static java.lang.Double.NaN;
 import static java.lang.Double.isFinite;
 import static java.lang.Double.isNaN;
 import static java.lang.Math.abs;
-import static java.util.Collections.emptyMap;
 import static java.util.Objects.requireNonNull;
 
 public class ScalarStatsCalculator
 {
-    private final Metadata metadata;
-    private final TypeAnalyzer typeAnalyzer;
+    private final PlannerContext plannerContext;
 
     @Inject
-    public ScalarStatsCalculator(Metadata metadata, TypeAnalyzer typeAnalyzer)
+    public ScalarStatsCalculator(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata cannot be null");
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext cannot be null");
     }
 
-    public SymbolStatsEstimate calculate(Expression scalarExpression, PlanNodeStatsEstimate inputStatistics, Session session, TypeProvider types)
+    public SymbolStatsEstimate calculate(Expression scalarExpression, PlanNodeStatsEstimate inputStatistics, Session session)
     {
-        return new Visitor(inputStatistics, session, types).process(scalarExpression);
+        return new Visitor(inputStatistics, session).process(scalarExpression);
     }
 
     private class Visitor
-            extends AstVisitor<SymbolStatsEstimate, Void>
+            extends IrVisitor<SymbolStatsEstimate, Void>
     {
         private final PlanNodeStatsEstimate input;
         private final Session session;
-        private final TypeProvider types;
 
-        Visitor(PlanNodeStatsEstimate input, Session session, TypeProvider types)
+        Visitor(PlanNodeStatsEstimate input, Session session)
         {
             this.input = input;
             this.session = session;
-            this.types = types;
         }
 
         @Override
-        protected SymbolStatsEstimate visitNode(Node node, Void context)
+        protected SymbolStatsEstimate visitExpression(Expression node, Void context)
         {
             return SymbolStatsEstimate.unknown();
         }
 
         @Override
-        protected SymbolStatsEstimate visitSymbolReference(SymbolReference node, Void context)
+        protected SymbolStatsEstimate visitReference(Reference node, Void context)
         {
             return input.getSymbolStatistics(Symbol.from(node));
         }
 
         @Override
-        protected SymbolStatsEstimate visitNullLiteral(NullLiteral node, Void context)
+        protected SymbolStatsEstimate visitConstant(Constant node, Void context)
         {
-            return nullStatsEstimate();
-        }
-
-        @Override
-        protected SymbolStatsEstimate visitLiteral(Literal node, Void context)
-        {
-            ExpressionAnalyzer analyzer = createConstantAnalyzer(metadata, new AllowAllAccessControl(), session, ImmutableMap.of(), WarningCollector.NOOP);
-            Type type = analyzer.analyze(node, Scope.create());
-            Object value = evaluate(metadata, session, analyzer.getExpressionTypes(), node);
+            Type type = node.type();
+            Object value = node.value();
+            if (value == null) {
+                return nullStatsEstimate();
+            }
 
             OptionalDouble doubleValue = toStatsRepresentation(type, value);
             SymbolStatsEstimate.Builder estimate = SymbolStatsEstimate.builder()
@@ -130,54 +113,50 @@ public class ScalarStatsCalculator
         }
 
         @Override
-        protected SymbolStatsEstimate visitFunctionCall(FunctionCall node, Void context)
+        protected SymbolStatsEstimate visitCall(Call node, Void context)
         {
-            Map<NodeRef<Expression>, Type> expressionTypes = getExpressionTypes(session, node, types);
-            ExpressionInterpreter interpreter = new ExpressionInterpreter(node, metadata, session, expressionTypes);
-            Object value = interpreter.optimize(NoOpSymbolResolver.INSTANCE);
+            if (node.function().name().equals(builtinFunctionName(NEGATION))) {
+                SymbolStatsEstimate stats = process(node.arguments().getFirst());
+                return SymbolStatsEstimate.buildFrom(stats)
+                        .setLowValue(-stats.getHighValue())
+                        .setHighValue(-stats.getLowValue())
+                        .build();
+            }
+            else if (node.function().name().equals(builtinFunctionName(ADD)) ||
+                    node.function().name().equals(builtinFunctionName(SUBTRACT)) ||
+                    node.function().name().equals(builtinFunctionName(MULTIPLY)) ||
+                    node.function().name().equals(builtinFunctionName(DIVIDE)) ||
+                    node.function().name().equals(builtinFunctionName(MODULUS))) {
+                return processArithmetic(node);
+            }
 
-            if (value == null || value instanceof NullLiteral) {
+            Expression value = newOptimizer(plannerContext).process(node, session, ImmutableMap.of()).orElse(node);
+
+            if (value instanceof Constant constant && constant.value() == null) {
                 return nullStatsEstimate();
             }
 
-            if (value instanceof Expression && !(value instanceof Literal)) {
-                // value is not a constant
-                return SymbolStatsEstimate.unknown();
+            if (value instanceof Constant) {
+                return SymbolStatsEstimate.builder()
+                        .setNullsFraction(0)
+                        .setDistinctValuesCount(1)
+                        .build();
             }
 
-            // value is a constant
-            return SymbolStatsEstimate.builder()
-                    .setNullsFraction(0)
-                    .setDistinctValuesCount(1)
-                    .build();
-        }
-
-        private Map<NodeRef<Expression>, Type> getExpressionTypes(Session session, Expression expression, TypeProvider types)
-        {
-            ExpressionAnalyzer expressionAnalyzer = ExpressionAnalyzer.createWithoutSubqueries(
-                    metadata,
-                    new AllowAllAccessControl(),
-                    session,
-                    types,
-                    emptyMap(),
-                    node -> new IllegalStateException("Unexpected node: %s" + node),
-                    WarningCollector.NOOP,
-                    false);
-            expressionAnalyzer.analyze(expression, Scope.create());
-            return expressionAnalyzer.getExpressionTypes();
+            return SymbolStatsEstimate.unknown();
         }
 
         @Override
         protected SymbolStatsEstimate visitCast(Cast node, Void context)
         {
-            SymbolStatsEstimate sourceStats = process(node.getExpression());
+            SymbolStatsEstimate sourceStats = process(node.expression());
 
             // todo - make this general postprocessing rule.
             double distinctValuesCount = sourceStats.getDistinctValuesCount();
             double lowValue = sourceStats.getLowValue();
             double highValue = sourceStats.getHighValue();
 
-            if (isIntegralType(typeAnalyzer.getType(session, types, node))) {
+            if (isIntegralType(((Expression) node).type())) {
                 // todo handle low/high value changes if range gets narrower due to cast (e.g. BIGINT -> SMALLINT)
                 if (isFinite(lowValue)) {
                     lowValue = Math.round(lowValue);
@@ -207,35 +186,21 @@ public class ScalarStatsCalculator
                 return true;
             }
 
-            if (type instanceof DecimalType) {
-                return ((DecimalType) type).getScale() == 0;
+            if (type instanceof DecimalType decimalType) {
+                return decimalType.getScale() == 0;
             }
 
             return false;
         }
 
-        @Override
-        protected SymbolStatsEstimate visitArithmeticUnary(ArithmeticUnaryExpression node, Void context)
-        {
-            SymbolStatsEstimate stats = process(node.getValue());
-            switch (node.getSign()) {
-                case PLUS:
-                    return stats;
-                case MINUS:
-                    return SymbolStatsEstimate.buildFrom(stats)
-                            .setLowValue(-stats.getHighValue())
-                            .setHighValue(-stats.getLowValue())
-                            .build();
-            }
-            throw new IllegalStateException("Unexpected sign: " + node.getSign());
-        }
-
-        @Override
-        protected SymbolStatsEstimate visitArithmeticBinary(ArithmeticBinaryExpression node, Void context)
+        protected SymbolStatsEstimate processArithmetic(Call node)
         {
             requireNonNull(node, "node is null");
-            SymbolStatsEstimate left = process(node.getLeft());
-            SymbolStatsEstimate right = process(node.getRight());
+            SymbolStatsEstimate left = process(node.arguments().get(0));
+            SymbolStatsEstimate right = process(node.arguments().get(1));
+            if (left.isUnknown() || right.isUnknown()) {
+                return SymbolStatsEstimate.unknown();
+            }
 
             SymbolStatsEstimate.Builder result = SymbolStatsEstimate.builder()
                     .setAverageRowSize(Math.max(left.getAverageRowSize(), right.getAverageRowSize()))
@@ -250,11 +215,11 @@ public class ScalarStatsCalculator
                 result.setLowValue(NaN)
                         .setHighValue(NaN);
             }
-            else if (node.getOperator() == ArithmeticBinaryExpression.Operator.DIVIDE && rightLow < 0 && rightHigh > 0) {
+            else if (node.function().name().equals(builtinFunctionName(DIVIDE)) && rightLow < 0 && rightHigh > 0) {
                 result.setLowValue(Double.NEGATIVE_INFINITY)
                         .setHighValue(Double.POSITIVE_INFINITY);
             }
-            else if (node.getOperator() == ArithmeticBinaryExpression.Operator.MODULUS) {
+            else if (node.function().name().equals(builtinFunctionName(MODULUS))) {
                 double maxDivisor = max(abs(rightLow), abs(rightHigh));
                 if (leftHigh <= 0) {
                     result.setLowValue(max(-maxDivisor, leftLow))
@@ -270,10 +235,10 @@ public class ScalarStatsCalculator
                 }
             }
             else {
-                double v1 = operate(node.getOperator(), leftLow, rightLow);
-                double v2 = operate(node.getOperator(), leftLow, rightHigh);
-                double v3 = operate(node.getOperator(), leftHigh, rightLow);
-                double v4 = operate(node.getOperator(), leftHigh, rightHigh);
+                double v1 = operate(node.function().name(), leftLow, rightLow);
+                double v2 = operate(node.function().name(), leftLow, rightHigh);
+                double v3 = operate(node.function().name(), leftHigh, rightLow);
+                double v4 = operate(node.function().name(), leftHigh, rightHigh);
                 double lowValue = min(v1, v2, v3, v4);
                 double highValue = max(v1, v2, v3, v4);
 
@@ -284,29 +249,24 @@ public class ScalarStatsCalculator
             return result.build();
         }
 
-        private double operate(ArithmeticBinaryExpression.Operator operator, double left, double right)
+        private double operate(CatalogSchemaFunctionName function, double left, double right)
         {
-            switch (operator) {
-                case ADD:
-                    return left + right;
-                case SUBTRACT:
-                    return left - right;
-                case MULTIPLY:
-                    return left * right;
-                case DIVIDE:
-                    return left / right;
-                case MODULUS:
-                    return left % right;
-            }
-            throw new IllegalStateException("Unsupported ArithmeticBinaryExpression.Operator: " + operator);
+            return switch (function) {
+                case CatalogSchemaFunctionName name when name.equals(builtinFunctionName(ADD)) -> left + right;
+                case CatalogSchemaFunctionName name when name.equals(builtinFunctionName(SUBTRACT)) -> left - right;
+                case CatalogSchemaFunctionName name when name.equals(builtinFunctionName(MULTIPLY)) -> left * right;
+                case CatalogSchemaFunctionName name when name.equals(builtinFunctionName(DIVIDE)) -> left / right;
+                case CatalogSchemaFunctionName name when name.equals(builtinFunctionName(MODULUS)) -> left % right;
+                default -> throw new IllegalStateException("Unsupported binary arithmetic operation: " + function);
+            };
         }
 
         @Override
-        protected SymbolStatsEstimate visitCoalesceExpression(CoalesceExpression node, Void context)
+        protected SymbolStatsEstimate visitCoalesce(Coalesce node, Void context)
         {
             requireNonNull(node, "node is null");
             SymbolStatsEstimate result = null;
-            for (Expression operand : node.getOperands()) {
+            for (Expression operand : node.operands()) {
                 SymbolStatsEstimate operandEstimates = process(operand);
                 if (result != null) {
                     result = estimateCoalesce(result, operandEstimates);
@@ -324,20 +284,18 @@ public class ScalarStatsCalculator
             if (left.getNullsFraction() == 0) {
                 return left;
             }
-            else if (left.getNullsFraction() == 1.0) {
+            if (left.getNullsFraction() == 1.0) {
                 return right;
             }
-            else {
-                return SymbolStatsEstimate.builder()
-                        .setLowValue(min(left.getLowValue(), right.getLowValue()))
-                        .setHighValue(max(left.getHighValue(), right.getHighValue()))
-                        .setDistinctValuesCount(left.getDistinctValuesCount() +
-                                min(right.getDistinctValuesCount(), input.getOutputRowCount() * left.getNullsFraction()))
-                        .setNullsFraction(left.getNullsFraction() * right.getNullsFraction())
-                        // TODO check if dataSize estimation method is correct
-                        .setAverageRowSize(max(left.getAverageRowSize(), right.getAverageRowSize()))
-                        .build();
-            }
+            return SymbolStatsEstimate.builder()
+                    .setLowValue(min(left.getLowValue(), right.getLowValue()))
+                    .setHighValue(max(left.getHighValue(), right.getHighValue()))
+                    .setDistinctValuesCount(left.getDistinctValuesCount() +
+                            min(right.getDistinctValuesCount(), input.getOutputRowCount() * left.getNullsFraction()))
+                    .setNullsFraction(left.getNullsFraction() * right.getNullsFraction())
+                    // TODO check if dataSize estimation method is correct
+                    .setAverageRowSize(max(left.getAverageRowSize(), right.getAverageRowSize()))
+                    .build();
         }
     }
 

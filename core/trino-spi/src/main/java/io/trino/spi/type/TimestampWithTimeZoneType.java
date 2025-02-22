@@ -14,6 +14,7 @@
 package io.trino.spi.type;
 
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.ValueBlock;
 
 import static io.trino.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
 import static java.lang.String.format;
@@ -22,9 +23,10 @@ import static java.lang.String.format;
  * @see ShortTimestampWithTimeZoneType
  * @see LongTimestampWithTimeZoneType
  */
-public abstract class TimestampWithTimeZoneType
+public abstract sealed class TimestampWithTimeZoneType
         extends AbstractType
         implements FixedWidthType
+        permits LongTimestampWithTimeZoneType, ShortTimestampWithTimeZoneType
 {
     public static final int MAX_PRECISION = 12;
 
@@ -45,12 +47,6 @@ public abstract class TimestampWithTimeZoneType
     public static final TimestampWithTimeZoneType TIMESTAMP_TZ_NANOS = createTimestampWithTimeZoneType(9);
     public static final TimestampWithTimeZoneType TIMESTAMP_TZ_PICOS = createTimestampWithTimeZoneType(12);
 
-    /**
-     * @deprecated Use {@link #TIMESTAMP_TZ_MILLIS} instead
-     */
-    @Deprecated
-    public static final TimestampWithTimeZoneType TIMESTAMP_WITH_TIME_ZONE = TIMESTAMP_TZ_MILLIS;
-
     private final int precision;
 
     public static TimestampWithTimeZoneType createTimestampWithTimeZoneType(int precision)
@@ -61,9 +57,9 @@ public abstract class TimestampWithTimeZoneType
         return TYPES[precision];
     }
 
-    TimestampWithTimeZoneType(int precision, Class<?> javaType)
+    TimestampWithTimeZoneType(int precision, Class<?> javaType, Class<? extends ValueBlock> valueBlockType)
     {
-        super(new TypeSignature(StandardTypes.TIMESTAMP_WITH_TIME_ZONE, TypeSignatureParameter.numericParameter(precision)), javaType);
+        super(new TypeSignature(StandardTypes.TIMESTAMP_WITH_TIME_ZONE, TypeSignatureParameter.numericParameter(precision)), javaType, valueBlockType);
 
         if (precision < 0 || precision > MAX_PRECISION) {
             throw new IllegalArgumentException(format("Precision must be in the range [0, %s]", MAX_PRECISION));

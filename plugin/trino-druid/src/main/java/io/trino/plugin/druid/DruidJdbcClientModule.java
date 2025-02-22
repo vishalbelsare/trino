@@ -18,15 +18,18 @@ import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
+import io.opentelemetry.api.OpenTelemetry;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
+import io.trino.plugin.jdbc.ptf.Query;
+import io.trino.spi.function.table.ConnectorTableFunction;
 import org.apache.calcite.avatica.remote.Driver;
 
-import java.util.Properties;
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
 
 public class DruidJdbcClientModule
         implements Module
@@ -35,18 +38,16 @@ public class DruidJdbcClientModule
     public void configure(Binder binder)
     {
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(DruidJdbcClient.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
     }
 
     @Provides
     @Singleton
     @ForBaseJdbc
-    public static ConnectionFactory createConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider)
+    public static ConnectionFactory createConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OpenTelemetry openTelemetry)
     {
-        Properties connectionProperties = new Properties();
-        return new DriverConnectionFactory(
-                new Driver(),
-                config.getConnectionUrl(),
-                connectionProperties,
-                credentialProvider);
+        return DriverConnectionFactory.builder(new Driver(), config.getConnectionUrl(), credentialProvider)
+                .setOpenTelemetry(openTelemetry)
+                .build();
     }
 }

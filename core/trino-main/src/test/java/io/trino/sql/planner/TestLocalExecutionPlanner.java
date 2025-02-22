@@ -14,28 +14,40 @@
 package io.trino.sql.planner;
 
 import com.google.common.base.Joiner;
-import io.trino.testing.LocalQueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import com.google.common.collect.ImmutableMap;
+import io.trino.plugin.tpch.TpchPlugin;
+import io.trino.testing.QueryRunner;
+import io.trino.testing.StandaloneQueryRunner;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static io.airlift.testing.Closeables.closeAllRuntimeException;
 import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.spi.StandardErrorCode.COMPILER_ERROR;
+import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static io.trino.spi.StandardErrorCode.QUERY_EXCEEDED_COMPILER_LIMIT;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.util.Collections.nCopies;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestLocalExecutionPlanner
 {
-    private LocalQueryRunner runner;
+    private QueryRunner runner;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
-        runner = LocalQueryRunner.create(TEST_SESSION);
+        runner = new StandaloneQueryRunner(TEST_SESSION);
+        runner.installPlugin(new TpchPlugin());
+        runner.createCatalog("tpch", "tpch", ImmutableMap.of());
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void cleanup()
     {
         closeAllRuntimeException(runner);
@@ -49,8 +61,8 @@ public class TestLocalExecutionPlanner
         String outer = "x + x + " + Joiner.on(" + ").join(nCopies(100, inner));
 
         assertTrinoExceptionThrownBy(() -> runner.execute("SELECT " + outer + " FROM (VALUES rand()) t(x)"))
-                .hasErrorCode(COMPILER_ERROR)
-                .hasMessageStartingWith("Query exceeded maximum columns");
+                .hasErrorCode(QUERY_EXCEEDED_COMPILER_LIMIT)
+                .hasMessage("Query exceeded maximum columns. Please reduce the number of columns referenced and re-run the query.");
     }
 
     @Test
@@ -63,7 +75,15 @@ public class TestLocalExecutionPlanner
                 + " OR " + Joiner.on(" AND ").join(nCopies(1000, " c3 = rand()"));
 
         assertTrinoExceptionThrownBy(() -> runner.execute("SELECT * " + filterQueryInner + filterQueryWhere))
-                .hasErrorCode(COMPILER_ERROR)
-                .hasMessageStartingWith("Query exceeded maximum filters");
+                .hasErrorCode(QUERY_EXCEEDED_COMPILER_LIMIT)
+                .hasMessage("Query exceeded maximum filters. Please reduce the number of filters referenced and re-run the query.");
+    }
+
+    @Test
+    public void testExpressionCompilerFailure()
+    {
+        assertTrinoExceptionThrownBy(() -> runner.execute("SELECT concat(name) FROM nation"))
+                .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                .hasMessageStartingWith("There must be two or more concatenation arguments");
     }
 }

@@ -13,74 +13,48 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
+import static io.trino.spi.block.BlockUtil.calculateBlockResetSize;
 
 public interface BlockBuilder
-        extends Block
 {
     /**
-     * Write a byte to the current entry;
+     * Returns the number of positions in this block builder.
      */
-    default BlockBuilder writeByte(int value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    int getPositionCount();
 
     /**
-     * Write a short to the current entry;
+     * Returns the size of this block as if it was compacted, ignoring any over-allocations
+     * and any unloaded nested blocks.
+     * For example, in dictionary blocks, this only counts each dictionary entry once,
+     * rather than each time a value is referenced.
      */
-    default BlockBuilder writeShort(int value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    long getSizeInBytes();
 
     /**
-     * Write a int to the current entry;
+     * Returns the retained size of this block in memory, including over-allocations.
+     * This method is called from the innermost execution loop and must be fast.
      */
-    default BlockBuilder writeInt(int value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    long getRetainedSizeInBytes();
 
     /**
-     * Write a long to the current entry;
+     * Append the specified value.
      */
-    default BlockBuilder writeLong(long value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    void append(ValueBlock block, int position);
 
     /**
-     * Write a byte sequences to the current entry;
+     * Append the specified value multiple times.
      */
-    default BlockBuilder writeBytes(Slice source, int sourceIndex, int length)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    void appendRepeated(ValueBlock block, int position, int count);
 
     /**
-     * Return a writer to the current entry. The caller can operate on the returned caller to incrementally build the object. This is generally more efficient than
-     * building the object elsewhere and call writeObject afterwards because a large chunk of memory could potentially be unnecessarily copied in this process.
+     * Append the values in the specified range.
      */
-    default BlockBuilder beginBlockEntry()
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    void appendRange(ValueBlock block, int offset, int length);
 
     /**
-     * Create a new block from the current materialized block by keeping the same elements
-     * only with respect to {@code visiblePositions}.
+     * Append the values at the specified positions.
      */
-    @Override
-    default Block getPositions(int[] visiblePositions, int offset, int length)
-    {
-        return build().getPositions(visiblePositions, offset, length);
-    }
-
-    /**
-     * Write a byte to the current entry;
-     */
-    BlockBuilder closeEntry();
+    void appendPositions(ValueBlock block, int[] positions, int offset, int length);
 
     /**
      * Appends a null value to the block.
@@ -88,29 +62,32 @@ public interface BlockBuilder
     BlockBuilder appendNull();
 
     /**
-     * Append a struct to the block and close the entry.
+     * Rolls back added data to the specified position.
+     * Resetting may result in a block without nulls with the may-have-nulls flag set.
+     * The PageBuilder status will not be updated to reflect the removed data size.
+     *
+     * @throws IllegalArgumentException if the position is greater than the current position count
      */
-    default BlockBuilder appendStructure(Block value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Do not use this interface outside block package.
-     * Instead, use Block.writePositionTo(BlockBuilder, position)
-     */
-    default BlockBuilder appendStructureInternal(Block block, int position)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    void resetTo(int position);
 
     /**
      * Builds the block. This method can be called multiple times.
+     * The return value may be a block such as RLE to allow for optimizations when all block values are the same.
      */
     Block build();
 
     /**
+     * Builds a ValueBlock. This method can be called multiple times.
+     */
+    ValueBlock buildValueBlock();
+
+    /**
      * Creates a new block builder of the same type based on the current usage statistics of this block builder.
      */
-    BlockBuilder newBlockBuilderLike(BlockBuilderStatus blockBuilderStatus);
+    BlockBuilder newBlockBuilderLike(int expectedEntries, BlockBuilderStatus blockBuilderStatus);
+
+    default BlockBuilder newBlockBuilderLike(BlockBuilderStatus blockBuilderStatus)
+    {
+        return newBlockBuilderLike(calculateBlockResetSize(getPositionCount()), blockBuilderStatus);
+    }
 }

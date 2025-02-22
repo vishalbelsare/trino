@@ -13,8 +13,8 @@
  */
 package io.trino.operator;
 
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
+import io.trino.spi.function.FunctionNullability;
+import io.trino.spi.function.Signature;
 
 public interface ParametricImplementation
 {
@@ -23,6 +23,4 @@ public interface ParametricImplementation
     boolean hasSpecializedTypeParameters();
 
     FunctionNullability getFunctionNullability();
-
-    ParametricImplementation withAlias(String alias);
 }

@@ -20,8 +20,7 @@ import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.testing.MaterializedResult;
@@ -42,22 +41,20 @@ import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.MoreFutures.tryGetFutureValue;
-import static io.airlift.testing.Assertions.assertEqualsIgnoreOrder;
 import static io.trino.operator.PageAssertions.assertPageEquals;
-import static io.trino.testing.assertions.Assert.assertEquals;
+import static io.trino.spi.block.RowValueBuilder.buildRowValue;
 import static io.trino.util.StructuralTestUtil.appendToBlockBuilder;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Fail.fail;
 
 public final class OperatorAssertion
 {
     private static final Duration BLOCKED_DEFAULT_TIMEOUT = new Duration(10, MILLISECONDS);
     private static final Duration UNBLOCKED_DEFAULT_TIMEOUT = new Duration(1, SECONDS);
 
-    private OperatorAssertion()
-    {
-    }
+    private OperatorAssertion() {}
 
     public static List<Page> toPages(Operator operator, Iterator<Page> input)
     {
@@ -83,7 +80,7 @@ public final class OperatorAssertion
     public static List<Page> toPagesPartial(Operator operator, Iterator<Page> input, boolean revokeMemory)
     {
         // verify initial state
-        assertEquals(operator.isFinished(), false);
+        assertThat(operator.isFinished()).isEqualTo(false);
 
         ImmutableList.Builder<Page> outputPages = ImmutableList.builder();
         for (int loopsSinceLastPage = 0; loopsSinceLastPage < 1_000; loopsSinceLastPage++) {
@@ -130,9 +127,15 @@ public final class OperatorAssertion
             handleMemoryRevoking(operator);
         }
 
-        assertEquals(operator.isFinished(), true, "Operator did not finish");
-        assertEquals(operator.needsInput(), false, "Operator still wants input");
-        assertEquals(operator.isBlocked().isDone(), true, "Operator is blocked");
+        assertThat(operator.isFinished())
+                .describedAs("Operator did not finish")
+                .isEqualTo(true);
+        assertThat(operator.needsInput())
+                .describedAs("Operator still wants input")
+                .isEqualTo(false);
+        assertThat(operator.isBlocked().isDone())
+                .describedAs("Operator is blocked")
+                .isEqualTo(true);
 
         return outputPages.build();
     }
@@ -162,8 +165,15 @@ public final class OperatorAssertion
 
     public static List<Page> toPages(OperatorFactory operatorFactory, DriverContext driverContext, List<Page> input, boolean revokeMemoryWhenAddingPages)
     {
+        return toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages, true);
+    }
+
+    public static List<Page> toPages(OperatorFactory operatorFactory, DriverContext driverContext, List<Page> input, boolean revokeMemoryWhenAddingPages, boolean closeOperatorFactory)
+    {
         try (Operator operator = operatorFactory.createOperator(driverContext)) {
-            operatorFactory.noMoreOperators();
+            if (closeOperatorFactory) {
+                operatorFactory.noMoreOperators();
+            }
             return toPages(operator, input.iterator(), revokeMemoryWhenAddingPages);
         }
         catch (Exception e) {
@@ -187,24 +197,21 @@ public final class OperatorAssertion
         return resultBuilder.build();
     }
 
-    public static Block toRow(List<Type> parameterTypes, Object... values)
+    public static SqlRow toRow(List<Type> parameterTypes, Object... values)
     {
         checkArgument(parameterTypes.size() == values.length, "parameterTypes.size(" + parameterTypes.size() + ") does not equal to values.length(" + values.length + ")");
 
-        RowType rowType = RowType.anonymous(parameterTypes);
-        BlockBuilder blockBuilder = new RowBlockBuilder(parameterTypes, null, 1);
-        BlockBuilder singleRowBlockWriter = blockBuilder.beginBlockEntry();
-        for (int i = 0; i < values.length; i++) {
-            appendToBlockBuilder(parameterTypes.get(i), values[i], singleRowBlockWriter);
-        }
-        blockBuilder.closeEntry();
-        return rowType.getObject(blockBuilder, 0);
+        return buildRowValue(RowType.anonymous(parameterTypes), fields -> {
+            for (int i = 0; i < values.length; i++) {
+                appendToBlockBuilder(parameterTypes.get(i), values[i], fields.get(i));
+            }
+        });
     }
 
     public static void assertOperatorEquals(OperatorFactory operatorFactory, List<Type> types, DriverContext driverContext, List<Page> input, List<Page> expected)
     {
         List<Page> actual = toPages(operatorFactory, driverContext, input);
-        assertEquals(actual.size(), expected.size());
+        assertThat(actual).hasSize(expected.size());
         for (int i = 0; i < actual.size(); i++) {
             assertPageEquals(types, actual.get(i), expected.get(i));
         }
@@ -225,6 +232,17 @@ public final class OperatorAssertion
         assertOperatorEquals(operatorFactory, driverContext, input, expected, false, ImmutableList.of(), revokeMemoryWhenAddingPages);
     }
 
+    public static void assertOperatorEquals(
+            OperatorFactory operatorFactory,
+            DriverContext driverContext,
+            List<Page> input,
+            MaterializedResult expected,
+            boolean revokeMemoryWhenAddingPages,
+            boolean closeOperatorFactory)
+    {
+        assertOperatorEquals(operatorFactory, driverContext, input, expected, false, ImmutableList.of(), revokeMemoryWhenAddingPages, closeOperatorFactory);
+    }
+
     public static void assertOperatorEquals(OperatorFactory operatorFactory, DriverContext driverContext, List<Page> input, MaterializedResult expected, boolean hashEnabled, List<Integer> hashChannels)
     {
         assertOperatorEquals(operatorFactory, driverContext, input, expected, hashEnabled, hashChannels, true);
@@ -239,13 +257,34 @@ public final class OperatorAssertion
             List<Integer> hashChannels,
             boolean revokeMemoryWhenAddingPages)
     {
-        List<Page> pages = toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages);
+        assertOperatorEquals(
+                operatorFactory,
+                driverContext,
+                input,
+                expected,
+                hashEnabled,
+                hashChannels,
+                revokeMemoryWhenAddingPages,
+                true);
+    }
+
+    public static void assertOperatorEquals(
+            OperatorFactory operatorFactory,
+            DriverContext driverContext,
+            List<Page> input,
+            MaterializedResult expected,
+            boolean hashEnabled,
+            List<Integer> hashChannels,
+            boolean revokeMemoryWhenAddingPages,
+            boolean closeOperatorFactory)
+    {
+        List<Page> pages = toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages, closeOperatorFactory);
         if (hashEnabled && !hashChannels.isEmpty()) {
             // Drop the hashChannel for all pages
             pages = dropChannel(pages, hashChannels);
         }
         MaterializedResult actual = toMaterializedResult(driverContext.getSession(), expected.getTypes(), pages);
-        assertEquals(actual, expected);
+        assertThat(actual).containsExactlyElementsOf(expected);
     }
 
     public static void assertOperatorEqualsIgnoreOrder(
@@ -307,7 +346,7 @@ public final class OperatorAssertion
             actualPages = dropChannel(actualPages, ImmutableList.of(hashChannel.get()));
         }
         MaterializedResult actual = toMaterializedResult(driverContext.getSession(), expected.getTypes(), actualPages);
-        assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
+        assertThat(actual.getMaterializedRows()).containsExactlyInAnyOrderElementsOf(expected.getMaterializedRows());
     }
 
     public static void assertOperatorIsBlocked(Operator operator)

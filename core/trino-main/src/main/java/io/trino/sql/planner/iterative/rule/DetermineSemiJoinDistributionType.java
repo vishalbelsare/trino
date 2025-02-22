@@ -15,7 +15,6 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.Ordering;
 import io.airlift.units.DataSize;
-import io.trino.FeaturesConfig.JoinDistributionType;
 import io.trino.cost.CostComparator;
 import io.trino.cost.LocalCostEstimate;
 import io.trino.cost.PlanNodeStatsEstimate;
@@ -23,7 +22,7 @@ import io.trino.cost.StatsProvider;
 import io.trino.cost.TaskCountEstimator;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.sql.planner.TypeProvider;
+import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
@@ -34,7 +33,7 @@ import java.util.List;
 import static io.trino.SystemSessionProperties.getJoinDistributionType;
 import static io.trino.SystemSessionProperties.getJoinMaxBroadcastTableSize;
 import static io.trino.cost.CostCalculatorWithEstimatedExchanges.calculateJoinCostWithoutOutput;
-import static io.trino.sql.planner.iterative.rule.DetermineJoinDistributionType.getSourceTablesSizeInBytes;
+import static io.trino.cost.PlanNodeStatsEstimateMath.getSourceTablesSizeInBytes;
 import static io.trino.sql.planner.plan.Patterns.semiJoin;
 import static io.trino.sql.planner.plan.SemiJoinNode.DistributionType.PARTITIONED;
 import static io.trino.sql.planner.plan.SemiJoinNode.DistributionType.REPLICATED;
@@ -69,15 +68,11 @@ public class DetermineSemiJoinDistributionType
     public Result apply(SemiJoinNode semiJoinNode, Captures captures, Context context)
     {
         JoinDistributionType joinDistributionType = getJoinDistributionType(context.getSession());
-        switch (joinDistributionType) {
-            case AUTOMATIC:
-                return Result.ofPlanNode(getCostBasedDistributionType(semiJoinNode, context));
-            case PARTITIONED:
-                return Result.ofPlanNode(semiJoinNode.withDistributionType(PARTITIONED));
-            case BROADCAST:
-                return Result.ofPlanNode(semiJoinNode.withDistributionType(REPLICATED));
-        }
-        throw new IllegalArgumentException("Unknown join_distribution_type: " + joinDistributionType);
+        return switch (joinDistributionType) {
+            case AUTOMATIC -> Result.ofPlanNode(getCostBasedDistributionType(semiJoinNode, context));
+            case PARTITIONED -> Result.ofPlanNode(semiJoinNode.withDistributionType(PARTITIONED));
+            case BROADCAST -> Result.ofPlanNode(semiJoinNode.withDistributionType(REPLICATED));
+        };
     }
 
     private PlanNode getCostBasedDistributionType(SemiJoinNode node, Context context)
@@ -103,7 +98,7 @@ public class DetermineSemiJoinDistributionType
     {
         DataSize joinMaxBroadcastTableSize = getJoinMaxBroadcastTableSize(context.getSession());
 
-        if (getSourceTablesSizeInBytes(node.getFilteringSource(), context) <= joinMaxBroadcastTableSize.toBytes()) {
+        if (getSourceTablesSizeInBytes(node.getFilteringSource(), context.getLookup(), context.getStatsProvider()) <= joinMaxBroadcastTableSize.toBytes()) {
             // choose replicated distribution type as filtering source contains small source tables only
             return node.withDistributionType(REPLICATED);
         }
@@ -117,14 +112,13 @@ public class DetermineSemiJoinDistributionType
 
         PlanNode buildSide = node.getFilteringSource();
         PlanNodeStatsEstimate buildSideStatsEstimate = context.getStatsProvider().getStats(buildSide);
-        double buildSideSizeInBytes = buildSideStatsEstimate.getOutputSizeInBytes(buildSide.getOutputSymbols(), context.getSymbolAllocator().getTypes());
+        double buildSideSizeInBytes = buildSideStatsEstimate.getOutputSizeInBytes(buildSide.getOutputSymbols());
         return buildSideSizeInBytes <= joinMaxBroadcastTableSize.toBytes()
-                || getSourceTablesSizeInBytes(buildSide, context) <= joinMaxBroadcastTableSize.toBytes();
+                || getSourceTablesSizeInBytes(buildSide, context.getLookup(), context.getStatsProvider()) <= joinMaxBroadcastTableSize.toBytes();
     }
 
     private PlanNodeWithCost getSemiJoinNodeWithCost(SemiJoinNode possibleJoinNode, Context context)
     {
-        TypeProvider types = context.getSymbolAllocator().getTypes();
         StatsProvider stats = context.getStatsProvider();
         boolean replicated = possibleJoinNode.getDistributionType().get() == REPLICATED;
         /*
@@ -151,7 +145,6 @@ public class DetermineSemiJoinDistributionType
                 possibleJoinNode.getSource(),
                 possibleJoinNode.getFilteringSource(),
                 stats,
-                types,
                 replicated,
                 estimatedSourceDistributedTaskCount);
         return new PlanNodeWithCost(cost.toPlanCost(), possibleJoinNode);

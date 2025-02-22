@@ -16,10 +16,12 @@ package io.trino.operator.scalar;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
 import io.airlift.slice.Slices;
+import io.trino.metadata.InternalFunctionBundle;
 import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.ScalarFunction;
@@ -30,7 +32,6 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.type.BlockTypeOperators;
 import io.trino.type.BlockTypeOperators.BlockPositionComparison;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -54,7 +55,6 @@ import java.util.concurrent.TimeUnit;
 import static com.google.common.base.Verify.verify;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.metadata.FunctionExtractor.extractFunctions;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.relational.Expressions.field;
@@ -103,8 +103,7 @@ public class BenchmarkArraySort
         @Setup
         public void setup()
         {
-            TestingFunctionResolution functionResolution = new TestingFunctionResolution()
-                    .addFunctions(extractFunctions(BenchmarkArraySort.class));
+            TestingFunctionResolution functionResolution = new TestingFunctionResolution(InternalFunctionBundle.extractFunctions(BenchmarkArraySort.class));
             ExpressionCompiler compiler = functionResolution.getExpressionCompiler();
             ImmutableList.Builder<RowExpression> projectionsBuilder = ImmutableList.builder();
             Block[] blocks = new Block[TYPES.size()];
@@ -112,7 +111,7 @@ public class BenchmarkArraySort
                 Type elementType = TYPES.get(i);
                 ArrayType arrayType = new ArrayType(elementType);
                 projectionsBuilder.add(new CallExpression(
-                        functionResolution.resolveFunction(QualifiedName.of(name), fromTypes(arrayType)),
+                        functionResolution.resolveFunction(name, fromTypes(arrayType)),
                         ImmutableList.of(field(i, arrayType))));
                 blocks[i] = createChannel(POSITIONS, ARRAY_SIZE, arrayType);
             }
@@ -124,21 +123,21 @@ public class BenchmarkArraySort
 
         private static Block createChannel(int positionCount, int arraySize, ArrayType arrayType)
         {
-            BlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
+            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
             for (int position = 0; position < positionCount; position++) {
-                BlockBuilder entryBuilder = blockBuilder.beginBlockEntry();
-                for (int i = 0; i < arraySize; i++) {
-                    if (arrayType.getElementType().getJavaType() == long.class) {
-                        arrayType.getElementType().writeLong(entryBuilder, ThreadLocalRandom.current().nextLong());
+                blockBuilder.buildEntry(elementBuilder -> {
+                    for (int i = 0; i < arraySize; i++) {
+                        if (arrayType.getElementType().getJavaType() == long.class) {
+                            arrayType.getElementType().writeLong(elementBuilder, ThreadLocalRandom.current().nextLong());
+                        }
+                        else if (arrayType.getElementType().equals(VARCHAR)) {
+                            arrayType.getElementType().writeSlice(elementBuilder, Slices.utf8Slice("test_string"));
+                        }
+                        else {
+                            throw new UnsupportedOperationException();
+                        }
                     }
-                    else if (arrayType.getElementType().equals(VARCHAR)) {
-                        arrayType.getElementType().writeSlice(entryBuilder, Slices.utf8Slice("test_string"));
-                    }
-                    else {
-                        throw new UnsupportedOperationException();
-                    }
-                }
-                blockBuilder.closeEntry();
+                });
             }
             return blockBuilder.build();
         }

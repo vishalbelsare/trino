@@ -15,7 +15,6 @@ package io.trino.spi.block;
 
 import io.airlift.slice.SliceInput;
 import io.airlift.slice.SliceOutput;
-import io.airlift.slice.Slices;
 
 import java.util.Optional;
 
@@ -28,6 +27,12 @@ public class DictionaryBlockEncoding
     public String getName()
     {
         return NAME;
+    }
+
+    @Override
+    public Class<? extends Block> getBlockClass()
+    {
+        return DictionaryBlock.class;
     }
 
     @Override
@@ -49,12 +54,7 @@ public class DictionaryBlockEncoding
         blockEncodingSerde.writeBlock(sliceOutput, dictionary);
 
         // ids
-        sliceOutput.writeBytes(dictionaryBlock.getIds());
-
-        // instance id
-        sliceOutput.appendLong(dictionaryBlock.getDictionarySourceId().getMostSignificantBits());
-        sliceOutput.appendLong(dictionaryBlock.getDictionarySourceId().getLeastSignificantBits());
-        sliceOutput.appendLong(dictionaryBlock.getDictionarySourceId().getSequenceId());
+        sliceOutput.writeInts(dictionaryBlock.getRawIds(), dictionaryBlock.getRawIdsOffset(), dictionaryBlock.getPositionCount());
     }
 
     @Override
@@ -68,17 +68,10 @@ public class DictionaryBlockEncoding
 
         // ids
         int[] ids = new int[positionCount];
-        sliceInput.readBytes(Slices.wrappedIntArray(ids));
+        sliceInput.readInts(ids);
 
-        // instance id
-        long mostSignificantBits = sliceInput.readLong();
-        long leastSignificantBits = sliceInput.readLong();
-        long sequenceId = sliceInput.readLong();
-
-        // We always compact the dictionary before we send it. However, dictionaryBlock comes from sliceInput, which may over-retain memory.
-        // As a result, setting dictionaryIsCompacted to true is not appropriate here.
-        // TODO: fix DictionaryBlock so that dictionaryIsCompacted can be set to true when the underlying block over-retains memory.
-        return new DictionaryBlock(positionCount, dictionaryBlock, ids, false, new DictionaryId(mostSignificantBits, leastSignificantBits, sequenceId));
+        // flatten the dictionary
+        return dictionaryBlock.copyPositions(ids, 0, ids.length);
     }
 
     @Override

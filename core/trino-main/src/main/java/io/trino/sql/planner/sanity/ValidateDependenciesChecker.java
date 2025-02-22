@@ -15,21 +15,19 @@ package io.trino.sql.planner.sanity;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
 import io.trino.Session;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
-import io.trino.spi.type.TypeOperators;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
-import io.trino.sql.planner.TypeProvider;
+import io.trino.sql.planner.plan.AdaptivePlanNode;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
-import io.trino.sql.planner.plan.DeleteNode;
 import io.trino.sql.planner.plan.DistinctLimitNode;
+import io.trino.sql.planner.plan.DynamicFilterSourceNode;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
 import io.trino.sql.planner.plan.ExceptNode;
 import io.trino.sql.planner.plan.ExchangeNode;
@@ -42,6 +40,8 @@ import io.trino.sql.planner.plan.IntersectNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.MarkDistinctNode;
+import io.trino.sql.planner.plan.MergeProcessorNode;
+import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.OffsetNode;
 import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.PatternRecognitionNode;
@@ -55,6 +55,7 @@ import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.SampleNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
 import io.trino.sql.planner.plan.SetOperationNode;
+import io.trino.sql.planner.plan.SimpleTableExecuteNode;
 import io.trino.sql.planner.plan.SortNode;
 import io.trino.sql.planner.plan.SpatialJoinNode;
 import io.trino.sql.planner.plan.StatisticAggregationsDescriptor;
@@ -62,17 +63,20 @@ import io.trino.sql.planner.plan.StatisticsWriterNode;
 import io.trino.sql.planner.plan.TableDeleteNode;
 import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
+import io.trino.sql.planner.plan.TableFunctionNode;
+import io.trino.sql.planner.plan.TableFunctionNode.PassThroughColumn;
+import io.trino.sql.planner.plan.TableFunctionNode.PassThroughSpecification;
+import io.trino.sql.planner.plan.TableFunctionProcessorNode;
 import io.trino.sql.planner.plan.TableScanNode;
+import io.trino.sql.planner.plan.TableUpdateNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.UnionNode;
 import io.trino.sql.planner.plan.UnnestNode;
-import io.trino.sql.planner.plan.UpdateNode;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.planner.rowpattern.LogicalIndexExtractor.ExpressionAndValuePointers;
-import io.trino.sql.tree.Expression;
+import io.trino.sql.planner.rowpattern.ExpressionAndValuePointers;
 
 import java.util.Collection;
 import java.util.HashSet;
@@ -80,13 +84,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.Collections2.filter;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.server.protocol.spooling.SpooledBlock.SPOOLING_METADATA_SYMBOL;
 import static io.trino.sql.planner.SymbolsExtractor.extractUnique;
 import static io.trino.sql.planner.optimizations.IndexJoinOptimizer.IndexKeyTracer;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 
 /**
  * Ensures that all dependencies (i.e., symbols in expressions) for a plan node are provided by its source nodes
@@ -97,10 +103,7 @@ public final class ValidateDependenciesChecker
     @Override
     public void validate(PlanNode plan,
             Session session,
-            Metadata metadata,
-            TypeOperators typeOperators,
-            TypeAnalyzer typeAnalyzer,
-            TypeProvider types,
+            PlannerContext plannerContext,
             WarningCollector warningCollector)
     {
         validate(plan);
@@ -118,6 +121,15 @@ public final class ValidateDependenciesChecker
         protected Void visitPlan(PlanNode node, Set<Symbol> boundSymbols)
         {
             throw new UnsupportedOperationException("not yet implemented: " + node.getClass().getName());
+        }
+
+        @Override
+        public Void visitAdaptivePlanNode(AdaptivePlanNode node, Set<Symbol> boundSymbols)
+        {
+            PlanNode source = node.getCurrentPlan();
+            source.accept(this, boundSymbols); // visit child
+
+            return null;
         }
 
         @Override
@@ -180,9 +192,9 @@ public final class ValidateDependenciesChecker
             if (node.getOrderingScheme().isPresent()) {
                 checkDependencies(
                         inputs,
-                        node.getOrderingScheme().get().getOrderBy(),
+                        node.getOrderingScheme().get().orderBy(),
                         "Invalid node. Order by symbols (%s) not in source plan output (%s)",
-                        node.getOrderingScheme().get().getOrderBy(), node.getSource().getOutputSymbols());
+                        node.getOrderingScheme().get().orderBy(), node.getSource().getOutputSymbols());
             }
 
             node.getCommonBaseFrame()
@@ -215,6 +227,124 @@ public final class ValidateDependenciesChecker
         }
 
         @Override
+        public Void visitTableFunction(TableFunctionNode node, Set<Symbol> boundSymbols)
+        {
+            for (int i = 0; i < node.getSources().size(); i++) {
+                PlanNode source = node.getSources().get(i);
+                source.accept(this, boundSymbols);
+                Set<Symbol> inputs = createInputs(source, boundSymbols);
+                TableFunctionNode.TableArgumentProperties argumentProperties = node.getTableArgumentProperties().get(i);
+
+                checkDependencies(
+                        inputs,
+                        argumentProperties.requiredColumns(),
+                        "Invalid node. Required input symbols from source %s (%s) not in source plan output (%s)",
+                        argumentProperties.argumentName(),
+                        argumentProperties.requiredColumns(),
+                        source.getOutputSymbols());
+                argumentProperties.specification().ifPresent(specification -> {
+                    checkDependencies(
+                            inputs,
+                            specification.partitionBy(),
+                            "Invalid node. Partition by symbols for source %s (%s) not in source plan output (%s)",
+                            argumentProperties.argumentName(),
+                            specification.partitionBy(),
+                            source.getOutputSymbols());
+                    specification.orderingScheme().ifPresent(orderingScheme -> {
+                        checkDependencies(
+                                inputs,
+                                orderingScheme.orderBy(),
+                                "Invalid node. Order by symbols for source %s (%s) not in source plan output (%s)",
+                                argumentProperties.argumentName(),
+                                orderingScheme.orderBy(),
+                                source.getOutputSymbols());
+                    });
+                });
+                Set<Symbol> passThroughSymbols = argumentProperties.passThroughSpecification().columns().stream()
+                        .map(PassThroughColumn::symbol)
+                        .collect(toImmutableSet());
+                checkDependencies(
+                        inputs,
+                        passThroughSymbols,
+                        "Invalid node. Pass-through symbols for source %s (%s) not in source plan output (%s)",
+                        argumentProperties.argumentName(),
+                        passThroughSymbols,
+                        source.getOutputSymbols());
+            }
+
+            return null;
+        }
+
+        @Override
+        public Void visitTableFunctionProcessor(TableFunctionProcessorNode node, Set<Symbol> boundSymbols)
+        {
+            if (node.getSource().isEmpty()) {
+                return null;
+            }
+
+            PlanNode source = node.getSource().orElseThrow();
+            source.accept(this, boundSymbols);
+
+            Set<Symbol> inputs = createInputs(source, boundSymbols);
+
+            Set<Symbol> passThroughSymbols = node.getPassThroughSpecifications().stream()
+                    .map(PassThroughSpecification::columns)
+                    .flatMap(Collection::stream)
+                    .map(PassThroughColumn::symbol)
+                    .collect(toImmutableSet());
+            checkDependencies(
+                    inputs,
+                    passThroughSymbols,
+                    "Invalid node. Pass-through symbols (%s) not in source plan output (%s)",
+                    passThroughSymbols,
+                    source.getOutputSymbols());
+
+            Set<Symbol> requiredSymbols = node.getRequiredSymbols().stream()
+                    .flatMap(Collection::stream)
+                    .collect(toImmutableSet());
+            checkDependencies(
+                    inputs,
+                    requiredSymbols,
+                    "Invalid node. Required symbols (%s) not in source plan output (%s)",
+                    requiredSymbols,
+                    source.getOutputSymbols());
+
+            node.getMarkerSymbols().ifPresent(mapping -> {
+                checkDependencies(
+                        inputs,
+                        mapping.keySet(),
+                        "Invalid node. Source symbols (%s) not in source plan output (%s)",
+                        mapping.keySet(),
+                        source.getOutputSymbols());
+                checkDependencies(
+                        inputs,
+                        mapping.values(),
+                        "Invalid node. Source marker symbols (%s) not in source plan output (%s)",
+                        mapping.values(),
+                        source.getOutputSymbols());
+            });
+
+            node.getSpecification().ifPresent(specification -> {
+                checkDependencies(
+                        inputs,
+                        specification.partitionBy(),
+                        "Invalid node. Partition by symbols (%s) not in source plan output (%s)",
+                        specification.partitionBy(),
+                        source.getOutputSymbols());
+                specification.orderingScheme().ifPresent(orderingScheme -> {
+                    checkDependencies(
+                            inputs,
+                            orderingScheme.orderBy(),
+                            "Invalid node. Order by symbols (%s) not in source plan output (%s)",
+                            orderingScheme.orderBy(),
+                            source.getOutputSymbols());
+                });
+            });
+
+            return null;
+        }
+
+        @Override
         public Void visitWindow(WindowNode node, Set<Symbol> boundSymbols)
         {
             PlanNode source = node.getSource();
@@ -226,9 +356,9 @@ public final class ValidateDependenciesChecker
             if (node.getOrderingScheme().isPresent()) {
                 checkDependencies(
                         inputs,
-                        node.getOrderingScheme().get().getOrderBy(),
+                        node.getOrderingScheme().get().orderBy(),
                         "Invalid node. Order by symbols (%s) not in source plan output (%s)",
-                        node.getOrderingScheme().get().getOrderBy(), node.getSource().getOutputSymbols());
+                        node.getOrderingScheme().get().orderBy(), node.getSource().getOutputSymbols());
             }
 
             ImmutableList.Builder<Symbol> bounds = ImmutableList.builder();
@@ -271,9 +401,9 @@ public final class ValidateDependenciesChecker
             checkDependencies(inputs, node.getPartitionBy(), "Invalid node. Partition by symbols (%s) not in source plan output (%s)", node.getPartitionBy(), node.getSource().getOutputSymbols());
             checkDependencies(
                     inputs,
-                    node.getOrderingScheme().getOrderBy(),
+                    node.getOrderingScheme().orderBy(),
                     "Invalid node. Order by symbols (%s) not in source plan output (%s)",
-                    node.getOrderingScheme().getOrderBy(), node.getSource().getOutputSymbols());
+                    node.getOrderingScheme().orderBy(), node.getSource().getOutputSymbols());
 
             return null;
         }
@@ -338,9 +468,9 @@ public final class ValidateDependenciesChecker
             checkDependencies(inputs, node.getOutputSymbols(), "Invalid node. Output symbols (%s) not in source plan output (%s)", node.getOutputSymbols(), node.getSource().getOutputSymbols());
             checkDependencies(
                     inputs,
-                    node.getOrderingScheme().getOrderBy(),
+                    node.getOrderingScheme().orderBy(),
                     "Invalid node. Order by dependencies (%s) not in source plan output (%s)",
-                    node.getOrderingScheme().getOrderBy(),
+                    node.getOrderingScheme().orderBy(),
                     node.getSource().getOutputSymbols());
 
             return null;
@@ -356,9 +486,9 @@ public final class ValidateDependenciesChecker
             checkDependencies(inputs, node.getOutputSymbols(), "Invalid node. Output symbols (%s) not in source plan output (%s)", node.getOutputSymbols(), node.getSource().getOutputSymbols());
             checkDependencies(
                     inputs,
-                    node.getOrderingScheme().getOrderBy(),
+                    node.getOrderingScheme().orderBy(),
                     "Invalid node. Order by dependencies (%s) not in source plan output (%s)",
-                    node.getOrderingScheme().getOrderBy(), node.getSource().getOutputSymbols());
+                    node.getOrderingScheme().orderBy(), node.getSource().getOutputSymbols());
 
             return null;
         }
@@ -369,7 +499,7 @@ public final class ValidateDependenciesChecker
             PlanNode source = node.getSource();
             source.accept(this, boundSymbols); // visit child
 
-            checkDependencies(source.getOutputSymbols(), node.getOutputSymbols(), "Invalid node. Output column dependencies (%s) not in source plan output (%s)", node.getOutputSymbols(), source.getOutputSymbols());
+            checkDependencies(source.getOutputSymbols(), filter(node.getOutputSymbols(), symbol -> !symbol.equals(SPOOLING_METADATA_SYMBOL)), "Invalid node. Output column dependencies (%s) not in source plan output (%s)", node.getOutputSymbols(), source.getOutputSymbols());
 
             return null;
         }
@@ -392,9 +522,9 @@ public final class ValidateDependenciesChecker
             if (node.getTiesResolvingScheme().isPresent()) {
                 checkDependencies(
                         createInputs(source, boundSymbols),
-                        node.getTiesResolvingScheme().get().getOrderBy(),
+                        node.getTiesResolvingScheme().get().orderBy(),
                         "Invalid node. Ties resolving dependencies (%s) not in source plan output (%s)",
-                        node.getTiesResolvingScheme().get().getOrderBy(), node.getSource().getOutputSymbols());
+                        node.getTiesResolvingScheme().get().orderBy(), node.getSource().getOutputSymbols());
             }
 
             checkDependencies(
@@ -548,6 +678,15 @@ public final class ValidateDependenciesChecker
         }
 
         @Override
+        public Void visitDynamicFilterSource(DynamicFilterSourceNode node, Set<Symbol> boundSymbols)
+        {
+            node.getSource().accept(this, boundSymbols); // visit child
+            checkDependencies(node.getOutputSymbols(), node.getDynamicFilters().values(), "Dynamic filter symbols must be part of output symbols");
+
+            return null;
+        }
+
+        @Override
         public Void visitTableScan(TableScanNode node, Set<Symbol> boundSymbols)
         {
             //We don't have to do a check here as TableScanNode has no dependencies.
@@ -580,13 +719,6 @@ public final class ValidateDependenciesChecker
                     .map(UnnestNode.Mapping::getInput)
                     .forEach(required::add);
 
-            Set<Symbol> unnestedSymbols = node.getMappings().stream()
-                    .map(UnnestNode.Mapping::getOutputs)
-                    .flatMap(Collection::stream)
-                    .collect(toImmutableSet());
-
-            Set<Symbol> expectedFilterSymbols = Sets.difference(extractUnique(node.getFilter().orElse(TRUE_LITERAL)), unnestedSymbols);
-            required.addAll(expectedFilterSymbols);
             checkDependencies(source.getOutputSymbols(), required.build(), "Invalid node. Dependencies (%s) not in source plan output (%s)", required, source.getOutputSymbols());
 
             return null;
@@ -628,39 +760,47 @@ public final class ValidateDependenciesChecker
         }
 
         @Override
-        public Void visitDelete(DeleteNode node, Set<Symbol> boundSymbols)
-        {
-            PlanNode source = node.getSource();
-            source.accept(this, boundSymbols); // visit child
-
-            checkArgument(source.getOutputSymbols().contains(node.getRowId()), "Invalid node. Row ID symbol (%s) is not in source plan output (%s)", node.getRowId(), node.getSource().getOutputSymbols());
-
-            return null;
-        }
-
-        @Override
-        public Void visitUpdate(UpdateNode node, Set<Symbol> boundSymbols)
-        {
-            PlanNode source = node.getSource();
-            source.accept(this, boundSymbols); // visit child
-
-            checkArgument(source.getOutputSymbols().contains(node.getRowId()), "Invalid node. Row ID symbol (%s) is not in source plan output (%s)", node.getRowId(), node.getSource().getOutputSymbols());
-            checkArgument(source.getOutputSymbols().containsAll(node.getColumnValueAndRowIdSymbols()), "Invalid node. Some UPDATE SET expression symbols (%s) are not contained in the outputSymbols (%s)", node.getColumnValueAndRowIdSymbols(), source.getOutputSymbols());
-
-            return null;
-        }
-
-        @Override
         public Void visitTableExecute(TableExecuteNode node, Set<Symbol> boundSymbols)
         {
             PlanNode source = node.getSource();
             source.accept(this, boundSymbols); // visit child
+            return null;
+        }
 
+        @Override
+        public Void visitMergeWriter(MergeWriterNode node, Set<Symbol> boundSymbols)
+        {
+            PlanNode source = node.getSource();
+            source.accept(this, boundSymbols); // visit child
+            return null;
+        }
+
+        @Override
+        public Void visitMergeProcessor(MergeProcessorNode node, Set<Symbol> boundSymbols)
+        {
+            PlanNode source = node.getSource();
+            source.accept(this, boundSymbols); // visit child
+
+            checkArgument(source.getOutputSymbols().contains(node.getRowIdSymbol()), "Invalid node. rowId symbol (%s) is not in source plan output (%s)", node.getRowIdSymbol(), node.getSource().getOutputSymbols());
+            checkArgument(source.getOutputSymbols().contains(node.getMergeRowSymbol()), "Invalid node. Merge row symbol (%s) is not in source plan output (%s)", node.getMergeRowSymbol(), node.getSource().getOutputSymbols());
+
+            return null;
+        }
+
+        @Override
+        public Void visitSimpleTableExecuteNode(SimpleTableExecuteNode node, Set<Symbol> context)
+        {
             return null;
         }
 
         @Override
         public Void visitTableDelete(TableDeleteNode node, Set<Symbol> boundSymbols)
+        {
+            return null;
+        }
+
+        @Override
+        public Void visitTableUpdate(TableUpdateNode node, Set<Symbol> boundSymbols)
         {
             return null;
         }
@@ -752,10 +892,15 @@ public final class ValidateDependenciesChecker
                     .addAll(createInputs(node.getInput(), boundSymbols))
                     .build();
 
-            for (Expression expression : node.getSubqueryAssignments().getExpressions()) {
-                Set<Symbol> dependencies = extractUnique(expression);
-                checkDependencies(inputs, dependencies, "Invalid node. Expression dependencies (%s) not in source plan output (%s)", dependencies, inputs);
-            }
+            List<Symbol> dependencies = node.getSubqueryAssignments().values().stream()
+                    .flatMap(assignment -> switch (assignment) {
+                        case ApplyNode.In in -> Stream.of(in.value(), in.reference());
+                        case ApplyNode.QuantifiedComparison comparison -> Stream.of(comparison.value(), comparison.reference());
+                        case ApplyNode.Exists unused -> Stream.empty();
+                    })
+                    .toList();
+
+            checkDependencies(inputs, dependencies, "Invalid node. Expression dependencies (%s) not in source plan output (%s)", dependencies, inputs);
 
             return null;
         }

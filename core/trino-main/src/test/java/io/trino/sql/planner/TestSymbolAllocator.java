@@ -15,11 +15,11 @@ package io.trino.sql.planner;
 
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.type.BigintType;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestSymbolAllocator
 {
@@ -34,6 +34,20 @@ public class TestSymbolAllocator
                 .add(allocator.newSymbol("foo", BigintType.BIGINT))
                 .build();
 
-        assertEquals(symbols.size(), 4);
+        assertThat(symbols).hasSize(4);
+    }
+
+    @Test
+    public void testNonAscii()
+    {
+        SymbolAllocator allocator = new SymbolAllocator();
+        Set<Symbol> symbols = ImmutableSet.<Symbol>builder()
+                .add(allocator.newSymbol("カラム", BigintType.BIGINT))
+                .add(allocator.newSymbol("col", BigintType.BIGINT))
+                .build();
+
+        assertThat(symbols).containsExactlyInAnyOrder(
+                new Symbol(BigintType.BIGINT, "col"),
+                new Symbol(BigintType.BIGINT, "col_0"));
     }
 }

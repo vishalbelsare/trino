@@ -20,11 +20,11 @@ import io.trino.array.ObjectBigArray;
 import io.trino.geospatial.Rectangle;
 import io.trino.spi.function.AccumulatorStateFactory;
 import io.trino.spi.function.GroupedAccumulatorState;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.lang.Math.toIntExact;
 
 public class SpatialPartitioningStateFactory
@@ -45,7 +45,7 @@ public class SpatialPartitioningStateFactory
     public static final class GroupedSpatialPartitioningState
             implements GroupedAccumulatorState, SpatialPartitioningState
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(GroupedSpatialPartitioningState.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(GroupedSpatialPartitioningState.class);
         private static final int ENVELOPE_SIZE = toIntExact(new Envelope(1, 2, 3, 4).estimateMemorySize());
 
         private long groupId;
@@ -89,10 +89,10 @@ public class SpatialPartitioningStateFactory
         @Override
         public void setExtent(Rectangle envelope)
         {
-            if (envelopes.get(groupId) == null) {
+            Rectangle previousEnvelope = envelopes.getAndSet(groupId, envelope);
+            if (previousEnvelope == null) {
                 envelopeCount++;
             }
-            envelopes.set(groupId, envelope);
         }
 
         @Override
@@ -104,28 +104,27 @@ public class SpatialPartitioningStateFactory
         @Override
         public void setSamples(List<Rectangle> samples)
         {
-            List<Rectangle> currentSamples = this.samples.get(groupId);
-            if (currentSamples != null) {
-                samplesCount -= currentSamples.size();
-            }
+            List<Rectangle> previousSamples = this.samples.getAndSet(groupId, samples);
             samplesCount += samples.size();
-            this.samples.set(groupId, samples);
+            if (previousSamples != null) {
+                samplesCount -= previousSamples.size();
+            }
         }
 
         @Override
         public long getEstimatedSize()
         {
-            return INSTANCE_SIZE + partitionCounts.sizeOf() + counts.sizeOf() + envelopes.sizeOf() + samples.sizeOf() + ENVELOPE_SIZE * (envelopeCount + samplesCount);
+            return INSTANCE_SIZE + partitionCounts.sizeOf() + counts.sizeOf() + envelopes.sizeOf() + samples.sizeOf() + (long) ENVELOPE_SIZE * (envelopeCount + samplesCount);
         }
 
         @Override
-        public void setGroupId(long groupId)
+        public void setGroupId(int groupId)
         {
             this.groupId = groupId;
         }
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             partitionCounts.ensureCapacity(size);
             counts.ensureCapacity(size);
@@ -137,7 +136,7 @@ public class SpatialPartitioningStateFactory
     public static final class SingleSpatialPartitioningState
             implements SpatialPartitioningState
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(SingleSpatialPartitioningState.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(SingleSpatialPartitioningState.class);
 
         private int partitionCount;
         private long count;
@@ -195,7 +194,7 @@ public class SpatialPartitioningStateFactory
         @Override
         public long getEstimatedSize()
         {
-            return INSTANCE_SIZE + (envelope != null ? envelope.estimateMemorySize() * (1 + samples.size()) : 0);
+            return INSTANCE_SIZE + (envelope != null ? (long) envelope.estimateMemorySize() * (1 + samples.size()) : 0);
         }
     }
 }

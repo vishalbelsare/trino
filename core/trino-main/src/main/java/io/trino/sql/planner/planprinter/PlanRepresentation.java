@@ -14,7 +14,6 @@
 package io.trino.sql.planner.planprinter;
 
 import io.airlift.units.Duration;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanNodeId;
 
@@ -29,26 +28,24 @@ class PlanRepresentation
     private final PlanNode root;
     private final Optional<Duration> totalCpuTime;
     private final Optional<Duration> totalScheduledTime;
-    private final TypeProvider types;
+    private final Optional<Duration> totalBlockedTime;
 
     private final Map<PlanNodeId, NodeRepresentation> nodeInfo = new HashMap<>();
+    // Record the initial plan node info for adaptive plan since it is possible that the plan node id remain the same
+    // but the plan node itself changes
+    private final Map<PlanNodeId, NodeRepresentation> initialNodeInfo = new HashMap<>();
 
-    public PlanRepresentation(PlanNode root, TypeProvider types, Optional<Duration> totalCpuTime, Optional<Duration> totalScheduledTime)
+    public PlanRepresentation(PlanNode root, Optional<Duration> totalCpuTime, Optional<Duration> totalScheduledTime, Optional<Duration> totalBlockedTime)
     {
         this.root = requireNonNull(root, "root is null");
         this.totalCpuTime = requireNonNull(totalCpuTime, "totalCpuTime is null");
-        this.types = requireNonNull(types, "types is null");
         this.totalScheduledTime = requireNonNull(totalScheduledTime, "totalScheduledTime is null");
+        this.totalBlockedTime = requireNonNull(totalBlockedTime, "totalBlockedTime is null");
     }
 
     public NodeRepresentation getRoot()
     {
         return nodeInfo.get(root.getId());
-    }
-
-    public TypeProvider getTypes()
-    {
-        return types;
     }
 
     public Optional<Duration> getTotalCpuTime()
@@ -61,13 +58,28 @@ class PlanRepresentation
         return totalScheduledTime;
     }
 
+    public Optional<Duration> getTotalBlockedTime()
+    {
+        return totalBlockedTime;
+    }
+
     public Optional<NodeRepresentation> getNode(PlanNodeId id)
     {
         return Optional.ofNullable(nodeInfo.get(id));
     }
 
+    public Optional<NodeRepresentation> getInitialNode(PlanNodeId id)
+    {
+        return Optional.ofNullable(initialNodeInfo.get(id));
+    }
+
     public void addNode(NodeRepresentation node)
     {
         nodeInfo.put(node.getId(), node);
+    }
+
+    public void addInitialNode(NodeRepresentation node)
+    {
+        initialNodeInfo.put(node.getId(), node);
     }
 }

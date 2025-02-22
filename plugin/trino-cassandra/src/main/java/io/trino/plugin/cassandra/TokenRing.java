@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.cassandra;
 
+import com.datastax.oss.driver.api.core.metadata.token.Token;
+
 import java.math.BigInteger;
 import java.util.Optional;
 
@@ -26,23 +28,20 @@ public interface TokenRing
      * @param startToken exclusive
      * @param endToken inclusive
      */
-    double getRingFraction(String startToken, String endToken);
+    double getRingFraction(Token startToken, Token endToken);
 
     /**
      * Returns token count in a given range
      */
-    BigInteger getTokenCountInRange(String startToken, String endToken);
+    BigInteger getTokenCountInRange(Token startToken, Token endToken);
 
     static Optional<TokenRing> createForPartitioner(String partitioner)
     {
         requireNonNull(partitioner, "partitioner is null");
-        switch (partitioner) {
-            case "org.apache.cassandra.dht.Murmur3Partitioner":
-                return Optional.of(Murmur3PartitionerTokenRing.INSTANCE);
-            case "org.apache.cassandra.dht.RandomPartitioner":
-                return Optional.of(RandomPartitionerTokenRing.INSTANCE);
-            default:
-                return Optional.empty();
-        }
+        return switch (partitioner) {
+            case "org.apache.cassandra.dht.Murmur3Partitioner" -> Optional.of(Murmur3PartitionerTokenRing.INSTANCE);
+            case "org.apache.cassandra.dht.RandomPartitioner" -> Optional.of(RandomPartitionerTokenRing.INSTANCE);
+            default -> Optional.empty();
+        };
     }
 }

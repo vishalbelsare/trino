@@ -13,7 +13,9 @@
  */
 package io.trino.spi.type;
 
+import com.google.errorprone.annotations.FormatMethod;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.ValueBlock;
 
 import java.util.List;
 
@@ -23,9 +25,10 @@ import static io.trino.spi.type.Decimals.MAX_SHORT_PRECISION;
 import static io.trino.spi.type.TypeSignatureParameter.numericParameter;
 import static java.lang.String.format;
 
-public abstract class DecimalType
+public abstract sealed class DecimalType
         extends AbstractType
         implements FixedWidthType
+        permits LongDecimalType, ShortDecimalType
 {
     public static final int DEFAULT_SCALE = 0;
     public static final int DEFAULT_PRECISION = MAX_PRECISION;
@@ -41,11 +44,9 @@ public abstract class DecimalType
         }
 
         if (precision <= MAX_SHORT_PRECISION) {
-            return new ShortDecimalType(precision, scale);
+            return ShortDecimalType.getInstance(precision, scale);
         }
-        else {
-            return new LongDecimalType(precision, scale);
-        }
+        return new LongDecimalType(precision, scale);
     }
 
     public static DecimalType createDecimalType(int precision)
@@ -61,9 +62,9 @@ public abstract class DecimalType
     private final int precision;
     private final int scale;
 
-    DecimalType(int precision, int scale, Class<?> javaType)
+    DecimalType(int precision, int scale, Class<?> javaType, Class<? extends ValueBlock> valueBlockType)
     {
-        super(new TypeSignature(StandardTypes.DECIMAL, buildTypeParameters(precision, scale)), javaType);
+        super(new TypeSignature(StandardTypes.DECIMAL, buildTypeParameters(precision, scale)), javaType, valueBlockType);
         this.precision = precision;
         this.scale = scale;
     }
@@ -100,6 +101,7 @@ public abstract class DecimalType
         return List.of(numericParameter(precision), numericParameter(scale));
     }
 
+    @FormatMethod
     static void checkArgument(boolean condition, String format, Object... args)
     {
         if (!condition) {

@@ -19,8 +19,10 @@ import com.google.common.net.HostAndPort;
 import io.airlift.log.Logger;
 import io.trino.testing.TestingProperties;
 import io.trino.testing.containers.BaseTestContainer;
+import io.trino.testing.containers.PrintingLogConsumer;
 import org.testcontainers.containers.Network;
 
+import java.net.URI;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -30,7 +32,6 @@ public class HiveHadoop
 {
     private static final Logger log = Logger.get(HiveHadoop.class);
 
-    public static final String DEFAULT_IMAGE = "ghcr.io/trinodb/testing/hdp2.6-hive:" + TestingProperties.getDockerImagesVersion();
     public static final String HIVE3_IMAGE = "ghcr.io/trinodb/testing/hdp3.1-hive:" + TestingProperties.getDockerImagesVersion();
 
     public static final String HOST_NAME = "hadoop-master";
@@ -66,11 +67,12 @@ public class HiveHadoop
     {
         super.setupContainer();
         String runCmd = "/usr/local/hadoop-run.sh";
-        copyFileToContainer("containers/hive_hadoop/hadoop-run.sh", runCmd);
+        copyResourceToContainer("containers/hive_hadoop/hadoop-run.sh", runCmd);
         withRunCommand(
                 ImmutableList.of(
                         "/bin/bash",
                         runCmd));
+        withLogConsumer(new PrintingLogConsumer("Hadoop"));
     }
 
     @Override
@@ -80,9 +82,20 @@ public class HiveHadoop
         log.info("Hive container started with addresses for metastore: %s", getHiveMetastoreEndpoint());
     }
 
-    public HostAndPort getHiveMetastoreEndpoint()
+    public String runOnHive(String query)
     {
-        return getMappedHostAndPortForExposedPort(HIVE_METASTORE_PORT);
+        return executeInContainerFailOnError("beeline", "-u", "jdbc:hive2://localhost:10000/default", "-n", "hive", "-e", query);
+    }
+
+    public String runOnMetastore(String query)
+    {
+        return executeInContainerFailOnError("mysql", "-D", "metastore", "-uroot", "-proot", "--batch", "--column-names=false", "-e", query).replaceAll("\n$", "");
+    }
+
+    public URI getHiveMetastoreEndpoint()
+    {
+        HostAndPort address = getMappedHostAndPortForExposedPort(HIVE_METASTORE_PORT);
+        return URI.create("thrift://" + address.getHost() + ":" + address.getPort());
     }
 
     public static class Builder
@@ -90,7 +103,7 @@ public class HiveHadoop
     {
         private Builder()
         {
-            this.image = DEFAULT_IMAGE;
+            this.image = HIVE3_IMAGE;
             this.hostName = HOST_NAME;
             this.exposePorts = ImmutableSet.of(HIVE_METASTORE_PORT);
         }

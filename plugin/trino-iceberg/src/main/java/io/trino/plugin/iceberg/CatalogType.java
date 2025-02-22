@@ -18,5 +18,9 @@ public enum CatalogType
     TESTING_FILE_METASTORE,
     HIVE_METASTORE,
     GLUE,
+    REST,
+    JDBC,
+    NESSIE,
+    SNOWFLAKE,
     /**/;
 }

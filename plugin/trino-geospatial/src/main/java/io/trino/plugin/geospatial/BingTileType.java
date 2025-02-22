@@ -16,17 +16,17 @@ package io.trino.plugin.geospatial;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractLongType;
+import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TypeSignature;
 
 public class BingTileType
         extends AbstractLongType
 {
     public static final BingTileType BING_TILE = new BingTileType();
-    public static final String NAME = "BingTile";
 
-    public BingTileType()
+    private BingTileType()
     {
-        super(new TypeSignature(NAME));
+        super(new TypeSignature(StandardTypes.BING_TILE));
     }
 
     @Override
@@ -42,6 +42,6 @@ public class BingTileType
             return null;
         }
 
-        return BingTile.decode(block.getLong(position, 0));
+        return BingTile.decode(getLong(block, position));
     }
 }

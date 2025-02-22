@@ -15,21 +15,21 @@ package io.trino.plugin.kafka.schema.confluent;
 
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
+import com.google.inject.Inject;
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
+import io.trino.cache.NonEvictableLoadingCache;
 import io.trino.decoder.avro.AvroReaderSupplier;
 import io.trino.spi.TrinoException;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.io.DatumReader;
 
-import javax.inject.Inject;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -39,20 +39,21 @@ public class ConfluentAvroReaderSupplier<T>
 {
     private final Schema targetSchema;
     private final SchemaRegistryClient schemaRegistryClient;
-    private final LoadingCache<Integer, GenericDatumReader<T>> avroRecordReaderCache;
+    private final NonEvictableLoadingCache<Integer, GenericDatumReader<T>> avroRecordReaderCache;
 
     private ConfluentAvroReaderSupplier(Schema targetSchema, SchemaRegistryClient schemaRegistryClient)
     {
         this.targetSchema = requireNonNull(targetSchema, "targetSchema is null");
         this.schemaRegistryClient = requireNonNull(schemaRegistryClient, "schemaRegistryClient is null");
-        avroRecordReaderCache = CacheBuilder.newBuilder()
-                .maximumSize(1000)
-                .build(CacheLoader.from(this::lookupReader));
+        avroRecordReaderCache = buildNonEvictableCache(
+                CacheBuilder.newBuilder().maximumSize(1000),
+                CacheLoader.from(this::lookupReader));
     }
 
     private GenericDatumReader<T> lookupReader(int id)
     {
         try {
+            @SuppressWarnings("deprecation")
             Schema sourceSchema = requireNonNull(schemaRegistryClient.getById(id), "Schema is null");
             return new GenericDatumReader<>(sourceSchema, targetSchema);
         }

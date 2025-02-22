@@ -14,7 +14,7 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -34,9 +34,7 @@ public class TestRemoteQueryCancellationConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("remote-query-async-cancellation.enabled", "false")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("remote-query-async-cancellation.enabled", "false");
 
         RemoteQueryCancellationConfig expected = new RemoteQueryCancellationConfig()
                 .setRemoteQueryCancellationEnabled(false);

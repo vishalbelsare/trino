@@ -17,6 +17,8 @@ import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.errorprone.annotations.FormatMethod;
+import com.google.inject.Inject;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session.ResourceEstimateBuilder;
@@ -24,6 +26,8 @@ import io.trino.client.ProtocolDetectionException;
 import io.trino.client.ProtocolHeaders;
 import io.trino.metadata.Metadata;
 import io.trino.security.AccessControl;
+import io.trino.server.protocol.PreparedStatementEncoder;
+import io.trino.server.protocol.spooling.QueryDataEncoder;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.GroupProvider;
 import io.trino.spi.security.Identity;
@@ -31,18 +35,12 @@ import io.trino.spi.security.SelectedRole;
 import io.trino.spi.security.SelectedRole.Type;
 import io.trino.spi.session.ResourceEstimates;
 import io.trino.sql.parser.ParsingException;
-import io.trino.sql.parser.ParsingOptions;
 import io.trino.sql.parser.SqlParser;
 import io.trino.transaction.TransactionId;
-
-import javax.inject.Inject;
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.MultivaluedMap;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.net.URLDecoder;
 import java.util.Collection;
@@ -60,8 +58,8 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.net.HttpHeaders.USER_AGENT;
 import static io.trino.client.ProtocolHeaders.detectProtocol;
+import static io.trino.server.ServletSecurityUtils.authenticatedIdentity;
 import static io.trino.spi.security.AccessDeniedException.denySetRole;
-import static io.trino.sql.parser.ParsingOptions.DecimalLiteralTreatment.AS_DOUBLE;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Locale.ENGLISH;
@@ -69,42 +67,50 @@ import static java.util.Objects.requireNonNull;
 
 public class HttpRequestSessionContextFactory
 {
-    private static final Splitter DOT_SPLITTER = Splitter.on('.');
-    public static final String AUTHENTICATED_IDENTITY = "trino.authenticated-identity";
-
+    private final PreparedStatementEncoder preparedStatementEncoder;
     private final Metadata metadata;
     private final GroupProvider groupProvider;
     private final AccessControl accessControl;
+    private final Optional<String> alternateHeaderName;
+    private final QueryDataEncoder.EncoderSelector encoderSelector;
 
     @Inject
-    public HttpRequestSessionContextFactory(Metadata metadata, GroupProvider groupProvider, AccessControl accessControl)
+    public HttpRequestSessionContextFactory(
+            PreparedStatementEncoder preparedStatementEncoder,
+            Metadata metadata,
+            GroupProvider groupProvider,
+            AccessControl accessControl,
+            ProtocolConfig protocolConfig,
+            QueryDataEncoder.EncoderSelector encoderSelector)
     {
+        this.alternateHeaderName = protocolConfig.getAlternateHeaderName();
+        this.preparedStatementEncoder = requireNonNull(preparedStatementEncoder, "preparedStatementEncoder is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.groupProvider = requireNonNull(groupProvider, "groupProvider is null");
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
+        this.encoderSelector = requireNonNull(encoderSelector, "encoderSelector is null");
     }
 
     public SessionContext createSessionContext(
             MultivaluedMap<String, String> headers,
-            Optional<String> alternateHeaderName,
             Optional<String> remoteAddress,
             Optional<Identity> authenticatedIdentity)
-            throws WebApplicationException
     {
         ProtocolHeaders protocolHeaders;
         try {
             protocolHeaders = detectProtocol(alternateHeaderName, headers.keySet());
         }
         catch (ProtocolDetectionException e) {
-            throw badRequest(e.getMessage());
+            throw new BadRequestException(e.getMessage());
         }
         Optional<String> catalog = Optional.ofNullable(trimEmptyToNull(headers.getFirst(protocolHeaders.requestCatalog())));
         Optional<String> schema = Optional.ofNullable(trimEmptyToNull(headers.getFirst(protocolHeaders.requestSchema())));
         Optional<String> path = Optional.ofNullable(trimEmptyToNull(headers.getFirst(protocolHeaders.requestPath())));
-        assertRequest((catalog.isPresent()) || (schema.isEmpty()), "Schema is set but catalog is not");
+        assertRequest(catalog.isPresent() || schema.isEmpty(), "Schema is set but catalog is not");
 
         requireNonNull(authenticatedIdentity, "authenticatedIdentity is null");
         Identity identity = buildSessionIdentity(authenticatedIdentity, protocolHeaders, headers);
+        Identity originalIdentity = buildSessionOriginalIdentity(identity, protocolHeaders, headers);
         SelectedRole selectedRole = parseSystemRoleHeaders(protocolHeaders, headers);
 
         Optional<String> source = Optional.ofNullable(headers.getFirst(protocolHeaders.requestSource()));
@@ -114,6 +120,11 @@ public class HttpRequestSessionContextFactory
         Optional<String> timeZoneId = Optional.ofNullable(headers.getFirst(protocolHeaders.requestTimeZone()));
         Optional<String> language = Optional.ofNullable(headers.getFirst(protocolHeaders.requestLanguage()));
         Optional<String> clientInfo = Optional.ofNullable(headers.getFirst(protocolHeaders.requestClientInfo()));
+        Optional<String> queryDataEncoding = Optional.ofNullable(trimEmptyToNull(headers.getFirst(protocolHeaders.requestQueryDataEncoding())))
+                .map(Splitter.on(',').trimResults().omitEmptyStrings()::splitToList)
+                .flatMap(encoderSelector::select)
+                .map(QueryDataEncoder.Factory::encoding);
+
         Set<String> clientTags = parseClientTags(protocolHeaders, headers);
         Set<String> clientCapabilities = parseClientCapabilities(protocolHeaders, headers);
         ResourceEstimates resourceEstimates = parseResourceEstimate(protocolHeaders, headers);
@@ -124,27 +135,22 @@ public class HttpRequestSessionContextFactory
         for (Entry<String, String> entry : parseSessionHeaders(protocolHeaders, headers).entrySet()) {
             String fullPropertyName = entry.getKey();
             String propertyValue = entry.getValue();
-            List<String> nameParts = DOT_SPLITTER.splitToList(fullPropertyName);
-            if (nameParts.size() == 1) {
-                String propertyName = nameParts.get(0);
 
-                assertRequest(!propertyName.isEmpty(), "Invalid %s header", protocolHeaders.requestSession());
+            switch (parseSessionPropertyName(fullPropertyName)) {
+                case ParsedSessionPropertyName(Optional<String> catalogName, String propertyName) when catalogName.isEmpty() -> {
+                    assertRequest(!propertyName.isEmpty(), "Invalid %s header", protocolHeaders.requestSession());
 
-                // catalog session properties cannot be validated until the transaction has stated, so we delay system property validation also
-                systemProperties.put(propertyName, propertyValue);
-            }
-            else if (nameParts.size() == 2) {
-                String catalogName = nameParts.get(0);
-                String propertyName = nameParts.get(1);
+                    // catalog session properties cannot be validated until the transaction has started, so we delay system property validation also
+                    systemProperties.put(propertyName, propertyValue);
+                }
+                case ParsedSessionPropertyName(Optional<String> catalogName, String propertyName) -> {
+                    assertRequest(!catalogName.orElseThrow().isEmpty(), "Invalid %s header", protocolHeaders.requestSession());
+                    assertRequest(!propertyName.isEmpty(), "Invalid %s header", protocolHeaders.requestSession());
 
-                assertRequest(!catalogName.isEmpty(), "Invalid %s header", protocolHeaders.requestSession());
-                assertRequest(!propertyName.isEmpty(), "Invalid %s header", protocolHeaders.requestSession());
-
-                // catalog session properties cannot be validated until the transaction has stated
-                catalogSessionProperties.computeIfAbsent(catalogName, id -> new HashMap<>()).put(propertyName, propertyValue);
-            }
-            else {
-                throw badRequest(format("Invalid %s header", protocolHeaders.requestSession()));
+                    // catalog session properties cannot be validated until the transaction has started
+                    catalogSessionProperties.computeIfAbsent(catalogName.orElseThrow(), id -> new HashMap<>()).put(propertyName, propertyValue);
+                }
+                default -> throw new BadRequestException(format("Invalid %s header", protocolHeaders.requestSession()));
             }
         }
         requireNonNull(catalogSessionProperties, "catalogSessionProperties is null");
@@ -163,6 +169,7 @@ public class HttpRequestSessionContextFactory
                 path,
                 authenticatedIdentity,
                 identity,
+                originalIdentity,
                 selectedRole,
                 source,
                 traceToken,
@@ -173,29 +180,21 @@ public class HttpRequestSessionContextFactory
                 clientTags,
                 clientCapabilities,
                 resourceEstimates,
-                systemProperties.build(),
+                systemProperties.buildOrThrow(),
                 catalogSessionProperties,
                 preparedStatements,
                 transactionId,
                 clientTransactionSupport,
-                clientInfo);
+                clientInfo,
+                queryDataEncoding);
     }
 
-    public Identity extractAuthorizedIdentity(
-            HttpServletRequest servletRequest,
-            HttpHeaders httpHeaders,
-            Optional<String> alternateHeaderName)
+    public Identity extractAuthorizedIdentity(HttpServletRequest servletRequest, HttpHeaders httpHeaders)
     {
-        return extractAuthorizedIdentity(
-                Optional.ofNullable((Identity) servletRequest.getAttribute(AUTHENTICATED_IDENTITY)),
-                httpHeaders.getRequestHeaders(),
-                alternateHeaderName);
+        return extractAuthorizedIdentity(authenticatedIdentity(servletRequest), httpHeaders.getRequestHeaders());
     }
 
-    public Identity extractAuthorizedIdentity(
-            Optional<Identity> optionalAuthenticatedIdentity,
-            MultivaluedMap<String, String> headers,
-            Optional<String> alternateHeaderName)
+    public Identity extractAuthorizedIdentity(Optional<Identity> optionalAuthenticatedIdentity, MultivaluedMap<String, String> headers)
             throws AccessDeniedException
     {
         ProtocolHeaders protocolHeaders;
@@ -203,24 +202,30 @@ public class HttpRequestSessionContextFactory
             protocolHeaders = detectProtocol(alternateHeaderName, headers.keySet());
         }
         catch (ProtocolDetectionException e) {
-            throw badRequest(e.getMessage());
+            throw new BadRequestException(e.getMessage());
         }
 
         Identity identity = buildSessionIdentity(optionalAuthenticatedIdentity, protocolHeaders, headers);
+        Identity originalIdentity = buildSessionOriginalIdentity(identity, protocolHeaders, headers);
 
-        accessControl.checkCanSetUser(identity.getPrincipal(), identity.getUser());
+        accessControl.checkCanSetUser(originalIdentity.getPrincipal(), originalIdentity.getUser());
 
         // authenticated may not present for HTTP or if authentication is not setup
         optionalAuthenticatedIdentity.ifPresent(authenticatedIdentity -> {
             // only check impersonation if authenticated user is not the same as the explicitly set user
-            if (!authenticatedIdentity.getUser().equals(identity.getUser())) {
+            if (!authenticatedIdentity.getUser().equals(originalIdentity.getUser())) {
                 // load enabled roles for authenticated identity, so impersonation permissions can be assigned to roles
                 authenticatedIdentity = Identity.from(authenticatedIdentity)
                         .withEnabledRoles(metadata.listEnabledRoles(authenticatedIdentity))
                         .build();
-                accessControl.checkCanImpersonateUser(authenticatedIdentity, identity.getUser());
+                accessControl.checkCanImpersonateUser(authenticatedIdentity, originalIdentity.getUser());
             }
         });
+
+        if (!originalIdentity.getUser().equals(identity.getUser())) {
+            accessControl.checkCanSetUser(originalIdentity.getPrincipal(), identity.getUser());
+            accessControl.checkCanImpersonateUser(originalIdentity, identity.getUser());
+        }
 
         return addEnabledRoles(identity, parseSystemRoleHeaders(protocolHeaders, headers), metadata);
     }
@@ -263,6 +268,20 @@ public class HttpRequestSessionContextFactory
                 .build();
     }
 
+    private Identity buildSessionOriginalIdentity(Identity identity, ProtocolHeaders protocolHeaders, MultivaluedMap<String, String> headers)
+    {
+        // We derive original identity using this header, but older clients will not send it, so fall back to identity
+        Optional<String> optionalOriginalUser = Optional
+                .ofNullable(trimEmptyToNull(headers.getFirst(protocolHeaders.requestOriginalUser())));
+        Identity originalIdentity = optionalOriginalUser.map(originalUser -> Identity.from(identity)
+                        .withUser(originalUser)
+                        .withExtraCredentials(new HashMap<>())
+                        .withGroups(groupProvider.getGroups(originalUser))
+                        .build())
+                .orElse(identity);
+        return originalIdentity;
+    }
+
     private static List<String> splitHttpHeader(MultivaluedMap<String, String> headers, String name)
     {
         List<String> values = firstNonNull(headers.get(name), ImmutableList.of());
@@ -297,7 +316,7 @@ public class HttpRequestSessionContextFactory
             }
             roles.put(key, toSelectedRole(protocolHeaders, value));
         });
-        return roles.build();
+        return roles.buildOrThrow();
     }
 
     private static SelectedRole toSelectedRole(ProtocolHeaders protocolHeaders, String value)
@@ -307,14 +326,18 @@ public class HttpRequestSessionContextFactory
             role = SelectedRole.valueOf(value);
         }
         catch (IllegalArgumentException e) {
-            throw badRequest(format("Invalid %s header", protocolHeaders.requestRole()));
+            throw new BadRequestException(format("Invalid %s header", protocolHeaders.requestRole()));
         }
         return role;
     }
 
     private static Map<String, String> parseExtraCredentials(ProtocolHeaders protocolHeaders, MultivaluedMap<String, String> headers)
     {
-        return parseProperty(headers, protocolHeaders.requestExtraCredential());
+        Map<String, String> credentials = parseProperty(headers, protocolHeaders.requestExtraCredential());
+        for (String name : credentials.keySet()) {
+            assertRequest(!name.startsWith("internal$"), "Invalid extra credential name: %s", name);
+        }
+        return credentials;
     }
 
     private static Map<String, String> parseProperty(MultivaluedMap<String, String> headers, String headerName)
@@ -327,7 +350,7 @@ public class HttpRequestSessionContextFactory
                 properties.put(nameValue.get(0), urlDecode(nameValue.get(1)));
             }
             catch (IllegalArgumentException e) {
-                throw badRequest(format("Invalid %s header: %s", headerName, e));
+                throw new BadRequestException(format("Invalid %s header: %s", headerName, e));
             }
         }
         return properties;
@@ -361,48 +384,59 @@ public class HttpRequestSessionContextFactory
                         builder.setPeakMemory(DataSize.valueOf(value));
                         return;
                 }
-                throw badRequest(format("Unsupported resource name %s", name));
+                throw new BadRequestException(format("Unsupported resource name %s", name));
             }
             catch (IllegalArgumentException e) {
-                throw badRequest(format("Unsupported format for resource estimate '%s': %s", value, e));
+                throw new BadRequestException(format("Unsupported format for resource estimate '%s': %s", value, e));
             }
         });
 
         return builder.build();
     }
 
+    private static ParsedSessionPropertyName parseSessionPropertyName(String value)
+    {
+        int lastDotIndex = value.lastIndexOf('.');
+        if (lastDotIndex == -1) {
+            return new ParsedSessionPropertyName(Optional.empty(), value);
+        }
+        return new ParsedSessionPropertyName(Optional.of(value.substring(0, lastDotIndex)), value.substring(lastDotIndex + 1));
+    }
+
+    @FormatMethod
     private static void assertRequest(boolean expression, String format, Object... args)
     {
         if (!expression) {
-            throw badRequest(format(format, args));
+            throw new BadRequestException(format(format, args));
         }
     }
 
-    private static Map<String, String> parsePreparedStatementsHeaders(ProtocolHeaders protocolHeaders, MultivaluedMap<String, String> headers)
+    private Map<String, String> parsePreparedStatementsHeaders(ProtocolHeaders protocolHeaders, MultivaluedMap<String, String> headers)
     {
         ImmutableMap.Builder<String, String> preparedStatements = ImmutableMap.builder();
-        parseProperty(headers, protocolHeaders.requestPreparedStatement()).forEach((key, sqlString) -> {
+        parseProperty(headers, protocolHeaders.requestPreparedStatement()).forEach((key, value) -> {
             String statementName;
             try {
                 statementName = urlDecode(key);
             }
             catch (IllegalArgumentException e) {
-                throw badRequest(format("Invalid %s header: %s", protocolHeaders.requestPreparedStatement(), e.getMessage()));
+                throw new BadRequestException(format("Invalid %s header: %s", protocolHeaders.requestPreparedStatement(), e.getMessage()));
             }
+            String sqlString = preparedStatementEncoder.decodePreparedStatementFromHeader(value);
 
             // Validate statement
             SqlParser sqlParser = new SqlParser();
             try {
-                sqlParser.createStatement(sqlString, new ParsingOptions(AS_DOUBLE /* anything */));
+                sqlParser.createStatement(sqlString);
             }
             catch (ParsingException e) {
-                throw badRequest(format("Invalid %s header: %s", protocolHeaders.requestPreparedStatement(), e.getMessage()));
+                throw new BadRequestException(format("Invalid %s header: %s", protocolHeaders.requestPreparedStatement(), e.getMessage()));
             }
 
             preparedStatements.put(statementName, sqlString);
         });
 
-        return preparedStatements.build();
+        return preparedStatements.buildOrThrow();
     }
 
     private static Optional<TransactionId> parseTransactionId(String transactionId)
@@ -415,17 +449,8 @@ public class HttpRequestSessionContextFactory
             return Optional.of(TransactionId.valueOf(transactionId));
         }
         catch (Exception e) {
-            throw badRequest(e.getMessage());
+            throw new BadRequestException(e.getMessage());
         }
-    }
-
-    private static WebApplicationException badRequest(String message)
-    {
-        throw new WebApplicationException(message, Response
-                .status(Status.BAD_REQUEST)
-                .type(MediaType.TEXT_PLAIN)
-                .entity(message)
-                .build());
     }
 
     private static String trimEmptyToNull(String value)
@@ -436,5 +461,14 @@ public class HttpRequestSessionContextFactory
     private static String urlDecode(String value)
     {
         return URLDecoder.decode(value, UTF_8);
+    }
+
+    private record ParsedSessionPropertyName(Optional<String> catalog, String name)
+    {
+        ParsedSessionPropertyName
+        {
+            requireNonNull(catalog, "catalog is null");
+            requireNonNull(name, "name is null");
+        }
     }
 }

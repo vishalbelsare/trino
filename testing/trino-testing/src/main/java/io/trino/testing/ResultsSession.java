@@ -13,8 +13,9 @@
  */
 package io.trino.testing;
 
-import io.trino.client.QueryData;
 import io.trino.client.QueryStatusInfo;
+import io.trino.client.ResultRows;
+import io.trino.client.StatementStats;
 import io.trino.client.Warning;
 
 import java.util.List;
@@ -35,7 +36,11 @@ public interface ResultsSession<T>
 
     default void setWarnings(List<Warning> warnings) {}
 
-    void addResults(QueryStatusInfo statusInfo, QueryData data);
+    default void setStatementStats(StatementStats statementStats) {}
+
+    void addResults(QueryStatusInfo statusInfo, ResultRows access);
+
+    default void setQueryDataEncoding(String encoding) {}
 
     T build(Map<String, String> setSessionProperties, Set<String> resetSessionProperties);
 }

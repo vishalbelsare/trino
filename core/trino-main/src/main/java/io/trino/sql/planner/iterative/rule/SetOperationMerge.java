@@ -29,9 +29,9 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 
 class SetOperationMerge
 {
@@ -56,8 +56,8 @@ class SetOperationMerge
     {
         Lookup lookup = context.getLookup();
         List<PlanNode> sources = node.getSources().stream()
-                .flatMap(lookup::resolveGroup)
-                .collect(Collectors.toList());
+                .map(lookup::resolve)
+                .collect(toImmutableList());
 
         PlanNode child = sources.get(0);
 
@@ -78,16 +78,12 @@ class SetOperationMerge
             addOriginalMappings(source, i, newMappingsBuilder);
         }
 
-        if (node instanceof UnionNode) {
-            return Optional.of(new UnionNode(node.getId(), newSources, newMappingsBuilder.build(), node.getOutputSymbols()));
-        }
-        if (node instanceof IntersectNode) {
-            return Optional.of(new IntersectNode(node.getId(), newSources, newMappingsBuilder.build(), node.getOutputSymbols(), mergedQuantifier.get()));
-        }
-        if (node instanceof ExceptNode) {
-            return Optional.of(new ExceptNode(node.getId(), newSources, newMappingsBuilder.build(), node.getOutputSymbols(), mergedQuantifier.get()));
-        }
-        throw new IllegalArgumentException("unexpected node type: " + node.getClass().getSimpleName());
+        return switch (node) {
+            case UnionNode _ -> Optional.of(new UnionNode(node.getId(), newSources, newMappingsBuilder.build(), node.getOutputSymbols()));
+            case IntersectNode _ -> Optional.of(new IntersectNode(node.getId(), newSources, newMappingsBuilder.build(), node.getOutputSymbols(), mergedQuantifier.get()));
+            case ExceptNode _ -> Optional.of(new ExceptNode(node.getId(), newSources, newMappingsBuilder.build(), node.getOutputSymbols(), mergedQuantifier.get()));
+            default -> throw new IllegalArgumentException("unexpected node type: " + node.getClass().getSimpleName());
+        };
     }
 
     /**
@@ -101,8 +97,8 @@ class SetOperationMerge
 
         Lookup lookup = context.getLookup();
         List<PlanNode> sources = node.getSources().stream()
-                .flatMap(lookup::resolveGroup)
-                .collect(Collectors.toList());
+                .map(lookup::resolve)
+                .collect(toImmutableList());
 
         ImmutableListMultimap.Builder<Symbol, Symbol> newMappingsBuilder = ImmutableListMultimap.builder();
         boolean resultIsDistinct = false;

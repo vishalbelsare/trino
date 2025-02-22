@@ -14,18 +14,17 @@
 package io.trino.sql.planner;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.google.inject.Inject;
 import io.trino.sql.planner.iterative.IterativeOptimizer;
 import io.trino.sql.planner.iterative.RuleStats;
 import io.trino.sql.planner.optimizations.OptimizerStats;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.MBeanExport;
 import org.weakref.jmx.MBeanExporter;
 import org.weakref.jmx.ObjectNames;
-
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
-import javax.annotation.concurrent.GuardedBy;
-import javax.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -66,7 +65,7 @@ public class OptimizerStatsMBeanExporter
                 mbeanExports.add(exporter.exportWithGeneratedName(entry.getValue(), PlanOptimizer.class, ImmutableMap.<String, String>builder()
                         .put("name", PlanOptimizer.class.getSimpleName())
                         .put("optimizer", entry.getKey().getSimpleName())
-                        .build()));
+                        .buildOrThrow()));
             }
             catch (RuntimeException e) {
                 throw new RuntimeException(format("Failed to export MBean with name '%s'", getName(entry.getKey())), e);
@@ -79,7 +78,7 @@ public class OptimizerStatsMBeanExporter
                 mbeanExports.add(exporter.exportWithGeneratedName(entry.getValue(), IterativeOptimizer.class, ImmutableMap.<String, String>builder()
                         .put("name", IterativeOptimizer.class.getSimpleName())
                         .put("rule", entry.getKey().getSimpleName())
-                        .build()));
+                        .buildOrThrow()));
             }
             catch (RuntimeException e) {
                 throw new RuntimeException(format("Failed to export MBean with for rule '%s'", entry.getKey().getSimpleName()), e);

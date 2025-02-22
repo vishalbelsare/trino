@@ -15,10 +15,12 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.groupId;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.strictProject;
@@ -48,7 +50,35 @@ public class TestPruneGroupIdSourceColumns
                                 ImmutableList.of("a"),
                                 "group_id",
                                 strictProject(
-                                        ImmutableMap.of("a", expression("a"), "k", expression("k")),
+                                        ImmutableMap.of("a", expression(new Reference(BIGINT, "a")), "k", expression(new Reference(BIGINT, "k"))),
+                                        values("a", "b", "k"))));
+    }
+
+    @Test
+    public void testPruneInputColumnWithMapping()
+    {
+        tester().assertThat(new PruneGroupIdSourceColumns())
+                .on(p -> {
+                    Symbol a = p.symbol("a");
+                    Symbol b = p.symbol("b");
+                    Symbol k = p.symbol("k");
+                    Symbol newK = p.symbol("newK");
+                    Symbol groupId = p.symbol("group_id");
+                    return p.groupId(
+                            ImmutableList.of(ImmutableList.of(newK)),
+                            ImmutableMap.of(newK, k),
+                            ImmutableList.of(a),
+                            groupId,
+                            p.values(a, b, k));
+                })
+                .matches(
+                        groupId(
+                                ImmutableList.of(ImmutableList.of("newK")),
+                                ImmutableMap.of("newK", "k"),
+                                ImmutableList.of("a"),
+                                "group_id",
+                                strictProject(
+                                        ImmutableMap.of("a", expression(new Reference(BIGINT, "a")), "k", expression(new Reference(BIGINT, "k"))),
                                         values("a", "b", "k"))));
     }
 

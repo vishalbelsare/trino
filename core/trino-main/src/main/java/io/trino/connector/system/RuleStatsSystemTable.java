@@ -14,10 +14,11 @@
 package io.trino.connector.system;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.Metadata;
+import com.google.inject.Inject;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
@@ -27,10 +28,9 @@ import io.trino.spi.connector.FixedPageSource;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.TypeManager;
 import io.trino.sql.planner.RuleStatsRecorder;
 import io.trino.sql.planner.iterative.RuleStats;
-
-import javax.inject.Inject;
 
 import java.util.Map;
 import java.util.Optional;
@@ -53,10 +53,10 @@ public class RuleStatsSystemTable
     private final Optional<RuleStatsRecorder> ruleStatsRecorder;
 
     @Inject
-    public RuleStatsSystemTable(Optional<RuleStatsRecorder> ruleStatsRecorder, Metadata metadata)
+    public RuleStatsSystemTable(Optional<RuleStatsRecorder> ruleStatsRecorder, TypeManager typeManager)
     {
         this.ruleStatsRecorder = requireNonNull(ruleStatsRecorder, "ruleStatsRecorder is null");
-        requireNonNull(metadata, "metadata is null");
+        requireNonNull(typeManager, "typeManager is null");
 
         this.ruleStatsTable = tableMetadataBuilder(TABLE_NAME)
                 .column("rule_name", VARCHAR)
@@ -64,7 +64,7 @@ public class RuleStatsSystemTable
                 .column("matches", BIGINT)
                 .column("failures", BIGINT)
                 .column("average_time", DOUBLE)
-                .column("time_distribution_percentiles", metadata.getType(mapType(DOUBLE.getTypeSignature(), DOUBLE.getTypeSignature())))
+                .column("time_distribution_percentiles", typeManager.getType(mapType(DOUBLE.getTypeSignature(), DOUBLE.getTypeSignature())))
                 .build();
     }
 
@@ -99,12 +99,13 @@ public class RuleStatsSystemTable
             BIGINT.writeLong(blockBuilders.get("failures"), stats.getFailures());
             DOUBLE.writeDouble(blockBuilders.get("average_time"), stats.getTime().getAvg());
 
-            BlockBuilder mapWriter = blockBuilders.get("time_distribution_percentiles").beginBlockEntry();
-            for (Map.Entry<Double, Double> percentile : stats.getTime().getPercentiles().entrySet()) {
-                DOUBLE.writeDouble(mapWriter, percentile.getKey());
-                DOUBLE.writeDouble(mapWriter, percentile.getValue());
-            }
-            blockBuilders.get("time_distribution_percentiles").closeEntry();
+            MapBlockBuilder blockBuilder = (MapBlockBuilder) blockBuilders.get("time_distribution_percentiles");
+            blockBuilder.buildEntry((keyBuilder, valueBuilder) -> {
+                stats.getTime().getPercentiles().forEach((key, value) -> {
+                    DOUBLE.writeDouble(keyBuilder, key);
+                    DOUBLE.writeDouble(valueBuilder, value);
+                });
+            });
         }
 
         Block[] blocks = ruleStatsTable.getColumns().stream()

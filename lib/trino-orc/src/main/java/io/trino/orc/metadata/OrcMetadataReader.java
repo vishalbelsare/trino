@@ -16,10 +16,10 @@ package io.trino.orc.metadata;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.primitives.Longs;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
+import io.trino.orc.OrcReaderOptions;
 import io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind;
 import io.trino.orc.metadata.OrcType.OrcTypeKind;
 import io.trino.orc.metadata.PostScript.HiveWriterVersion;
@@ -35,10 +35,10 @@ import io.trino.orc.metadata.statistics.IntegerStatistics;
 import io.trino.orc.metadata.statistics.StringStatistics;
 import io.trino.orc.metadata.statistics.StripeStatistics;
 import io.trino.orc.metadata.statistics.TimestampStatistics;
-import io.trino.orc.proto.OrcProto;
-import io.trino.orc.proto.OrcProto.RowIndexEntry;
-import io.trino.orc.protobuf.ByteString;
-import io.trino.orc.protobuf.CodedInputStream;
+import org.apache.orc.OrcProto;
+import org.apache.orc.OrcProto.RowIndexEntry;
+import org.apache.orc.protobuf.ByteString;
+import org.apache.orc.protobuf.CodedInputStream;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -74,12 +74,20 @@ import static io.trino.orc.metadata.statistics.StringStatistics.STRING_VALUE_BYT
 import static io.trino.orc.metadata.statistics.TimestampStatistics.TIMESTAMP_VALUE_BYTES;
 import static java.lang.Character.MIN_SUPPLEMENTARY_CODE_POINT;
 import static java.lang.Math.toIntExact;
+import static java.util.Objects.requireNonNull;
 
 public class OrcMetadataReader
         implements MetadataReader
 {
     private static final int REPLACEMENT_CHARACTER_CODE_POINT = 0xFFFD;
     private static final int PROTOBUF_MESSAGE_MAX_LIMIT = toIntExact(DataSize.of(1, GIGABYTE).toBytes());
+
+    private final OrcReaderOptions orcReaderOptions;
+
+    public OrcMetadataReader(OrcReaderOptions orcReaderOptions)
+    {
+        this.orcReaderOptions = requireNonNull(orcReaderOptions, "orcReaderOptions is null");
+    }
 
     @Override
     public PostScript readPostScript(InputStream inputStream)
@@ -172,7 +180,10 @@ public class OrcMetadataReader
                 toStream(stripeFooter.getStreamsList()),
                 toColumnEncoding(stripeFooter.getColumnsList()),
                 Optional.ofNullable(emptyToNull(stripeFooter.getWriterTimezone()))
-                        .map(ZoneId::of)
+                        .map(zoneId ->
+                                orcReaderOptions.isReadLegacyShortZoneId()
+                                        ? ZoneId.of(zoneId, ZoneId.SHORT_IDS)
+                                        : ZoneId.of(zoneId))
                         .orElse(legacyFileTimeZone));
     }
 
@@ -227,7 +238,12 @@ public class OrcMetadataReader
                 builder.add(new BloomFilter(bits, orcBloomFilter.getNumHashFunctions()));
             }
             else {
-                builder.add(new BloomFilter(Longs.toArray(orcBloomFilter.getBitsetList()), orcBloomFilter.getNumHashFunctions()));
+                int length = orcBloomFilter.getBitsetCount();
+                long[] bits = new long[length];
+                for (int i = 0; i < length; i++) {
+                    bits[i] = orcBloomFilter.getBitset(i);
+                }
+                builder.add(new BloomFilter(bits, orcBloomFilter.getNumHashFunctions()));
             }
         }
         return builder.build();
@@ -294,7 +310,7 @@ public class OrcMetadataReader
         // is set to 1, but the value is wrongly set to default 0 which implies there is something wrong with
         // the stats. Drop the column statistics altogether.
         if (statistics.hasHasNull() && statistics.getNumberOfValues() == 0 && !statistics.getHasNull()) {
-            return new ColumnStatistics(null, 0, null, null, null, null, null, null, null, null, null);
+            return new ColumnStatistics(null, 0, null, null, null, null, null, null, null, null, null, null);
         }
 
         return new ColumnStatistics(
@@ -303,6 +319,7 @@ public class OrcMetadataReader
                 statistics.hasBucketStatistics() ? toBooleanStatistics(statistics.getBucketStatistics()) : null,
                 statistics.hasIntStatistics() ? toIntegerStatistics(statistics.getIntStatistics()) : null,
                 statistics.hasDoubleStatistics() ? toDoubleStatistics(statistics.getDoubleStatistics()) : null,
+                null,
                 statistics.hasStringStatistics() ? toStringStatistics(hiveWriterVersion, statistics.getStringStatistics(), isRowGroup) : null,
                 statistics.hasDateStatistics() ? toDateStatistics(hiveWriterVersion, statistics.getDateStatistics(), isRowGroup) : null,
                 statistics.hasTimestampStatistics() ? toTimestampStatistics(hiveWriterVersion, statistics.getTimestampStatistics(), isRowGroup) : null,
@@ -327,7 +344,7 @@ public class OrcMetadataReader
         for (OrcProto.UserMetadataItem item : metadataList) {
             mapBuilder.put(item.getName(), byteStringToSlice(item.getValue()));
         }
-        return mapBuilder.build();
+        return mapBuilder.buildOrThrow();
     }
 
     private static BooleanStatistics toBooleanStatistics(OrcProto.BucketStatistics bucketStatistics)
@@ -413,7 +430,7 @@ public class OrcMetadataReader
             return value;
         }
         // Append 0xFF so that it is larger than value
-        Slice newValue = Slices.copyOf(value, 0, index + 1);
+        Slice newValue = value.copy(0, index + 1);
         newValue.setByte(index, 0xFF);
         return newValue;
     }
@@ -433,7 +450,7 @@ public class OrcMetadataReader
         if (index == value.length()) {
             return value;
         }
-        return Slices.copyOf(value, 0, index);
+        return value.copy(0, index);
     }
 
     @VisibleForTesting
@@ -539,53 +556,33 @@ public class OrcMetadataReader
 
     private static OrcTypeKind toTypeKind(OrcProto.Type.Kind typeKind)
     {
-        switch (typeKind) {
-            case BOOLEAN:
-                return OrcTypeKind.BOOLEAN;
-            case BYTE:
-                return OrcTypeKind.BYTE;
-            case SHORT:
-                return OrcTypeKind.SHORT;
-            case INT:
-                return OrcTypeKind.INT;
-            case LONG:
-                return OrcTypeKind.LONG;
-            case FLOAT:
-                return OrcTypeKind.FLOAT;
-            case DOUBLE:
-                return OrcTypeKind.DOUBLE;
-            case STRING:
-                return OrcTypeKind.STRING;
-            case BINARY:
-                return OrcTypeKind.BINARY;
-            case TIMESTAMP:
-                return OrcTypeKind.TIMESTAMP;
-            case TIMESTAMP_INSTANT:
-                return OrcTypeKind.TIMESTAMP_INSTANT;
-            case LIST:
-                return OrcTypeKind.LIST;
-            case MAP:
-                return OrcTypeKind.MAP;
-            case STRUCT:
-                return OrcTypeKind.STRUCT;
-            case UNION:
-                return OrcTypeKind.UNION;
-            case DECIMAL:
-                return OrcTypeKind.DECIMAL;
-            case DATE:
-                return OrcTypeKind.DATE;
-            case VARCHAR:
-                return OrcTypeKind.VARCHAR;
-            case CHAR:
-                return OrcTypeKind.CHAR;
-        }
-        throw new IllegalStateException(typeKind + " stream type not implemented yet");
+        return switch (typeKind) {
+            case BOOLEAN -> OrcTypeKind.BOOLEAN;
+            case BYTE -> OrcTypeKind.BYTE;
+            case SHORT -> OrcTypeKind.SHORT;
+            case INT -> OrcTypeKind.INT;
+            case LONG -> OrcTypeKind.LONG;
+            case FLOAT -> OrcTypeKind.FLOAT;
+            case DOUBLE -> OrcTypeKind.DOUBLE;
+            case STRING -> OrcTypeKind.STRING;
+            case BINARY -> OrcTypeKind.BINARY;
+            case TIMESTAMP -> OrcTypeKind.TIMESTAMP;
+            case TIMESTAMP_INSTANT -> OrcTypeKind.TIMESTAMP_INSTANT;
+            case LIST -> OrcTypeKind.LIST;
+            case MAP -> OrcTypeKind.MAP;
+            case STRUCT -> OrcTypeKind.STRUCT;
+            case UNION -> OrcTypeKind.UNION;
+            case DECIMAL -> OrcTypeKind.DECIMAL;
+            case DATE -> OrcTypeKind.DATE;
+            case VARCHAR -> OrcTypeKind.VARCHAR;
+            case CHAR -> OrcTypeKind.CHAR;
+        };
     }
 
     // This method assumes type attributes have no duplicate key
     private static Map<String, String> toMap(List<OrcProto.StringPair> attributes)
     {
-        ImmutableMap.Builder<String, String> results = new ImmutableMap.Builder<>();
+        ImmutableMap.Builder<String, String> results = ImmutableMap.builder();
         if (attributes != null) {
             for (OrcProto.StringPair attribute : attributes) {
                 if (attribute.hasKey() && attribute.hasValue()) {
@@ -593,7 +590,7 @@ public class OrcMetadataReader
                 }
             }
         }
-        return results.build();
+        return results.buildOrThrow();
     }
 
     private static StreamKind toStreamKind(OrcProto.Stream.Kind streamKind)
@@ -629,17 +626,12 @@ public class OrcMetadataReader
 
     private static ColumnEncodingKind toColumnEncodingKind(OrcProto.ColumnEncoding.Kind columnEncodingKind)
     {
-        switch (columnEncodingKind) {
-            case DIRECT:
-                return ColumnEncodingKind.DIRECT;
-            case DIRECT_V2:
-                return ColumnEncodingKind.DIRECT_V2;
-            case DICTIONARY:
-                return ColumnEncodingKind.DICTIONARY;
-            case DICTIONARY_V2:
-                return ColumnEncodingKind.DICTIONARY_V2;
-        }
-        throw new IllegalStateException(columnEncodingKind + " stream encoding not implemented yet");
+        return switch (columnEncodingKind) {
+            case DIRECT -> ColumnEncodingKind.DIRECT;
+            case DIRECT_V2 -> ColumnEncodingKind.DIRECT_V2;
+            case DICTIONARY -> ColumnEncodingKind.DICTIONARY;
+            case DICTIONARY_V2 -> ColumnEncodingKind.DICTIONARY_V2;
+        };
     }
 
     private static CompressionKind toCompression(OrcProto.CompressionKind compression)
@@ -651,6 +643,7 @@ public class OrcMetadataReader
                 return ZLIB;
             case SNAPPY:
                 return SNAPPY;
+            case BROTLI:
             case LZO:
                 // TODO unsupported
                 break;

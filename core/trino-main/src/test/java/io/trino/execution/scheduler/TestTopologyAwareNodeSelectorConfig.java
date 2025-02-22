@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.testing.ConfigAssertions;
 import io.trino.execution.scheduler.TopologyAwareNodeSelectorConfig.TopologyType;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -28,16 +28,16 @@ public class TestTopologyAwareNodeSelectorConfig
     {
         ConfigAssertions.assertRecordedDefaults(ConfigAssertions.recordDefaults(TopologyAwareNodeSelectorConfig.class)
                 .setType(TopologyType.FLAT)
-                .setLocationSegmentNames("machine"));
+                .setLocationSegmentNames(ImmutableList.of("machine")));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("node-scheduler.network-topology.type", "FILE")
                 .put("node-scheduler.network-topology.segments", "rack,machine")
-                .build();
+                .buildOrThrow();
 
         TopologyAwareNodeSelectorConfig expected = new TopologyAwareNodeSelectorConfig()
                 .setType(TopologyType.FILE)

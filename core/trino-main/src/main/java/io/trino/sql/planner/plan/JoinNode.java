@@ -18,13 +18,13 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.cost.PlanNodeStatsAndCostSummary;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.Join;
-
-import javax.annotation.concurrent.Immutable;
+import io.trino.sql.planner.SymbolsExtractor;
 
 import java.util.List;
 import java.util.Map;
@@ -35,10 +35,10 @@ import java.util.Set;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.sql.planner.plan.JoinNode.DistributionType.REPLICATED;
-import static io.trino.sql.planner.plan.JoinNode.Type.FULL;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
-import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
-import static io.trino.sql.planner.plan.JoinNode.Type.RIGHT;
+import static io.trino.sql.planner.plan.JoinType.FULL;
+import static io.trino.sql.planner.plan.JoinType.INNER;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
+import static io.trino.sql.planner.plan.JoinType.RIGHT;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -46,7 +46,13 @@ import static java.util.Objects.requireNonNull;
 public class JoinNode
         extends PlanNode
 {
-    private final Type type;
+    public enum DistributionType
+    {
+        PARTITIONED,
+        REPLICATED
+    }
+
+    private final JoinType type;
     private final PlanNode left;
     private final PlanNode right;
     private final List<EquiJoinClause> criteria;
@@ -66,7 +72,7 @@ public class JoinNode
     @JsonCreator
     public JoinNode(
             @JsonProperty("id") PlanNodeId id,
-            @JsonProperty("type") Type type,
+            @JsonProperty("type") JoinType type,
             @JsonProperty("left") PlanNode left,
             @JsonProperty("right") PlanNode right,
             @JsonProperty("criteria") List<EquiJoinClause> criteria,
@@ -115,6 +121,15 @@ public class JoinNode
         checkArgument(leftSymbols.containsAll(leftOutputSymbols), "Left source inputs do not contain all left output symbols");
         checkArgument(rightSymbols.containsAll(rightOutputSymbols), "Right source inputs do not contain all right output symbols");
 
+        filter.ifPresent(expression -> {
+            checkArgument(
+                    Sets.union(leftSymbols, rightSymbols).containsAll(SymbolsExtractor.extractAll(expression)),
+                    "Some filter inputs missing from left/right: %s, left = %s, right = %s",
+                    expression,
+                    leftSymbols,
+                    rightSymbols);
+        });
+
         checkArgument(!(criteria.isEmpty() && leftHashSymbol.isPresent()), "Left hash symbol is only valid in an equijoin");
         checkArgument(!(criteria.isEmpty() && rightHashSymbol.isPresent()), "Right hash symbol is only valid in an equijoin");
 
@@ -158,19 +173,14 @@ public class JoinNode
                 reorderJoinStatsAndCost);
     }
 
-    private static Type flipType(Type type)
+    private static JoinType flipType(JoinType type)
     {
-        switch (type) {
-            case INNER:
-                return INNER;
-            case FULL:
-                return FULL;
-            case LEFT:
-                return RIGHT;
-            case RIGHT:
-                return LEFT;
-        }
-        throw new IllegalStateException("No inverse defined for join type: " + type);
+        return switch (type) {
+            case INNER -> INNER;
+            case FULL -> FULL;
+            case LEFT -> RIGHT;
+            case RIGHT -> LEFT;
+        };
     }
 
     private static List<EquiJoinClause> flipJoinCriteria(List<EquiJoinClause> joinCriteria)
@@ -180,51 +190,8 @@ public class JoinNode
                 .collect(toImmutableList());
     }
 
-    public enum DistributionType
-    {
-        PARTITIONED,
-        REPLICATED
-    }
-
-    public enum Type
-    {
-        INNER("InnerJoin"),
-        LEFT("LeftJoin"),
-        RIGHT("RightJoin"),
-        FULL("FullJoin");
-
-        private final String joinLabel;
-
-        Type(String joinLabel)
-        {
-            this.joinLabel = joinLabel;
-        }
-
-        public String getJoinLabel()
-        {
-            return joinLabel;
-        }
-
-        public static Type typeConvert(Join.Type joinType)
-        {
-            switch (joinType) {
-                case CROSS:
-                case IMPLICIT:
-                case INNER:
-                    return Type.INNER;
-                case LEFT:
-                    return Type.LEFT;
-                case RIGHT:
-                    return Type.RIGHT;
-                case FULL:
-                    return Type.FULL;
-            }
-            throw new UnsupportedOperationException("Unsupported join type: " + joinType);
-        }
-    }
-
     @JsonProperty("type")
-    public Type getType()
+    public JoinType getType()
     {
         return type;
     }
@@ -355,6 +322,11 @@ public class JoinNode
         return new JoinNode(getId(), type, left, right, criteria, leftOutputSymbols, rightOutputSymbols, maySkipOutputDuplicates, filter, leftHashSymbol, rightHashSymbol, distributionType, spillable, dynamicFilters, Optional.of(statsAndCost));
     }
 
+    public JoinNode withoutDynamicFilters()
+    {
+        return new JoinNode(getId(), type, left, right, criteria, leftOutputSymbols, rightOutputSymbols, maySkipOutputDuplicates, filter, leftHashSymbol, rightHashSymbol, distributionType, spillable, ImmutableMap.of(), reorderJoinStatsAndCost);
+    }
+
     public boolean isCrossJoin()
     {
         return criteria.isEmpty() && filter.isEmpty() && type == INNER;
@@ -384,9 +356,9 @@ public class JoinNode
             return right;
         }
 
-        public ComparisonExpression toExpression()
+        public Comparison toExpression()
         {
-            return new ComparisonExpression(ComparisonExpression.Operator.EQUAL, left.toSymbolReference(), right.toSymbolReference());
+            return new Comparison(Comparison.Operator.EQUAL, left.toSymbolReference(), right.toSymbolReference());
         }
 
         public EquiJoinClause flip()

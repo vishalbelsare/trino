@@ -33,9 +33,7 @@ import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.IOException;
 import java.time.ZoneId;
@@ -43,6 +41,7 @@ import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verifyNotNull;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.orc.metadata.Stream.StreamKind.DATA;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
@@ -57,7 +56,7 @@ import static java.util.Objects.requireNonNull;
 public class LongColumnReader
         implements ColumnReader
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(LongColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(LongColumnReader.class);
 
     private final Type type;
     private final OrcColumn column;
@@ -80,9 +79,9 @@ public class LongColumnReader
     private int[] intNonNullValueTemp = new int[0];
     private long[] longNonNullValueTemp = new long[0];
 
-    private final LocalMemoryContext systemMemoryContext;
+    private final LocalMemoryContext memoryContext;
 
-    public LongColumnReader(Type type, OrcColumn column, LocalMemoryContext systemMemoryContext)
+    public LongColumnReader(Type type, OrcColumn column, LocalMemoryContext memoryContext)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -90,7 +89,7 @@ public class LongColumnReader
         this.type = type;
 
         this.column = requireNonNull(column, "column is null");
-        this.systemMemoryContext = requireNonNull(systemMemoryContext, "systemMemoryContext is null");
+        this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
     }
 
     @Override
@@ -189,6 +188,9 @@ public class LongColumnReader
         if (type instanceof BigintType) {
             return longReadNullBlock(isNull, nonNullCount);
         }
+        if (type instanceof TimeType) {
+            return longReadNullBlock(isNull, nonNullCount);
+        }
         if (type instanceof IntegerType || type instanceof DateType) {
             return intReadNullBlock(isNull, nonNullCount);
         }
@@ -205,11 +207,12 @@ public class LongColumnReader
         int minNonNullValueSize = minNonNullValueSize(nonNullCount);
         if (longNonNullValueTemp.length < minNonNullValueSize) {
             longNonNullValueTemp = new long[minNonNullValueSize];
-            systemMemoryContext.setBytes(sizeOf(longNonNullValueTemp));
+            memoryContext.setBytes(sizeOf(longNonNullValueTemp));
         }
 
         dataStream.next(longNonNullValueTemp, nonNullCount);
 
+        maybeTransformValues(longNonNullValueTemp, nonNullCount);
         long[] result = unpackLongNulls(longNonNullValueTemp, isNull);
 
         return new LongArrayBlock(nextBatchSize, Optional.of(isNull), result);
@@ -222,7 +225,7 @@ public class LongColumnReader
         int minNonNullValueSize = minNonNullValueSize(nonNullCount);
         if (intNonNullValueTemp.length < minNonNullValueSize) {
             intNonNullValueTemp = new int[minNonNullValueSize];
-            systemMemoryContext.setBytes(sizeOf(intNonNullValueTemp));
+            memoryContext.setBytes(sizeOf(intNonNullValueTemp));
         }
 
         dataStream.next(intNonNullValueTemp, nonNullCount);
@@ -239,7 +242,7 @@ public class LongColumnReader
         int minNonNullValueSize = minNonNullValueSize(nonNullCount);
         if (shortNonNullValueTemp.length < minNonNullValueSize) {
             shortNonNullValueTemp = new short[minNonNullValueSize];
-            systemMemoryContext.setBytes(sizeOf(shortNonNullValueTemp));
+            memoryContext.setBytes(sizeOf(shortNonNullValueTemp));
         }
 
         dataStream.next(shortNonNullValueTemp, nonNullCount);
@@ -299,7 +302,7 @@ public class LongColumnReader
     @Override
     public void close()
     {
-        systemMemoryContext.close();
+        memoryContext.close();
     }
 
     @Override

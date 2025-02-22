@@ -13,14 +13,22 @@
  */
 package io.trino.sql.tree;
 
+import com.google.errorprone.annotations.Immutable;
 import io.trino.sql.ExpressionFormatter;
 
 import java.util.Optional;
 
+@Immutable
 public abstract class Expression
         extends Node
 {
+    @Deprecated
     protected Expression(Optional<NodeLocation> location)
+    {
+        super(location);
+    }
+
+    protected Expression(NodeLocation location)
     {
         super(location);
     }

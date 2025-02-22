@@ -13,31 +13,52 @@
  */
 package io.trino.util;
 
-import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.util.concurrent.UncheckedExecutionException;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.trino.cache.NonEvictableCache;
+import io.trino.spi.type.BigintType;
+import io.trino.spi.type.DateType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimeType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import it.unimi.dsi.fastutil.Hash;
 import it.unimi.dsi.fastutil.booleans.BooleanOpenHashSet;
 import it.unimi.dsi.fastutil.doubles.DoubleHash;
 import it.unimi.dsi.fastutil.doubles.DoubleOpenCustomHashSet;
+import it.unimi.dsi.fastutil.longs.AbstractLongIterator;
+import it.unimi.dsi.fastutil.longs.AbstractLongSet;
 import it.unimi.dsi.fastutil.longs.LongHash;
+import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongOpenCustomHashSet;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.objects.ObjectOpenCustomHashSet;
 
-import javax.annotation.concurrent.GuardedBy;
-
 import java.lang.invoke.MethodHandle;
+import java.math.BigInteger;
+import java.util.BitSet;
 import java.util.Collection;
 import java.util.Objects;
+import java.util.PrimitiveIterator;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.base.Verify.verifyNotNull;
+import static io.trino.cache.CacheUtils.uncheckedCacheGet;
+import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.util.SingleAccessMethodCompiler.compileSingleAccessMethod;
-import static java.lang.Boolean.TRUE;
+import static it.unimi.dsi.fastutil.HashCommon.nextPowerOfTwo;
+import static java.lang.Math.ceil;
+import static java.lang.Math.max;
+import static java.lang.Math.min;
+import static java.lang.Math.toIntExact;
 import static java.lang.invoke.MethodType.methodType;
 import static java.util.Objects.requireNonNull;
 
@@ -56,7 +77,7 @@ public final class FastutilSetHelper
         // The performance of InCodeGenerator heavily depends on the load factor being small.
         Class<?> javaElementType = type.getJavaType();
         if (javaElementType == long.class) {
-            return new LongOpenCustomHashSet((Collection<Long>) set, 0.25f, new LongStrategy(hashCodeHandle, equalsHandle, type));
+            return createSetForLongJavaType((Set<Long>) set, type, hashCodeHandle, equalsHandle);
         }
         if (javaElementType == double.class) {
             return new DoubleOpenCustomHashSet((Collection<Double>) set, 0.25f, new DoubleStrategy(hashCodeHandle, equalsHandle, type));
@@ -64,12 +85,10 @@ public final class FastutilSetHelper
         if (javaElementType == boolean.class) {
             return new BooleanOpenHashSet((Collection<Boolean>) set, 0.25f);
         }
-        else if (!type.getJavaType().isPrimitive()) {
+        if (!type.getJavaType().isPrimitive()) {
             return new ObjectOpenCustomHashSet<>(set, 0.25f, new ObjectStrategy(hashCodeHandle, equalsHandle, type));
         }
-        else {
-            throw new UnsupportedOperationException("Unsupported native type in set: " + type.getJavaType() + " with type " + type.getTypeSignature());
-        }
+        throw new UnsupportedOperationException("Unsupported native type in set: " + type.getJavaType() + " with type " + type.getTypeSignature());
     }
 
     public static boolean in(boolean booleanValue, BooleanOpenHashSet set)
@@ -87,9 +106,91 @@ public final class FastutilSetHelper
         return set.contains(longValue);
     }
 
+    public static boolean in(long longValue, LongBitSetFilter set)
+    {
+        return set.contains(longValue);
+    }
+
+    public static boolean in(long longValue, LongOpenHashSet set)
+    {
+        return set.contains(longValue);
+    }
+
     public static boolean in(Object objectValue, ObjectOpenCustomHashSet<?> set)
     {
         return set.contains(objectValue);
+    }
+
+    public static final class LongBitSetFilter
+            extends AbstractLongSet
+    {
+        private final BitSet bitmask;
+        private final long min;
+        private final long max;
+        private final int size;
+
+        // Note: Caller is expected to validate that values are inside min/max range
+        // and the range fits in an integer
+        private LongBitSetFilter(Set<Long> values, long min, long max)
+        {
+            checkArgument(min <= max, "min must be less than or equal to max");
+            checkArgument(!values.isEmpty(), "values must not be empty");
+            this.min = min;
+            this.max = max;
+            int range = toIntExact(max - min + 1);
+            bitmask = new BitSet(range);
+
+            for (long value : values) {
+                bitmask.set((int) (value - min));
+            }
+            this.size = values.size();
+        }
+
+        @Override
+        public boolean contains(long value)
+        {
+            if (value < min || value > max) {
+                return false;
+            }
+
+            return bitmask.get((int) (value - min));
+        }
+
+        @Override
+        public LongIterator iterator()
+        {
+            PrimitiveIterator.OfInt iterator = bitmask.stream().iterator();
+            return new AbstractLongIterator() {
+                @Override
+                public long nextLong()
+                {
+                    return iterator.nextInt();
+                }
+
+                @Override
+                public boolean hasNext()
+                {
+                    return iterator.hasNext();
+                }
+            };
+        }
+
+        @Override
+        public int size()
+        {
+            return size;
+        }
+
+        @Override
+        public String toString()
+        {
+            return toStringHelper(this)
+                    .add("bitmask", bitmask)
+                    .add("min", min)
+                    .add("max", max)
+                    .add("size", size)
+                    .toString();
+        }
     }
 
     private static final class LongStrategy
@@ -132,7 +233,7 @@ public final class FastutilSetHelper
             Boolean result = longEquals.equals(a, b);
             // FastutilHashSet is not intended be used for indeterminate values lookup
             verifyNotNull(result, "result is null");
-            return TRUE.equals(result);
+            return result;
         }
     }
 
@@ -176,7 +277,7 @@ public final class FastutilSetHelper
             Boolean result = doubleEquals.equals(a, b);
             // FastutilHashSet is not intended be used for indeterminate values lookup
             verifyNotNull(result, "result is null");
-            return TRUE.equals(result);
+            return result;
         }
     }
 
@@ -232,27 +333,28 @@ public final class FastutilSetHelper
             Boolean result = objectEquals.equals(a, b);
             // FastutilHashSet is not intended be used for indeterminate values lookup
             verifyNotNull(result, "result is null");
-            return TRUE.equals(result);
+            return result;
         }
     }
 
     private static class MethodGenerator
     {
-        private static final Cache<MethodKey<?>, GeneratedMethod<?>> generatedMethodCache = CacheBuilder.newBuilder()
-                .maximumSize(1_000)
-                .expireAfterWrite(2, TimeUnit.HOURS)
-                .build();
+        private static final NonEvictableCache<MethodKey<?>, GeneratedMethod<?>> generatedMethodCache = buildNonEvictableCache(
+                CacheBuilder.newBuilder()
+                        .maximumSize(1_000)
+                        .expireAfterWrite(2, TimeUnit.HOURS));
 
         private static <T> T getGeneratedMethod(Type type, Class<T> operatorInterface, MethodHandle methodHandle)
         {
             try {
                 @SuppressWarnings("unchecked")
-                GeneratedMethod<T> generatedMethod = (GeneratedMethod<T>) generatedMethodCache.get(
+                GeneratedMethod<T> generatedMethod = (GeneratedMethod<T>) uncheckedCacheGet(
+                        generatedMethodCache,
                         new MethodKey<>(type, operatorInterface),
                         () -> new GeneratedMethod<>(type, operatorInterface, methodHandle));
                 return generatedMethod.get();
             }
-            catch (ExecutionException | UncheckedExecutionException e) {
+            catch (UncheckedExecutionException e) {
                 throwIfUnchecked(e.getCause());
                 throw new RuntimeException(e.getCause());
             }
@@ -318,5 +420,48 @@ public final class FastutilSetHelper
                 return operator;
             }
         }
+    }
+
+    private static Set<Long> createSetForLongJavaType(Set<Long> values, Type type, MethodHandle hashCodeHandle, MethodHandle equalsHandle)
+    {
+        if (values.isEmpty() || !isDirectLongComparisonValidType(type)) {
+            return new LongOpenCustomHashSet(values, 0.25f, new LongStrategy(hashCodeHandle, equalsHandle, type));
+        }
+
+        long min = Long.MAX_VALUE;
+        long max = Long.MIN_VALUE;
+        for (long value : values) {
+            min = min(min, value);
+            max = max(max, value);
+        }
+
+        // A Set based on a fastutil open hashset uses (next power of two of size / load-factor)
+        // slots in a hash table which is an array of longs.
+        // This calculation is based on the sizing logic of fastutil it.unimi.dsi.fastutil.longs.LongOpenCustomHashSet#tryCapacity
+        long setEntries = (int) min(1 << 30, nextPowerOfTwo((long) ceil(values.size() / 0.25f)));
+        BigInteger range = BigInteger.valueOf(max)
+                .subtract(BigInteger.valueOf(min))
+                .add(BigInteger.valueOf(1));
+        // A Set based on a bitmap uses (max - min) / 64 longs
+        // Create a bitset only if it uses fewer entries than the equivalent hash set
+        if (range.compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0
+                || (range.intValueExact() / 64) + 1 > setEntries) {
+            return new LongOpenHashSet(values, 0.25f);
+        }
+        return new LongBitSetFilter(values, min, max);
+    }
+
+    private static boolean isDirectLongComparisonValidType(Type type)
+    {
+        // Types for which we can safely use equality and hashCode on the stored long value
+        // instead of going through type specific methods
+        return type instanceof TinyintType ||
+                type instanceof SmallintType ||
+                type instanceof IntegerType ||
+                type instanceof BigintType ||
+                type instanceof TimeType ||
+                type instanceof DateType ||
+                type instanceof TimestampType timestampType && timestampType.isShort() ||
+                (type instanceof DecimalType && ((DecimalType) type).isShort());
     }
 }

@@ -14,6 +14,7 @@
 package io.trino.plugin.tpch;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorRecordSetProvider;
 import io.trino.spi.connector.ConnectorSession;
@@ -31,15 +32,22 @@ import java.util.List;
 
 import static io.trino.plugin.tpch.TpchRecordSet.createTpchRecordSet;
 import static io.trino.tpch.TpchColumnTypes.IDENTIFIER;
+import static java.util.Objects.requireNonNull;
 
 public class TpchRecordSetProvider
         implements ConnectorRecordSetProvider
 {
     private final DecimalTypeMapping decimalTypeMapping;
 
+    @Inject
+    public TpchRecordSetProvider(TpchConfig config)
+    {
+        this(requireNonNull(config, "config is null").getDecimalTypeMapping());
+    }
+
     public TpchRecordSetProvider(DecimalTypeMapping decimalTypeMapping)
     {
-        this.decimalTypeMapping = decimalTypeMapping;
+        this.decimalTypeMapping = requireNonNull(decimalTypeMapping, "decimalTypeMapping is null");
     }
 
     @Override
@@ -49,12 +57,12 @@ public class TpchRecordSetProvider
         TpchTableHandle tpchTable = (TpchTableHandle) table;
 
         return getRecordSet(
-                TpchTable.getTable(tpchTable.getTableName()),
+                TpchTable.getTable(tpchTable.tableName()),
                 columns,
-                tpchTable.getScaleFactor(),
+                tpchTable.scaleFactor(),
                 tpchSplit.getPartNumber(),
                 tpchSplit.getTotalParts(),
-                tpchTable.getConstraint());
+                tpchTable.constraint());
     }
 
     public <E extends TpchEntity> RecordSet getRecordSet(
@@ -67,7 +75,7 @@ public class TpchRecordSetProvider
     {
         ImmutableList.Builder<TpchColumn<E>> builder = ImmutableList.builder();
         for (ColumnHandle column : columns) {
-            String columnName = ((TpchColumnHandle) column).getColumnName();
+            String columnName = ((TpchColumnHandle) column).columnName();
             if (columnName.equalsIgnoreCase(TpchMetadata.ROW_NUMBER_COLUMN_NAME)) {
                 builder.add(new RowNumberTpchColumn<>());
             }
@@ -103,7 +111,7 @@ public class TpchRecordSetProvider
         @Override
         public long getIdentifier(E entity)
         {
-            return entity.getRowNumber();
+            return entity.rowNumber();
         }
 
         @Override

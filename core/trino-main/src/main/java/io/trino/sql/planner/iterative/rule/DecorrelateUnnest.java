@@ -20,7 +20,11 @@ import io.trino.Session;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
 import io.trino.metadata.Metadata;
-import io.trino.metadata.ResolvedFunction;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.IsNull;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
@@ -31,9 +35,10 @@ import io.trino.sql.planner.optimizations.PlanNodeSearcher;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
 import io.trino.sql.planner.plan.FilterNode;
-import io.trino.sql.planner.plan.JoinNode.Type;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanVisitor;
@@ -42,40 +47,29 @@ import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.UnnestNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.planner.plan.WindowNode.Specification;
-import io.trino.sql.tree.Cast;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.GenericLiteral;
-import io.trino.sql.tree.IfExpression;
-import io.trino.sql.tree.IsNullPredicate;
-import io.trino.sql.tree.NullLiteral;
-import io.trino.sql.tree.QualifiedName;
-import io.trino.sql.tree.StringLiteral;
 
 import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.matching.Pattern.nonEmpty;
+import static io.trino.spi.StandardErrorCode.SUBQUERY_MULTIPLE_ROWS;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
-import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
+import static io.trino.sql.ir.Booleans.TRUE;
+import static io.trino.sql.ir.Comparison.Operator.GREATER_THAN;
+import static io.trino.sql.ir.Comparison.Operator.LESS_THAN_OR_EQUAL;
+import static io.trino.sql.ir.IrExpressions.ifExpression;
+import static io.trino.sql.planner.LogicalPlanner.failFunction;
 import static io.trino.sql.planner.iterative.rule.ImplementLimitWithTies.rewriteLimitWithTiesWithPartitioning;
 import static io.trino.sql.planner.iterative.rule.Util.restrictOutputs;
 import static io.trino.sql.planner.optimizations.QueryCardinalityUtil.isScalar;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
-import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
+import static io.trino.sql.planner.plan.JoinType.INNER;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.correlation;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.filter;
 import static io.trino.sql.planner.plan.Patterns.correlatedJoin;
 import static io.trino.sql.planner.plan.WindowNode.Frame.DEFAULT_FRAME;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.GREATER_THAN;
-import static io.trino.sql.tree.ComparisonExpression.Operator.LESS_THAN_OR_EQUAL;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -90,7 +84,7 @@ import static java.util.Objects.requireNonNull;
  * - UnnestNode in subquery is INNER or LEFT without filter
  * <p>
  * Transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin (INNER or LEFT) on true, correlation(c)
  *      - Input (a, c)
  *     [- EnforceSingleRow]
@@ -100,9 +94,10 @@ import static java.util.Objects.requireNonNull;
  *                          - Unnest INNER or LEFT
  *                               u <- unnest(c)
  *                               replicate: ()
- * </pre>
+ * }</pre>
  * Into:
  * <pre>
+ * {@code
  * - Project (restrict outputs)
  *     [- Project [*1]
  *        a <- a
@@ -119,10 +114,12 @@ import static java.util.Objects.requireNonNull;
  *                                      replicate: (a, c, unique)
  *                                         - AssignUniqueId (unique)
  *                                              - Input (a, c)
+ * }
+ *
  * [1] If UnnestNode is rewritten from INNER to LEFT, synthetic rows with nulls are added by the LEFT unnest at the bottom of the plan.
  *     In the correlated plan, they would be added in EnforceSingleRowNode or during join, that is near the root of the plan after all projections.
  *     This ProjectNode restores null values which might have been modified by projections. It uses ordinality symbol to distinguish between
- *     unnested rows and synthetic rows: `x <- IF(ordinality IS NULL, null, x)`
+ *     unnested rows and synthetic rows: {@code x <- IF(ordinality IS NULL, null, x)}
  * [2] If the original plan has EnforceSingleRowNode in the subquery, it has to be restored. EnforceSingleRowNode is responsible for:
  *     - adding a synthetic row of nulls where there are no rows,
  *     - checking that there is no more than 1 row.
@@ -152,8 +149,8 @@ public class DecorrelateUnnest
 {
     private static final Pattern<CorrelatedJoinNode> PATTERN = correlatedJoin()
             .with(nonEmpty(correlation()))
-            .with(filter().equalTo(TRUE_LITERAL))
-            .matching(node -> node.getType() == CorrelatedJoinNode.Type.INNER || node.getType() == CorrelatedJoinNode.Type.LEFT);
+            .with(filter().equalTo(TRUE))
+            .matching(node -> node.getType() == JoinType.INNER || node.getType() == JoinType.LEFT);
 
     private final Metadata metadata;
 
@@ -175,28 +172,28 @@ public class DecorrelateUnnest
         PlanNode searchRoot = correlatedJoinNode.getSubquery();
 
         // 1. find EnforceSingleRowNode in the subquery
-        Optional<EnforceSingleRowNode> enforceSingleRow = PlanNodeSearcher.searchFrom(searchRoot, context.getLookup())
+        Optional<PlanNode> enforceSingleRow = PlanNodeSearcher.searchFrom(searchRoot, context.getLookup())
                 .where(EnforceSingleRowNode.class::isInstance)
                 .recurseOnlyWhen(planNode -> false)
                 .findFirst();
 
         if (enforceSingleRow.isPresent()) {
-            searchRoot = enforceSingleRow.get().getSource();
+            searchRoot = ((EnforceSingleRowNode) enforceSingleRow.get()).getSource();
         }
 
         // 2. find correlated UnnestNode in the subquery
-        Optional<UnnestNode> subqueryUnnest = PlanNodeSearcher.searchFrom(searchRoot, context.getLookup())
+        Optional<PlanNode> subqueryUnnest = PlanNodeSearcher.searchFrom(searchRoot, context.getLookup())
                 .where(node -> isSupportedUnnest(node, correlatedJoinNode.getCorrelation(), context.getLookup()))
                 .recurseOnlyWhen(node -> node instanceof ProjectNode ||
-                        (node instanceof LimitNode && ((LimitNode) node).getCount() > 0) ||
-                        (node instanceof TopNNode && ((TopNNode) node).getCount() > 0))
+                        (node instanceof LimitNode limitNode && limitNode.getCount() > 0) ||
+                        (node instanceof TopNNode topNNode && topNNode.getCount() > 0))
                 .findFirst();
 
         if (subqueryUnnest.isEmpty()) {
             return Result.empty();
         }
 
-        UnnestNode unnestNode = subqueryUnnest.get();
+        UnnestNode unnestNode = (UnnestNode) subqueryUnnest.get();
 
         // assign unique id to input rows
         Symbol uniqueSymbol = context.getSymbolAllocator().newSymbol("unique", BIGINT);
@@ -210,8 +207,7 @@ public class DecorrelateUnnest
         // Here, any underlying projection that was a source of the correlated UnnestNode, is appended as a source of the rewritten UnnestNode.
         // If the projection is not necessary for UnnestNode (i.e. it does not produce any unnest symbols), it should be pruned afterwards.
         PlanNode unnestSource = context.getLookup().resolve(unnestNode.getSource());
-        if (unnestSource instanceof ProjectNode) {
-            ProjectNode sourceProjection = (ProjectNode) unnestSource;
+        if (unnestSource instanceof ProjectNode sourceProjection) {
             input = new ProjectNode(
                     sourceProjection.getId(),
                     input,
@@ -222,8 +218,8 @@ public class DecorrelateUnnest
         }
 
         // determine join type for rewritten UnnestNode
-        Type unnestJoinType = LEFT;
-        if (enforceSingleRow.isEmpty() && correlatedJoinNode.getType() == CorrelatedJoinNode.Type.INNER && unnestNode.getJoinType() == INNER) {
+        JoinType unnestJoinType = LEFT;
+        if (enforceSingleRow.isEmpty() && correlatedJoinNode.getType() == JoinType.INNER && unnestNode.getJoinType() == INNER) {
             unnestJoinType = INNER;
         }
 
@@ -237,8 +233,7 @@ public class DecorrelateUnnest
                 input.getOutputSymbols(),
                 unnestNode.getMappings(),
                 Optional.of(ordinalitySymbol),
-                unnestJoinType,
-                Optional.empty());
+                unnestJoinType);
 
         // restore all nodes from the subquery
         PlanNode rewrittenPlan = Rewriter.rewriteNodeSequence(
@@ -267,9 +262,9 @@ public class DecorrelateUnnest
             for (Symbol subquerySymbol : correlatedJoinNode.getSubquery().getOutputSymbols()) {
                 assignments.put(
                         subquerySymbol,
-                        new IfExpression(
-                                new IsNullPredicate(ordinalitySymbol.toSymbolReference()),
-                                new Cast(new NullLiteral(), toSqlType(context.getSymbolAllocator().getTypes().get(subquerySymbol))),
+                        ifExpression(
+                                new IsNull(ordinalitySymbol.toSymbolReference()),
+                                new Constant(subquerySymbol.type(), null),
                                 subquerySymbol.toSymbolReference()));
             }
             rewrittenPlan = new ProjectNode(
@@ -292,11 +287,10 @@ public class DecorrelateUnnest
      */
     private static boolean isSupportedUnnest(PlanNode node, List<Symbol> correlation, Lookup lookup)
     {
-        if (!(node instanceof UnnestNode)) {
+        if (!(node instanceof UnnestNode unnestNode)) {
             return false;
         }
 
-        UnnestNode unnestNode = (UnnestNode) node;
         List<Symbol> unnestSymbols = unnestNode.getMappings().stream()
                 .map(UnnestNode.Mapping::getInput)
                 .collect(toImmutableList());
@@ -307,8 +301,7 @@ public class DecorrelateUnnest
         return isScalar(unnestNode.getSource(), lookup) &&
                 unnestNode.getReplicateSymbols().isEmpty() &&
                 basedOnCorrelation &&
-                (unnestNode.getJoinType() == INNER || unnestNode.getJoinType() == LEFT) &&
-                (unnestNode.getFilter().isEmpty() || unnestNode.getFilter().get().equals(TRUE_LITERAL));
+                (unnestNode.getJoinType() == INNER || unnestNode.getJoinType() == LEFT);
     }
 
     private static class Rewriter
@@ -410,18 +403,15 @@ public class DecorrelateUnnest
                         Optional.of(2),
                         Optional.empty());
             }
-            ResolvedFunction fail = metadata.resolveFunction(session, QualifiedName.of("fail"), fromTypes(VARCHAR));
-            Expression predicate = new IfExpression(
-                    new ComparisonExpression(
+            Expression predicate = ifExpression(
+                    new Comparison(
                             GREATER_THAN,
                             rowNumberSymbol.toSymbolReference(),
-                            new GenericLiteral("BIGINT", "1")),
+                            new Constant(BIGINT, 1L)),
                     new Cast(
-                            new FunctionCall(
-                                    fail.toQualifiedName(),
-                                    ImmutableList.of(new Cast(new StringLiteral("Scalar sub-query has returned multiple rows"), toSqlType(VARCHAR)))),
-                            toSqlType(BOOLEAN)),
-                    TRUE_LITERAL);
+                            failFunction(metadata, SUBQUERY_MULTIPLE_ROWS, "Scalar sub-query has returned multiple rows"),
+                            BOOLEAN),
+                    TRUE);
 
             return new RewriteResult(new FilterNode(idAllocator.getNextId(), sourceNode, predicate), Optional.of(rowNumberSymbol));
         }
@@ -460,7 +450,7 @@ public class DecorrelateUnnest
                     new FilterNode(
                             idAllocator.getNextId(),
                             sourceNode,
-                            new ComparisonExpression(LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new GenericLiteral("BIGINT", Long.toString(node.getCount())))),
+                            new Comparison(LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new Constant(BIGINT, node.getCount()))),
                     Optional.of(rowNumberSymbol));
         }
 
@@ -472,14 +462,16 @@ public class DecorrelateUnnest
             // Do not reuse source's rowNumberSymbol, because it might not follow the TopNNode's ordering.
             Symbol rowNumberSymbol = symbolAllocator.newSymbol("row_number", BIGINT);
             WindowNode.Function rowNumberFunction = new WindowNode.Function(
-                    metadata.resolveFunction(session, QualifiedName.of("row_number"), ImmutableList.of()),
+                    metadata.resolveBuiltinFunction("row_number", ImmutableList.of()),
                     ImmutableList.of(),
+                    Optional.empty(),
                     DEFAULT_FRAME,
+                    false,
                     false);
             WindowNode windowNode = new WindowNode(
                     idAllocator.getNextId(),
                     source.getPlan(),
-                    new Specification(ImmutableList.of(uniqueSymbol), Optional.of(node.getOrderingScheme())),
+                    new DataOrganizationSpecification(ImmutableList.of(uniqueSymbol), Optional.of(node.getOrderingScheme())),
                     ImmutableMap.of(rowNumberSymbol, rowNumberFunction),
                     Optional.empty(),
                     ImmutableSet.of(),
@@ -489,7 +481,7 @@ public class DecorrelateUnnest
                     new FilterNode(
                             idAllocator.getNextId(),
                             windowNode,
-                            new ComparisonExpression(LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new GenericLiteral("BIGINT", Long.toString(node.getCount())))),
+                            new Comparison(LESS_THAN_OR_EQUAL, rowNumberSymbol.toSymbolReference(), new Constant(BIGINT, node.getCount()))),
                     Optional.of(rowNumberSymbol));
         }
 

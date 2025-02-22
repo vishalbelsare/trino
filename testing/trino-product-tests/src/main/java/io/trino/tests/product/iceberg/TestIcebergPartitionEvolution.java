@@ -18,11 +18,11 @@ import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
 import static io.trino.tests.product.TestGroups.ICEBERG;
 import static io.trino.tests.product.TestGroups.PROFILE_SPECIFIC_TESTS;
 import static io.trino.tests.product.utils.QueryExecutors.onSpark;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestIcebergPartitionEvolution
         extends ProductTest
@@ -32,7 +32,7 @@ public class TestIcebergPartitionEvolution
     {
         onTrino().executeQuery("USE iceberg.default");
         onTrino().executeQuery("DROP TABLE IF EXISTS test_dropped_partition_field");
-        onTrino().executeQuery("CREATE TABLE test_dropped_partition_field(a varchar, b varchar, c varchar) WITH (partitioning = ARRAY['a','b'])");
+        onTrino().executeQuery("CREATE TABLE test_dropped_partition_field(a varchar, b varchar, c varchar) WITH (format_version = 1, partitioning = ARRAY['a','b'])");
         onTrino().executeQuery("INSERT INTO test_dropped_partition_field VALUES " +
                 "('one', 'small', 'snake')," +
                 "('one', 'small', 'rabbit')," +
@@ -43,17 +43,20 @@ public class TestIcebergPartitionEvolution
 
         onSpark().executeQuery("ALTER TABLE iceberg_test.default.test_dropped_partition_field DROP PARTITION FIELD " + (dropFirst ? "a" : "b"));
 
-        assertThat(onTrino().executeQuery("SHOW CREATE TABLE test_dropped_partition_field"))
-                .containsOnly(
-                        row("CREATE TABLE iceberg.default.test_dropped_partition_field (\n" +
+        assertThat((String) onTrino().executeQuery("SHOW CREATE TABLE test_dropped_partition_field").getOnlyValue())
+                .matches(
+                        "\\QCREATE TABLE iceberg.default.test_dropped_partition_field (\n" +
                                 "   a varchar,\n" +
                                 "   b varchar,\n" +
                                 "   c varchar\n" +
                                 ")\n" +
                                 "WITH (\n" +
-                                "   format = 'ORC',\n" +
+                                "   format = 'PARQUET',\n" +
+                                "   format_version = 1,\n" +
+                                "   location = 'hdfs://hadoop-master:9000/user/hive/warehouse/test_dropped_partition_field-\\E.*\\Q',\n" +
+                                "   max_commit_retry = 4,\n" +
                                 "   partitioning = ARRAY[" + (dropFirst ? "'void(a)','b'" : "'a','void(b)'") + "]\n" +
-                                ")"));
+                                ")\\E");
 
         assertThat(onTrino().executeQuery("SELECT * FROM test_dropped_partition_field"))
                 .containsOnly(
@@ -66,9 +69,9 @@ public class TestIcebergPartitionEvolution
 
         assertThat(onTrino().executeQuery("SHOW STATS FOR test_dropped_partition_field"))
                 .containsOnly(
-                        row("a", null, null, 1. / 6, null, null, null),
-                        row("b", null, null, 1. / 6, null, null, null),
-                        row("c", null, null, 0., null, null, null),
+                        row("a", 599.0, 3.0, 1. / 6, null, null, null),
+                        row("b", 602.0, 3.0, 1. / 6, null, null, null),
+                        row("c", 585.0, 4.0, 0., null, null, null),
                         row(null, null, null, null, 6., null, null));
 
         assertThat(onTrino().executeQuery("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'test_dropped_partition_field$partitions'"))
@@ -79,8 +82,8 @@ public class TestIcebergPartitionEvolution
                         row("total_size", "bigint"),
                         row("data", "row(" +
                                 // A/B is now partitioning column in the first partitioning spec, and non-partitioning in new one
-                                (dropFirst ? "a" : "b") + " row(min varchar, max varchar, null_count bigint), " +
-                                "c row(min varchar, max varchar, null_count bigint))"));
+                                (dropFirst ? "a" : "b") + " row(min varchar, max varchar, null_count bigint, nan_count bigint), " +
+                                "c row(min varchar, max varchar, null_count bigint, nan_count bigint))"));
         assertThat(onTrino().executeQuery("SELECT partition, record_count, file_count, data FROM \"test_dropped_partition_field$partitions\""))
                 .containsOnly(
                         row(
@@ -91,7 +94,7 @@ public class TestIcebergPartitionEvolution
                                         .addField(
                                                 dropFirst ? "a" : "b",
                                                 dropFirst ? singletonMetrics("one") : singletonMetrics("small"))
-                                        .addField("c", dataMetrics("rabbit", "snake", 0))
+                                        .addField("c", dataMetrics("rabbit", "snake", 0, null))
                                         .build()),
                         row(
                                 rowBuilder().addField("a", "one").addField("b", "big").build(),
@@ -128,7 +131,7 @@ public class TestIcebergPartitionEvolution
                                 1L,
                                 1L,
                                 rowBuilder()
-                                        .addField(dropFirst ? "a" : "b", dataMetrics(null, null, 1))
+                                        .addField(dropFirst ? "a" : "b", dataMetrics(null, null, 1, null))
                                         .addField("c", singletonMetrics("nothing"))
                                         .build()));
 
@@ -152,15 +155,16 @@ public class TestIcebergPartitionEvolution
 
     private static io.trino.jdbc.Row singletonMetrics(Object value)
     {
-        return dataMetrics(value, value, 0);
+        return dataMetrics(value, value, 0, null);
     }
 
-    private static io.trino.jdbc.Row dataMetrics(Object min, Object max, long nullCount)
+    private static io.trino.jdbc.Row dataMetrics(Object min, Object max, long nullCount, Long nanCount)
     {
         return rowBuilder()
                 .addField("min", min)
                 .addField("max", max)
                 .addField("null_count", nullCount)
+                .addField("nan_count", nanCount)
                 .build();
     }
 

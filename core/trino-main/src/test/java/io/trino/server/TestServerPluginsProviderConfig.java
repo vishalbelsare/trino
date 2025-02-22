@@ -14,7 +14,7 @@
 package io.trino.server;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.util.Map;
@@ -35,9 +35,7 @@ public class TestServerPluginsProviderConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("plugin.dir", "plugins-dir")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("plugin.dir", "plugins-dir");
 
         ServerPluginsProviderConfig expected = new ServerPluginsProviderConfig()
                 .setInstalledPluginsDir(new File("plugins-dir"));

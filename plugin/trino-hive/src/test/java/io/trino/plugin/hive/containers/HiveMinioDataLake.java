@@ -13,87 +13,93 @@
  */
 package io.trino.plugin.hive.containers;
 
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
-import com.amazonaws.client.builder.AwsClientBuilder;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.google.common.collect.ImmutableMap;
-import io.trino.util.AutoCloseableCloser;
+import io.trino.plugin.base.util.AutoCloseableCloser;
+import io.trino.testing.containers.Minio;
+import io.trino.testing.minio.MinioClient;
 import org.testcontainers.containers.Network;
 
-import java.util.Map;
+import java.net.URI;
+import java.util.List;
 
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.plugin.hive.containers.HiveMinioDataLake.State.INITIAL;
+import static io.trino.plugin.hive.containers.HiveMinioDataLake.State.STARTED;
+import static io.trino.plugin.hive.containers.HiveMinioDataLake.State.STARTING;
+import static io.trino.plugin.hive.containers.HiveMinioDataLake.State.STOPPED;
+import static io.trino.testing.containers.Minio.MINIO_ACCESS_KEY;
+import static io.trino.testing.containers.Minio.MINIO_SECRET_KEY;
 import static java.util.Objects.requireNonNull;
 import static org.testcontainers.containers.Network.newNetwork;
 
-public class HiveMinioDataLake
+public abstract class HiveMinioDataLake
         implements AutoCloseable
 {
-    public static final String ACCESS_KEY = "accesskey";
-    public static final String SECRET_KEY = "secretkey";
+    private static final String MINIO_DEFAULT_REGION = "us-east-1";
 
     private final String bucketName;
     private final Minio minio;
-    private final HiveHadoop hiveHadoop;
+    private MinioClient minioClient;
 
-    private final AutoCloseableCloser closer = AutoCloseableCloser.create();
+    protected final AutoCloseableCloser closer = AutoCloseableCloser.create();
+    protected final Network network;
+    protected State state = INITIAL;
 
-    private State state = State.INITIAL;
-
-    public HiveMinioDataLake(String bucketName, Map<String, String> hiveHadoopFilesToMount)
-    {
-        this(bucketName, hiveHadoopFilesToMount, HiveHadoop.DEFAULT_IMAGE);
-    }
-
-    public HiveMinioDataLake(String bucketName, Map<String, String> hiveHadoopFilesToMount, String hiveHadoopImage)
+    public HiveMinioDataLake(String bucketName)
     {
         this.bucketName = requireNonNull(bucketName, "bucketName is null");
-        Network network = closer.register(newNetwork());
+        this.network = closer.register(newNetwork());
         this.minio = closer.register(
                 Minio.builder()
                         .withNetwork(network)
                         .withEnvVars(ImmutableMap.<String, String>builder()
-                                .put("MINIO_ACCESS_KEY", ACCESS_KEY)
-                                .put("MINIO_SECRET_KEY", SECRET_KEY)
-                                .build())
-                        .build());
-        this.hiveHadoop = closer.register(
-                HiveHadoop.builder()
-                        .withFilesToMount(ImmutableMap.<String, String>builder()
-                                .put("hive_s3_insert_overwrite/hive-core-site.xml", "/etc/hadoop/conf/core-site.xml")
-                                .putAll(hiveHadoopFilesToMount)
-                                .build())
-                        .withImage(hiveHadoopImage)
-                        .withNetwork(network)
+                                .put("MINIO_ACCESS_KEY", MINIO_ACCESS_KEY)
+                                .put("MINIO_SECRET_KEY", MINIO_SECRET_KEY)
+                                .put("MINIO_REGION", MINIO_DEFAULT_REGION)
+                                .buildOrThrow())
                         .build());
     }
 
     public void start()
     {
-        checkState(state == State.INITIAL, "Already started: %s", state);
-        state = State.STARTING;
+        checkState(state == INITIAL, "Already started: %s", state);
+        state = STARTING;
         minio.start();
-        hiveHadoop.start();
-        AmazonS3 s3Client = AmazonS3ClientBuilder
-                .standard()
-                .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(
-                        "http://localhost:" + minio.getMinioApiEndpoint().getPort(),
-                        "us-east-1"))
-                .withPathStyleAccessEnabled(true)
-                .withCredentials(new AWSStaticCredentialsProvider(
-                        new BasicAWSCredentials(ACCESS_KEY, SECRET_KEY)))
-                .build();
-        s3Client.createBucket(this.bucketName);
-        state = State.STARTED;
+        minioClient = closer.register(minio.createMinioClient());
+        minio.createBucket(bucketName);
     }
 
     public void stop()
             throws Exception
     {
         closer.close();
-        state = State.STOPPED;
+        state = STOPPED;
+    }
+
+    public Network getNetwork()
+    {
+        return network;
+    }
+
+    public MinioClient getMinioClient()
+    {
+        checkState(state == STARTED, "Can't provide client when MinIO state is: %s", state);
+        return minioClient;
+    }
+
+    public void copyResources(String resourcePath, String target)
+    {
+        minio.copyResources(resourcePath, bucketName, target);
+    }
+
+    public void writeFile(byte[] contents, String target)
+    {
+        minio.writeFile(contents, bucketName, target);
+    }
+
+    public List<String> listFiles(String targetDirectory)
+    {
+        return getMinioClient().listObjects(getBucketName(), targetDirectory);
     }
 
     public Minio getMinio()
@@ -101,9 +107,15 @@ public class HiveMinioDataLake
         return minio;
     }
 
-    public HiveHadoop getHiveHadoop()
+    public abstract String runOnHive(String sql);
+
+    public abstract HiveHadoop getHiveHadoop();
+
+    public abstract URI getHiveMetastoreEndpoint();
+
+    public String getBucketName()
     {
-        return hiveHadoop;
+        return bucketName;
     }
 
     @Override
@@ -113,7 +125,7 @@ public class HiveMinioDataLake
         stop();
     }
 
-    private enum State
+    protected enum State
     {
         INITIAL,
         STARTING,

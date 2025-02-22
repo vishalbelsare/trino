@@ -14,15 +14,13 @@
 package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.BoundSignature;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
 import io.trino.metadata.SqlScalarFunction;
-import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.SingleMapBlock;
+import io.trino.spi.block.BufferedMapValueBuilder;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionMetadata;
+import io.trino.spi.function.Signature;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
@@ -31,9 +29,6 @@ import io.trino.sql.gen.lambda.LambdaFunctionInterface;
 import java.lang.invoke.MethodHandle;
 import java.util.Optional;
 
-import static com.google.common.base.Throwables.throwIfUnchecked;
-import static io.trino.metadata.FunctionKind.SCALAR;
-import static io.trino.metadata.Signature.typeVariable;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.FUNCTION;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
@@ -48,37 +43,34 @@ public final class MapZipWithFunction
 {
     public static final MapZipWithFunction MAP_ZIP_WITH_FUNCTION = new MapZipWithFunction();
 
-    private static final MethodHandle METHOD_HANDLE = methodHandle(MapZipWithFunction.class, "mapZipWith", Type.class, Type.class, Type.class, MapType.class, Object.class, Block.class, Block.class, MapZipWithLambda.class);
+    private static final MethodHandle METHOD_HANDLE = methodHandle(MapZipWithFunction.class, "mapZipWith", Type.class, Type.class, Type.class, MapType.class, Object.class, SqlMap.class, SqlMap.class, MapZipWithLambda.class);
     private static final MethodHandle STATE_FACTORY = methodHandle(MapZipWithFunction.class, "createState", MapType.class);
 
     private MapZipWithFunction()
     {
-        super(new FunctionMetadata(
-                new Signature(
-                        "map_zip_with",
-                        ImmutableList.of(typeVariable("K"), typeVariable("V1"), typeVariable("V2"), typeVariable("V3")),
-                        ImmutableList.of(),
-                        mapType(new TypeSignature("K"), new TypeSignature("V3")),
-                        ImmutableList.of(
-                                mapType(new TypeSignature("K"), new TypeSignature("V1")),
-                                mapType(new TypeSignature("K"), new TypeSignature("V2")),
-                                functionType(new TypeSignature("K"), new TypeSignature("V1"), new TypeSignature("V2"), new TypeSignature("V3"))),
-                        false),
-                new FunctionNullability(false, ImmutableList.of(false, false, false)),
-                false,
-                false,
-                "Merge two maps into a single map by applying the lambda function to the pair of values with the same key",
-                SCALAR));
+        super(FunctionMetadata.scalarBuilder("map_zip_with")
+                .signature(Signature.builder()
+                        .typeVariable("K")
+                        .typeVariable("V1")
+                        .typeVariable("V2")
+                        .typeVariable("V3")
+                        .returnType(mapType(new TypeSignature("K"), new TypeSignature("V3")))
+                        .argumentType(mapType(new TypeSignature("K"), new TypeSignature("V1")))
+                        .argumentType(mapType(new TypeSignature("K"), new TypeSignature("V2")))
+                        .argumentType(functionType(new TypeSignature("K"), new TypeSignature("V1"), new TypeSignature("V2"), new TypeSignature("V3")))
+                        .build())
+                .description("Merge two maps into a single map by applying the lambda function to the pair of values with the same key")
+                .build());
     }
 
     @Override
-    protected ScalarFunctionImplementation specialize(BoundSignature boundSignature)
+    protected SpecializedSqlScalarFunction specialize(BoundSignature boundSignature)
     {
         MapType outputMapType = (MapType) boundSignature.getReturnType();
         Type keyType = outputMapType.getKeyType();
         Type inputValueType1 = ((MapType) boundSignature.getArgumentType(0)).getValueType();
         Type inputValueType2 = ((MapType) boundSignature.getArgumentType(1)).getValueType();
-        return new ChoicesScalarFunctionImplementation(
+        return new ChoicesSpecializedSqlScalarFunction(
                 boundSignature,
                 FAIL_ON_NULL,
                 ImmutableList.of(NEVER_NULL, NEVER_NULL, FUNCTION),
@@ -89,87 +81,66 @@ public final class MapZipWithFunction
 
     public static Object createState(MapType mapType)
     {
-        return new PageBuilder(ImmutableList.of(mapType));
+        return BufferedMapValueBuilder.createBuffered(mapType);
     }
 
-    public static Block mapZipWith(
+    public static SqlMap mapZipWith(
             Type keyType,
             Type leftValueType,
             Type rightValueType,
             MapType outputMapType,
             Object state,
-            Block leftBlock,
-            Block rightBlock,
+            SqlMap leftMap,
+            SqlMap rightMap,
             MapZipWithLambda function)
     {
-        SingleMapBlock leftMapBlock = (SingleMapBlock) leftBlock;
-        SingleMapBlock rightMapBlock = (SingleMapBlock) rightBlock;
         Type outputValueType = outputMapType.getValueType();
 
-        PageBuilder pageBuilder = (PageBuilder) state;
-        if (pageBuilder.isFull()) {
-            pageBuilder.reset();
-        }
-        BlockBuilder mapBlockBuilder = pageBuilder.getBlockBuilder(0);
-        BlockBuilder blockBuilder = mapBlockBuilder.beginBlockEntry();
+        int leftSize = leftMap.getSize();
+        int leftRawOffset = leftMap.getRawOffset();
+        Block leftRawKeyBlock = leftMap.getRawKeyBlock();
+        Block leftRawValueBlock = leftMap.getRawValueBlock();
 
-        // seekKey() can take non-trivial time when key is complicated value, such as a long VARCHAR or ROW.
-        boolean[] keyFound = new boolean[rightMapBlock.getPositionCount()];
-        for (int leftKeyPosition = 0; leftKeyPosition < leftMapBlock.getPositionCount(); leftKeyPosition += 2) {
-            Object key = readNativeValue(keyType, leftMapBlock, leftKeyPosition);
-            Object leftValue = readNativeValue(leftValueType, leftMapBlock, leftKeyPosition + 1);
+        int rightSize = rightMap.getSize();
+        int rightRawOffset = rightMap.getRawOffset();
+        Block rightRawKeyBlock = rightMap.getRawKeyBlock();
+        Block rightRawValueBlock = rightMap.getRawValueBlock();
 
-            int rightValuePosition = rightMapBlock.seekKey(key);
-            Object rightValue = null;
-            if (rightValuePosition != -1) {
-                rightValue = readNativeValue(rightValueType, rightMapBlock, rightValuePosition);
-                keyFound[rightValuePosition / 2] = true;
-            }
+        int maxOutputSize = (leftSize + rightSize);
+        BufferedMapValueBuilder mapValueBuilder = (BufferedMapValueBuilder) state;
+        return mapValueBuilder.build(maxOutputSize, (keyBuilder, valueBuilder) -> {
+            // seekKey() can take non-trivial time when key is a complicated value, such as a long VARCHAR or ROW.
+            boolean[] keyFound = new boolean[rightSize];
+            for (int leftIndex = 0; leftIndex < leftSize; leftIndex++) {
+                Object key = readNativeValue(keyType, leftRawKeyBlock, leftRawOffset + leftIndex);
+                Object leftValue = readNativeValue(leftValueType, leftRawValueBlock, leftRawOffset + leftIndex);
 
-            Object outputValue;
-            try {
-                outputValue = function.apply(key, leftValue, rightValue);
-            }
-            catch (Throwable throwable) {
-                // Restore pageBuilder into a consistent state.
-                mapBlockBuilder.closeEntry();
-                pageBuilder.declarePosition();
-
-                throwIfUnchecked(throwable);
-                throw new RuntimeException(throwable);
-            }
-
-            keyType.appendTo(leftMapBlock, leftKeyPosition, blockBuilder);
-            writeNativeValue(outputValueType, blockBuilder, outputValue);
-        }
-
-        // iterate over keys that only exists in rightMapBlock
-        for (int rightKeyPosition = 0; rightKeyPosition < rightMapBlock.getPositionCount(); rightKeyPosition += 2) {
-            if (!keyFound[rightKeyPosition / 2]) {
-                Object key = readNativeValue(keyType, rightMapBlock, rightKeyPosition);
-                Object rightValue = readNativeValue(rightValueType, rightMapBlock, rightKeyPosition + 1);
-
-                Object outputValue;
-                try {
-                    outputValue = function.apply(key, null, rightValue);
-                }
-                catch (Throwable throwable) {
-                    // Restore pageBuilder into a consistent state.
-                    mapBlockBuilder.closeEntry();
-                    pageBuilder.declarePosition();
-
-                    throwIfUnchecked(throwable);
-                    throw new RuntimeException(throwable);
+                int rightIndex = rightMap.seekKey(key);
+                Object rightValue = null;
+                if (rightIndex != -1) {
+                    rightValue = readNativeValue(rightValueType, rightRawValueBlock, rightRawOffset + rightIndex);
+                    keyFound[rightIndex] = true;
                 }
 
-                keyType.appendTo(rightMapBlock, rightKeyPosition, blockBuilder);
-                writeNativeValue(outputValueType, blockBuilder, outputValue);
-            }
-        }
+                Object outputValue = function.apply(key, leftValue, rightValue);
 
-        mapBlockBuilder.closeEntry();
-        pageBuilder.declarePosition();
-        return outputMapType.getObject(mapBlockBuilder, mapBlockBuilder.getPositionCount() - 1);
+                keyType.appendTo(leftRawKeyBlock, leftRawOffset + leftIndex, keyBuilder);
+                writeNativeValue(outputValueType, valueBuilder, outputValue);
+            }
+
+            // iterate over keys that only exists in rightMap
+            for (int rightIndex = 0; rightIndex < rightSize; rightIndex++) {
+                if (!keyFound[rightIndex]) {
+                    Object key = readNativeValue(keyType, rightRawKeyBlock, rightRawOffset + rightIndex);
+                    Object rightValue = readNativeValue(rightValueType, rightRawValueBlock, rightRawOffset + rightIndex);
+
+                    Object outputValue = function.apply(key, null, rightValue);
+
+                    keyType.appendTo(rightRawKeyBlock, rightRawOffset + rightIndex, keyBuilder);
+                    writeNativeValue(outputValueType, valueBuilder, outputValue);
+                }
+            }
+        });
     }
 
     @FunctionalInterface

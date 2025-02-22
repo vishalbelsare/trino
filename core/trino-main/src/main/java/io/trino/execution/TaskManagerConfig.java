@@ -23,39 +23,45 @@ import io.airlift.units.Duration;
 import io.airlift.units.MaxDuration;
 import io.airlift.units.MinDuration;
 import io.trino.util.PowerOfTwo;
-
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 
 import java.math.BigDecimal;
 import java.util.concurrent.TimeUnit;
 
 import static io.trino.util.MachineInfo.getAvailablePhysicalProcessorCount;
 import static it.unimi.dsi.fastutil.HashCommon.nextPowerOfTwo;
-import static java.lang.Math.min;
+import static java.lang.Math.clamp;
+import static java.math.BigDecimal.TWO;
 
 @DefunctConfig({
         "experimental.big-query-max-task-memory",
-        "task.max-memory",
+        "sink.new-implementation",
         "task.http-notification-threads",
         "task.info-refresh-max-wait",
-        "task.operator-pre-allocated-memory",
-        "sink.new-implementation",
         "task.legacy-scheduling-behavior",
-        "task.level-absolute-priority"})
+        "task.level-absolute-priority",
+        "task.max-memory",
+        "task.operator-pre-allocated-memory",
+        "task.shard.max-threads",
+        "task.verbose-stats",
+})
 public class TaskManagerConfig
 {
+    public static final int MAX_WRITER_COUNT = 64;
+
+    private boolean threadPerDriverSchedulerEnabled = true;
     private boolean perOperatorCpuTimerEnabled = true;
     private boolean taskCpuTimerEnabled = true;
     private boolean statisticsCpuTimerEnabled = true;
     private DataSize maxPartialAggregationMemoryUsage = DataSize.of(16, Unit.MEGABYTE);
     private DataSize maxPartialTopNMemory = DataSize.of(16, Unit.MEGABYTE);
-    private DataSize maxLocalExchangeBufferSize = DataSize.of(32, Unit.MEGABYTE);
+    private DataSize maxLocalExchangeBufferSize = DataSize.of(128, Unit.MEGABYTE);
     private DataSize maxIndexMemoryUsage = DataSize.of(64, Unit.MEGABYTE);
     private boolean shareIndexLoading;
     private int maxWorkerThreads = Runtime.getRuntime().availableProcessors() * 2;
     private Integer minDrivers;
-    private Integer initialSplitsPerNode;
+    private int initialSplitsPerNode = maxWorkerThreads;
     private int minDriversPerTask = 3;
     private int maxDriversPerTask = Integer.MAX_VALUE;
     private Duration splitConcurrencyAdjustmentInterval = new Duration(100, TimeUnit.MILLISECONDS);
@@ -63,26 +69,60 @@ public class TaskManagerConfig
     private DataSize sinkMaxBufferSize = DataSize.of(32, Unit.MEGABYTE);
     private DataSize sinkMaxBroadcastBufferSize = DataSize.of(200, Unit.MEGABYTE);
     private DataSize maxPagePartitioningBufferSize = DataSize.of(32, Unit.MEGABYTE);
+    private int pagePartitioningBufferPoolSize = 8;
 
     private Duration clientTimeout = new Duration(2, TimeUnit.MINUTES);
-    private Duration infoMaxAge = new Duration(15, TimeUnit.MINUTES);
+    private Duration infoMaxAge = new Duration(5, TimeUnit.MINUTES);
 
     private Duration statusRefreshMaxWait = new Duration(1, TimeUnit.SECONDS);
     private Duration infoUpdateInterval = new Duration(3, TimeUnit.SECONDS);
+    private Duration taskTerminationTimeout = new Duration(1, TimeUnit.MINUTES);
 
-    private int writerCount = 1;
-    // cap task concurrency to 32 in order to avoid small pages produced by local partitioning exchanges
-    private int taskConcurrency = min(nextPowerOfTwo(getAvailablePhysicalProcessorCount()), 32);
+    private boolean interruptStuckSplitTasksEnabled = true;
+    private Duration interruptStuckSplitTasksWarningThreshold = new Duration(10, TimeUnit.MINUTES);
+    private Duration interruptStuckSplitTasksTimeout = new Duration(15, TimeUnit.MINUTES);
+    private Duration interruptStuckSplitTasksDetectionInterval = new Duration(2, TimeUnit.MINUTES);
+
+    private boolean scaleWritersEnabled = true;
+    private int minWriterCount = 1;
+    // Set the value of default max writer count to the number of processors * 2 and cap it to 64. It should be
+    // above 1, otherwise it can create a plan with a single gather exchange node on the coordinator due to a single
+    // available processor. Whereas, on the worker nodes due to more available processors, the default value could
+    // be above 1. Therefore, it can cause error due to config mismatch during execution. Additionally, cap
+    // it to 64 in order to avoid small pages produced by local partitioning exchanges.
+    private int maxWriterCount = clamp(nextPowerOfTwo(getAvailablePhysicalProcessorCount() * 2), 2, MAX_WRITER_COUNT);
+    // Default value of task concurrency should be above 1, otherwise it can create a plan with a single gather
+    // exchange node on the coordinator due to a single available processor. Whereas, on the worker nodes due to
+    // more available processors, the default value could be above 1. Therefore, it can cause error due to config
+    // mismatch during execution. Additionally, cap it to 32 in order to avoid small pages produced by local
+    // partitioning exchanges.
+    /**
+     * default value is overwritten for fault tolerant execution in {@link #applyFaultTolerantExecutionDefaults()}}
+     */
+    private int taskConcurrency = clamp(nextPowerOfTwo(getAvailablePhysicalProcessorCount()), 2, 32);
     private int httpResponseThreads = 100;
     private int httpTimeoutThreads = 3;
 
     private int taskNotificationThreads = 5;
     private int taskYieldThreads = 3;
+    private int driverTimeoutThreads = 5;
 
-    private BigDecimal levelTimeMultiplier = new BigDecimal(2.0);
+    private BigDecimal levelTimeMultiplier = TWO;
+
+    @Config("experimental.thread-per-driver-scheduler-enabled")
+    public TaskManagerConfig setThreadPerDriverSchedulerEnabled(boolean enabled)
+    {
+        this.threadPerDriverSchedulerEnabled = enabled;
+        return this;
+    }
+
+    public boolean isThreadPerDriverSchedulerEnabled()
+    {
+        return threadPerDriverSchedulerEnabled;
+    }
 
     @MinDuration("1ms")
-    @MaxDuration("10s")
+    @MaxDuration("60s")
     @NotNull
     public Duration getStatusRefreshMaxWait()
     {
@@ -112,12 +152,26 @@ public class TaskManagerConfig
         return this;
     }
 
+    @MinDuration("1ms")
+    @NotNull
+    public Duration getTaskTerminationTimeout()
+    {
+        return taskTerminationTimeout;
+    }
+
+    @Config("task.termination-timeout")
+    @ConfigDescription("Maximum duration to wait for a task to complete termination before failing the task on the coordinator")
+    public TaskManagerConfig setTaskTerminationTimeout(Duration taskTerminationTimeout)
+    {
+        this.taskTerminationTimeout = taskTerminationTimeout;
+        return this;
+    }
+
     public boolean isPerOperatorCpuTimerEnabled()
     {
         return perOperatorCpuTimerEnabled;
     }
 
-    @LegacyConfig("task.verbose-stats")
     @Config("task.per-operator-cpu-timer-enabled")
     public TaskManagerConfig setPerOperatorCpuTimerEnabled(boolean perOperatorCpuTimerEnabled)
     {
@@ -201,7 +255,6 @@ public class TaskManagerConfig
         return this;
     }
 
-    @NotNull
     public boolean isShareIndexLoading()
     {
         return shareIndexLoading;
@@ -234,20 +287,16 @@ public class TaskManagerConfig
         return maxWorkerThreads;
     }
 
-    @LegacyConfig("task.shard.max-threads")
     @Config("task.max-worker-threads")
-    public TaskManagerConfig setMaxWorkerThreads(int maxWorkerThreads)
+    public TaskManagerConfig setMaxWorkerThreads(String maxWorkerThreads)
     {
-        this.maxWorkerThreads = maxWorkerThreads;
+        this.maxWorkerThreads = ThreadCountParser.DEFAULT.parse(maxWorkerThreads);
         return this;
     }
 
     @Min(1)
     public int getInitialSplitsPerNode()
     {
-        if (initialSplitsPerNode == null) {
-            return maxWorkerThreads;
-        }
         return initialSplitsPerNode;
     }
 
@@ -353,6 +402,20 @@ public class TaskManagerConfig
         return this;
     }
 
+    @Min(0)
+    public int getPagePartitioningBufferPoolSize()
+    {
+        return pagePartitioningBufferPoolSize;
+    }
+
+    @Config("driver.page-partitioning-buffer-pool-size")
+    @ConfigDescription("Maximum number of free buffers in the per task partitioned page buffer pool. Setting this to zero effectively disables the pool")
+    public TaskManagerConfig setPagePartitioningBufferPoolSize(int pagePartitioningBufferPoolSize)
+    {
+        this.pagePartitioningBufferPoolSize = pagePartitioningBufferPoolSize;
+        return this;
+    }
+
     @MinDuration("5s")
     @NotNull
     public Duration getClientTimeout()
@@ -380,18 +443,63 @@ public class TaskManagerConfig
         return this;
     }
 
-    @Min(1)
-    @PowerOfTwo
-    public int getWriterCount()
+    public boolean isScaleWritersEnabled()
     {
-        return writerCount;
+        return scaleWritersEnabled;
     }
 
-    @Config("task.writer-count")
-    @ConfigDescription("Number of writers per task")
-    public TaskManagerConfig setWriterCount(int writerCount)
+    @Config("task.scale-writers.enabled")
+    @ConfigDescription("Scale the number of concurrent table writers per task based on throughput")
+    public TaskManagerConfig setScaleWritersEnabled(boolean scaleWritersEnabled)
     {
-        this.writerCount = writerCount;
+        this.scaleWritersEnabled = scaleWritersEnabled;
+        return this;
+    }
+
+    @Deprecated
+    @LegacyConfig(value = "task.scale-writers.max-writer-count", replacedBy = "task.max-writer-count")
+    @ConfigDescription("Maximum number of writers per task up to which scaling will happen if task.scale-writers.enabled is set")
+    public TaskManagerConfig setScaleWritersMaxWriterCount(int scaleWritersMaxWriterCount)
+    {
+        this.maxWriterCount = scaleWritersMaxWriterCount;
+        return this;
+    }
+
+    @Min(1)
+    public int getMinWriterCount()
+    {
+        return minWriterCount;
+    }
+
+    @Config("task.min-writer-count")
+    @ConfigDescription("Minimum number of local parallel table writers per task when preferred partitioning and task writer scaling are not used")
+    public TaskManagerConfig setMinWriterCount(int minWriterCount)
+    {
+        this.minWriterCount = minWriterCount;
+        return this;
+    }
+
+    @Min(1)
+    @PowerOfTwo
+    public int getMaxWriterCount()
+    {
+        return maxWriterCount;
+    }
+
+    @Config("task.max-writer-count")
+    @ConfigDescription("Maximum number of local parallel table writers per task when either task writer scaling or preferred partitioning is used")
+    public TaskManagerConfig setMaxWriterCount(int maxWriterCount)
+    {
+        this.maxWriterCount = maxWriterCount;
+        return this;
+    }
+
+    @Deprecated
+    @LegacyConfig(value = "task.partitioned-writer-count", replacedBy = "task.max-writer-count")
+    @ConfigDescription("Number of local parallel table writers per task when prefer partitioning is used")
+    public TaskManagerConfig setPartitionedWriterCount(int partitionedWriterCount)
+    {
+        this.maxWriterCount = partitionedWriterCount;
         return this;
     }
 
@@ -417,9 +525,9 @@ public class TaskManagerConfig
     }
 
     @Config("task.http-response-threads")
-    public TaskManagerConfig setHttpResponseThreads(int httpResponseThreads)
+    public TaskManagerConfig setHttpResponseThreads(String httpResponseThreads)
     {
-        this.httpResponseThreads = httpResponseThreads;
+        this.httpResponseThreads = ThreadCountParser.DEFAULT.parse(httpResponseThreads);
         return this;
     }
 
@@ -430,9 +538,9 @@ public class TaskManagerConfig
     }
 
     @Config("task.http-timeout-threads")
-    public TaskManagerConfig setHttpTimeoutThreads(int httpTimeoutThreads)
+    public TaskManagerConfig setHttpTimeoutThreads(String httpTimeoutThreads)
     {
-        this.httpTimeoutThreads = httpTimeoutThreads;
+        this.httpTimeoutThreads = ThreadCountParser.DEFAULT.parse(httpTimeoutThreads);
         return this;
     }
 
@@ -444,9 +552,9 @@ public class TaskManagerConfig
 
     @Config("task.task-notification-threads")
     @ConfigDescription("Number of threads used for internal task event notifications")
-    public TaskManagerConfig setTaskNotificationThreads(int taskNotificationThreads)
+    public TaskManagerConfig setTaskNotificationThreads(String taskNotificationThreads)
     {
-        this.taskNotificationThreads = taskNotificationThreads;
+        this.taskNotificationThreads = ThreadCountParser.DEFAULT.parse(taskNotificationThreads);
         return this;
     }
 
@@ -458,9 +566,82 @@ public class TaskManagerConfig
 
     @Config("task.task-yield-threads")
     @ConfigDescription("Number of threads used for setting yield signals")
-    public TaskManagerConfig setTaskYieldThreads(int taskYieldThreads)
+    public TaskManagerConfig setTaskYieldThreads(String taskYieldThreads)
     {
-        this.taskYieldThreads = taskYieldThreads;
+        this.taskYieldThreads = ThreadCountParser.DEFAULT.parse(taskYieldThreads);
         return this;
+    }
+
+    @Min(1)
+    public int getDriverTimeoutThreads()
+    {
+        return driverTimeoutThreads;
+    }
+
+    @Config("task.driver-timeout-threads")
+    @ConfigDescription("Number of threads used for timing out blocked drivers if the timeout is set")
+    public TaskManagerConfig setDriverTimeoutThreads(String driverTimeoutThreads)
+    {
+        this.driverTimeoutThreads = ThreadCountParser.DEFAULT.parse(driverTimeoutThreads);
+        return this;
+    }
+
+    public boolean isInterruptStuckSplitTasksEnabled()
+    {
+        return interruptStuckSplitTasksEnabled;
+    }
+
+    @Config("task.interrupt-stuck-split-tasks-enabled")
+    public TaskManagerConfig setInterruptStuckSplitTasksEnabled(boolean interruptStuckSplitTasksEnabled)
+    {
+        this.interruptStuckSplitTasksEnabled = interruptStuckSplitTasksEnabled;
+        return this;
+    }
+
+    @MinDuration("1m")
+    public Duration getInterruptStuckSplitTasksWarningThreshold()
+    {
+        return interruptStuckSplitTasksWarningThreshold;
+    }
+
+    @Config("task.interrupt-stuck-split-tasks-warning-threshold")
+    @ConfigDescription("Print out call stacks and generate JMX metrics for splits running longer than the threshold")
+    public TaskManagerConfig setInterruptStuckSplitTasksWarningThreshold(Duration interruptStuckSplitTasksWarningThreshold)
+    {
+        this.interruptStuckSplitTasksWarningThreshold = interruptStuckSplitTasksWarningThreshold;
+        return this;
+    }
+
+    @MinDuration("3m")
+    public Duration getInterruptStuckSplitTasksTimeout()
+    {
+        return interruptStuckSplitTasksTimeout;
+    }
+
+    @Config("task.interrupt-stuck-split-tasks-timeout")
+    @ConfigDescription("Interrupt task processing thread after this timeout if the thread is stuck in certain external libraries used by Trino functions")
+    public TaskManagerConfig setInterruptStuckSplitTasksTimeout(Duration interruptStuckSplitTasksTimeout)
+    {
+        this.interruptStuckSplitTasksTimeout = interruptStuckSplitTasksTimeout;
+        return this;
+    }
+
+    @MinDuration("1m")
+    public Duration getInterruptStuckSplitTasksDetectionInterval()
+    {
+        return interruptStuckSplitTasksDetectionInterval;
+    }
+
+    @Config("task.interrupt-stuck-split-tasks-detection-interval")
+    @ConfigDescription("Interval between detecting stuck split")
+    public TaskManagerConfig setInterruptStuckSplitTasksDetectionInterval(Duration interruptStuckSplitTasksDetectionInterval)
+    {
+        this.interruptStuckSplitTasksDetectionInterval = interruptStuckSplitTasksDetectionInterval;
+        return this;
+    }
+
+    public void applyFaultTolerantExecutionDefaults()
+    {
+        taskConcurrency = 8;
     }
 }

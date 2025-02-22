@@ -14,11 +14,10 @@
 package io.trino.plugin.clickhouse;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.plugin.jdbc.TablePropertiesProvider;
 import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.type.ArrayType;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
@@ -31,9 +30,7 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Class contains all table properties for the Clickhouse connector. Used when creating a table:
- * <p>
  * <pre>CREATE TABLE foo (a VARCHAR , b INT) WITH (engine='Log');</pre>
- * </p>
  */
 public final class ClickHouseTableProperties
         implements TablePropertiesProvider

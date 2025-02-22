@@ -20,18 +20,20 @@ import com.google.common.io.Closer;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
-import io.airlift.slice.InputStreamSliceInput;
 import io.airlift.slice.OutputStreamSliceOutput;
+import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
-import io.trino.execution.buffer.PagesSerde;
+import io.trino.annotation.NotThreadSafe;
+import io.trino.execution.buffer.PageDeserializer;
+import io.trino.execution.buffer.PageSerializer;
+import io.trino.execution.buffer.PagesSerdeFactory;
 import io.trino.execution.buffer.PagesSerdeUtil;
-import io.trino.execution.buffer.SerializedPage;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.operator.SpillContext;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 
-import javax.annotation.concurrent.NotThreadSafe;
+import javax.crypto.SecretKey;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -45,7 +47,6 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
-import static io.trino.execution.buffer.PagesSerdeUtil.writeSerializedPage;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spiller.FileSingleStreamSpillerFactory.SPILL_FILE_PREFIX;
 import static io.trino.spiller.FileSingleStreamSpillerFactory.SPILL_FILE_SUFFIX;
@@ -61,7 +62,9 @@ public class FileSingleStreamSpiller
 
     private final FileHolder targetFile;
     private final Closer closer = Closer.create();
-    private final PagesSerde serde;
+    private final PagesSerdeFactory serdeFactory;
+    private volatile Optional<SecretKey> encryptionKey;
+    private final boolean encrypted;
     private final SpillerStats spillerStats;
     private final SpillContext localSpillContext;
     private final LocalMemoryContext memoryContext;
@@ -75,23 +78,22 @@ public class FileSingleStreamSpiller
     private final Runnable fileSystemErrorHandler;
 
     public FileSingleStreamSpiller(
-            PagesSerde serde,
+            PagesSerdeFactory serdeFactory,
+            Optional<SecretKey> encryptionKey,
             ListeningExecutorService executor,
             Path spillPath,
             SpillerStats spillerStats,
             SpillContext spillContext,
             LocalMemoryContext memoryContext,
-            Optional<SpillCipher> spillCipher,
             Runnable fileSystemErrorHandler)
     {
-        this.serde = requireNonNull(serde, "serde is null");
+        this.serdeFactory = requireNonNull(serdeFactory, "serdeFactory is null");
+        this.encryptionKey = requireNonNull(encryptionKey, "encryptionKey is null");
+        this.encrypted = encryptionKey.isPresent();
         this.executor = requireNonNull(executor, "executor is null");
         this.spillerStats = requireNonNull(spillerStats, "spillerStats is null");
         this.localSpillContext = spillContext.newLocalSpillContext();
         this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
-        if (requireNonNull(spillCipher, "spillCipher is null").isPresent()) {
-            closer.register(spillCipher.get()::close);
-        }
         // HACK!
         // The writePages() method is called in a separate thread pool and it's possible that
         // these spiller thread can run concurrently with the close() method.
@@ -144,16 +146,19 @@ public class FileSingleStreamSpiller
     private void writePages(Iterator<Page> pageIterator)
     {
         checkState(writable, "Spilling no longer allowed. The spiller has been made non-writable on first read for subsequent reads to be consistent");
-        try (SliceOutput output = new OutputStreamSliceOutput(targetFile.newOutputStream(APPEND), BUFFER_SIZE);
-                PagesSerde.PagesSerdeContext context = serde.newContext()) {
+
+        Optional<SecretKey> encryptionKey = this.encryptionKey;
+        checkState(encrypted == encryptionKey.isPresent(), "encryptionKey has been discarded");
+        PageSerializer serializer = serdeFactory.createSerializer(encryptionKey);
+        try (SliceOutput output = new OutputStreamSliceOutput(targetFile.newOutputStream(APPEND), BUFFER_SIZE)) {
             while (pageIterator.hasNext()) {
                 Page page = pageIterator.next();
                 spilledPagesInMemorySize += page.getSizeInBytes();
-                SerializedPage serializedPage = serde.serialize(context, page);
-                long pageSize = serializedPage.getSizeInBytes();
+                Slice serializedPage = serializer.serialize(page);
+                long pageSize = serializedPage.length();
                 localSpillContext.updateBytes(pageSize);
                 spillerStats.addToTotalSpilledBytes(pageSize);
-                writeSerializedPage(output, serializedPage);
+                output.writeBytes(serializedPage);
             }
         }
         catch (UncheckedIOException | IOException e) {
@@ -168,8 +173,13 @@ public class FileSingleStreamSpiller
         writable = false;
 
         try {
+            Optional<SecretKey> encryptionKey = this.encryptionKey;
+            checkState(encrypted == encryptionKey.isPresent(), "encryptionKey has been discarded");
+            PageDeserializer deserializer = serdeFactory.createDeserializer(encryptionKey);
+            // encryption key is safe to discard since it now belongs to the PageDeserializer and repeated reads are disallowed
+            this.encryptionKey = Optional.empty();
             InputStream input = closer.register(targetFile.newInputStream());
-            Iterator<Page> pages = PagesSerdeUtil.readPages(serde, new InputStreamSliceInput(input, BUFFER_SIZE));
+            Iterator<Page> pages = PagesSerdeUtil.readPages(deserializer, input);
             return closeWhenExhausted(pages, input);
         }
         catch (IOException e) {
@@ -181,6 +191,8 @@ public class FileSingleStreamSpiller
     @Override
     public void close()
     {
+        encryptionKey = Optional.empty();
+
         closer.register(localSpillContext);
         closer.register(() -> memoryContext.setBytes(0));
         try {

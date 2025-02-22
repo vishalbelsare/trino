@@ -15,6 +15,7 @@ package io.trino.plugin.jmx;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.inject.Inject;
 import io.trino.spi.NodeManager;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
@@ -23,12 +24,11 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
@@ -57,18 +57,18 @@ public class JmxSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         JmxTableHandle tableHandle = (JmxTableHandle) table;
 
         //TODO is there a better way to get the node column?
-        Optional<JmxColumnHandle> nodeColumnHandle = tableHandle.getColumnHandles().stream()
-                .filter(jmxColumnHandle -> jmxColumnHandle.getColumnName().equals(NODE_COLUMN_NAME))
+        Optional<JmxColumnHandle> nodeColumnHandle = tableHandle.columnHandles().stream()
+                .filter(jmxColumnHandle -> jmxColumnHandle.columnName().equals(NODE_COLUMN_NAME))
                 .findFirst();
         checkState(nodeColumnHandle.isPresent(), "Failed to find %s column", NODE_COLUMN_NAME);
 
-        TupleDomain<ColumnHandle> nodeFilter = tableHandle.getNodeFilter();
+        TupleDomain<ColumnHandle> nodeFilter = tableHandle.nodeFilter();
 
         List<ConnectorSplit> splits = nodeManager.getAllNodes().stream()
                 .filter(node -> {

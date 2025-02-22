@@ -13,6 +13,7 @@
  */
 package io.trino.execution.resourcegroups;
 
+import com.google.inject.Inject;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.resourcegroups.LegacyResourceGroupConfigurationManager.VoidContext;
 import io.trino.spi.resourcegroups.ResourceGroup;
@@ -20,8 +21,6 @@ import io.trino.spi.resourcegroups.ResourceGroupConfigurationManager;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.spi.resourcegroups.SelectionContext;
 import io.trino.spi.resourcegroups.SelectionCriteria;
-
-import javax.inject.Inject;
 
 import java.util.Optional;
 
@@ -68,4 +67,7 @@ public class LegacyResourceGroupConfigurationManager
                 context.getResourceGroupId().getParent().orElseThrow(() -> new IllegalArgumentException("Group has no parent group: " + context.getResourceGroupId())),
                 VoidContext.NONE);
     }
+
+    @Override
+    public void shutdown() {}
 }

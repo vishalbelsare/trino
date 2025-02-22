@@ -17,13 +17,12 @@ import com.google.common.collect.ImmutableList;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.ExpressionUtils;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.DomainTranslator.ExtractionResult;
 import io.trino.sql.planner.Symbol;
@@ -32,19 +31,18 @@ import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.ValuesNode;
-import io.trino.sql.tree.Expression;
 
 import java.util.Optional;
 import java.util.OptionalInt;
 
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.spi.predicate.Range.range;
-import static io.trino.sql.planner.DomainTranslator.fromPredicate;
+import static io.trino.sql.ir.Booleans.TRUE;
+import static io.trino.sql.ir.IrUtils.combineConjuncts;
 import static io.trino.sql.planner.plan.Patterns.filter;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.rowNumber;
 import static io.trino.sql.planner.plan.Patterns.source;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -55,19 +53,19 @@ import static java.util.Objects.requireNonNull;
  * TODO This rule should be removed as soon as RowNumberNode becomes capable of absorbing pruning projections (i.e. capable of pruning outputs).
  * <p>
  * Transforms:
- * <pre>
+ * <pre>{@code
  * - Filter (rowNumber <= 5 && a > 1)
  *     - Project (a, rowNumber)
  *         - RowNumber (maxRowCountPerPartition = 10)
  *             - source (a, b)
- * </pre>
+ * }</pre>
  * into:
- * <pre>
+ * <pre>{@code
  * - Filter (a > 1)
  *     - Project (a, rowNumber)
  *         - RowNumber (maxRowCountPerPartition = 5)
  *             - source (a, b)
- * </pre>
+ * }</pre>
  */
 public class PushPredicateThroughProjectIntoRowNumber
         implements Rule<FilterNode>
@@ -82,13 +80,13 @@ public class PushPredicateThroughProjectIntoRowNumber
                     .with(source().matching(rowNumber()
                             .capturedAs(ROW_NUMBER)))));
 
-    private final Metadata metadata;
-    private final TypeOperators typeOperators;
+    private final PlannerContext plannerContext;
+    private final DomainTranslator domainTranslator;
 
-    public PushPredicateThroughProjectIntoRowNumber(Metadata metadata, TypeOperators typeOperators)
+    public PushPredicateThroughProjectIntoRowNumber(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
+        this.domainTranslator = new DomainTranslator(plannerContext.getMetadata());
     }
 
     @Override
@@ -108,14 +106,17 @@ public class PushPredicateThroughProjectIntoRowNumber
             return Result.empty();
         }
 
-        ExtractionResult extractionResult = fromPredicate(metadata, typeOperators, context.getSession(), filter.getPredicate(), context.getSymbolAllocator().getTypes());
+        ExtractionResult extractionResult = DomainTranslator.getExtractionResult(
+                plannerContext,
+                context.getSession(),
+                filter.getPredicate());
         TupleDomain<Symbol> tupleDomain = extractionResult.getTupleDomain();
         OptionalInt upperBound = extractUpperBound(tupleDomain, rowNumberSymbol);
         if (upperBound.isEmpty()) {
             return Result.empty();
         }
         if (upperBound.getAsInt() <= 0) {
-            return Result.ofPlanNode(new ValuesNode(filter.getId(), filter.getOutputSymbols(), ImmutableList.of()));
+            return Result.ofPlanNode(new ValuesNode(filter.getId(), filter.getOutputSymbols()));
         }
         boolean updatedMaxRowCountPerPartition = false;
         if (rowNumber.getMaxRowCountPerPartition().isEmpty() || rowNumber.getMaxRowCountPerPartition().get() > upperBound.getAsInt()) {
@@ -138,11 +139,10 @@ public class PushPredicateThroughProjectIntoRowNumber
         }
         // Remove the row number domain because it is absorbed into the node
         TupleDomain<Symbol> newTupleDomain = tupleDomain.filter((symbol, domain) -> !symbol.equals(rowNumberSymbol));
-        Expression newPredicate = ExpressionUtils.combineConjuncts(
-                metadata,
+        Expression newPredicate = combineConjuncts(
                 extractionResult.getRemainingExpression(),
-                new DomainTranslator(context.getSession(), metadata).toPredicate(newTupleDomain));
-        if (newPredicate.equals(TRUE_LITERAL)) {
+                domainTranslator.toPredicate(newTupleDomain));
+        if (newPredicate.equals(TRUE)) {
             return Result.ofPlanNode(project);
         }
         return Result.ofPlanNode(new FilterNode(filter.getId(), project, newPredicate));

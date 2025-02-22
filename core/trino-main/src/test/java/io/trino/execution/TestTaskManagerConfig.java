@@ -16,7 +16,7 @@ package io.trino.execution;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.util.Map;
@@ -28,55 +28,69 @@ import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
 import static io.airlift.units.DataSize.Unit;
 import static io.trino.util.MachineInfo.getAvailablePhysicalProcessorCount;
 import static it.unimi.dsi.fastutil.HashCommon.nextPowerOfTwo;
-import static java.lang.Math.min;
+import static java.lang.Math.clamp;
 
 public class TestTaskManagerConfig
 {
-    private static final int DEFAULT_PROCESSOR_COUNT = min(nextPowerOfTwo(getAvailablePhysicalProcessorCount()), 32);
+    private static final int DEFAULT_PROCESSOR_COUNT = clamp(nextPowerOfTwo(getAvailablePhysicalProcessorCount()), 2, 32);
+    private static final int DEFAULT_MAX_WRITER_COUNT = clamp(nextPowerOfTwo(getAvailablePhysicalProcessorCount() * 2), 2, 64);
 
     @Test
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(TaskManagerConfig.class)
+                .setThreadPerDriverSchedulerEnabled(true)
                 .setInitialSplitsPerNode(Runtime.getRuntime().availableProcessors() * 2)
                 .setSplitConcurrencyAdjustmentInterval(new Duration(100, TimeUnit.MILLISECONDS))
                 .setStatusRefreshMaxWait(new Duration(1, TimeUnit.SECONDS))
                 .setInfoUpdateInterval(new Duration(3, TimeUnit.SECONDS))
+                .setTaskTerminationTimeout(new Duration(1, TimeUnit.MINUTES))
                 .setPerOperatorCpuTimerEnabled(true)
                 .setTaskCpuTimerEnabled(true)
-                .setMaxWorkerThreads(Runtime.getRuntime().availableProcessors() * 2)
+                .setMaxWorkerThreads("2C")
                 .setMinDrivers(Runtime.getRuntime().availableProcessors() * 2 * 2)
                 .setMinDriversPerTask(3)
                 .setMaxDriversPerTask(Integer.MAX_VALUE)
-                .setInfoMaxAge(new Duration(15, TimeUnit.MINUTES))
+                .setInfoMaxAge(new Duration(5, TimeUnit.MINUTES))
                 .setClientTimeout(new Duration(2, TimeUnit.MINUTES))
                 .setMaxIndexMemoryUsage(DataSize.of(64, Unit.MEGABYTE))
                 .setShareIndexLoading(false)
                 .setMaxPartialAggregationMemoryUsage(DataSize.of(16, Unit.MEGABYTE))
                 .setMaxPartialTopNMemory(DataSize.of(16, Unit.MEGABYTE))
-                .setMaxLocalExchangeBufferSize(DataSize.of(32, Unit.MEGABYTE))
+                .setMaxLocalExchangeBufferSize(DataSize.of(128, Unit.MEGABYTE))
                 .setSinkMaxBufferSize(DataSize.of(32, Unit.MEGABYTE))
                 .setSinkMaxBroadcastBufferSize(DataSize.of(200, Unit.MEGABYTE))
                 .setMaxPagePartitioningBufferSize(DataSize.of(32, Unit.MEGABYTE))
-                .setWriterCount(1)
+                .setPagePartitioningBufferPoolSize(8)
+                .setScaleWritersEnabled(true)
+                .setMinWriterCount(1)
+                .setMaxWriterCount(DEFAULT_MAX_WRITER_COUNT)
                 .setTaskConcurrency(DEFAULT_PROCESSOR_COUNT)
-                .setHttpResponseThreads(100)
-                .setHttpTimeoutThreads(3)
-                .setTaskNotificationThreads(5)
-                .setTaskYieldThreads(3)
+                .setHttpResponseThreads("100")
+                .setHttpTimeoutThreads("3")
+                .setTaskNotificationThreads("5")
+                .setTaskYieldThreads("3")
+                .setDriverTimeoutThreads("5")
                 .setLevelTimeMultiplier(new BigDecimal("2"))
-                .setStatisticsCpuTimerEnabled(true));
+                .setStatisticsCpuTimerEnabled(true)
+                .setInterruptStuckSplitTasksEnabled(true)
+                .setInterruptStuckSplitTasksWarningThreshold(new Duration(10, TimeUnit.MINUTES))
+                .setInterruptStuckSplitTasksTimeout(new Duration(15, TimeUnit.MINUTES))
+                .setInterruptStuckSplitTasksDetectionInterval(new Duration(2, TimeUnit.MINUTES)));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
         int processorCount = DEFAULT_PROCESSOR_COUNT == 32 ? 16 : 32;
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        int maxWriterCount = DEFAULT_MAX_WRITER_COUNT == 32 ? 16 : 32;
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("experimental.thread-per-driver-scheduler-enabled", "false")
                 .put("task.initial-splits-per-node", "1")
-                .put("task.split-concurrency-adjustment-interval", "1s")
+                .put("task.split-concurrency-adjustment-interval", "3s")
                 .put("task.status-refresh-max-wait", "2s")
                 .put("task.info-update-interval", "2s")
+                .put("task.termination-timeout", "15s")
                 .put("task.per-operator-cpu-timer-enabled", "false")
                 .put("task.cpu-timer-enabled", "false")
                 .put("task.max-index-memory", "512MB")
@@ -93,21 +107,31 @@ public class TestTaskManagerConfig
                 .put("sink.max-buffer-size", "42MB")
                 .put("sink.max-broadcast-buffer-size", "128MB")
                 .put("driver.max-page-partitioning-buffer-size", "40MB")
-                .put("task.writer-count", "4")
+                .put("driver.page-partitioning-buffer-pool-size", "0")
+                .put("task.scale-writers.enabled", "false")
+                .put("task.min-writer-count", "4")
+                .put("task.max-writer-count", Integer.toString(maxWriterCount))
                 .put("task.concurrency", Integer.toString(processorCount))
                 .put("task.http-response-threads", "4")
                 .put("task.http-timeout-threads", "10")
                 .put("task.task-notification-threads", "13")
                 .put("task.task-yield-threads", "8")
+                .put("task.driver-timeout-threads", "10")
                 .put("task.level-time-multiplier", "2.1")
                 .put("task.statistics-cpu-timer-enabled", "false")
-                .build();
+                .put("task.interrupt-stuck-split-tasks-enabled", "false")
+                .put("task.interrupt-stuck-split-tasks-warning-threshold", "3m")
+                .put("task.interrupt-stuck-split-tasks-timeout", "4m")
+                .put("task.interrupt-stuck-split-tasks-detection-interval", "10m")
+                .buildOrThrow();
 
         TaskManagerConfig expected = new TaskManagerConfig()
+                .setThreadPerDriverSchedulerEnabled(false)
                 .setInitialSplitsPerNode(1)
-                .setSplitConcurrencyAdjustmentInterval(new Duration(1, TimeUnit.SECONDS))
+                .setSplitConcurrencyAdjustmentInterval(new Duration(3, TimeUnit.SECONDS))
                 .setStatusRefreshMaxWait(new Duration(2, TimeUnit.SECONDS))
                 .setInfoUpdateInterval(new Duration(2, TimeUnit.SECONDS))
+                .setTaskTerminationTimeout(new Duration(15, TimeUnit.SECONDS))
                 .setPerOperatorCpuTimerEnabled(false)
                 .setTaskCpuTimerEnabled(false)
                 .setMaxIndexMemoryUsage(DataSize.of(512, Unit.MEGABYTE))
@@ -115,7 +139,7 @@ public class TestTaskManagerConfig
                 .setMaxPartialAggregationMemoryUsage(DataSize.of(32, Unit.MEGABYTE))
                 .setMaxPartialTopNMemory(DataSize.of(32, Unit.MEGABYTE))
                 .setMaxLocalExchangeBufferSize(DataSize.of(33, Unit.MEGABYTE))
-                .setMaxWorkerThreads(3)
+                .setMaxWorkerThreads("3")
                 .setMinDrivers(2)
                 .setMinDriversPerTask(5)
                 .setMaxDriversPerTask(13)
@@ -124,14 +148,22 @@ public class TestTaskManagerConfig
                 .setSinkMaxBufferSize(DataSize.of(42, Unit.MEGABYTE))
                 .setSinkMaxBroadcastBufferSize(DataSize.of(128, Unit.MEGABYTE))
                 .setMaxPagePartitioningBufferSize(DataSize.of(40, Unit.MEGABYTE))
-                .setWriterCount(4)
+                .setPagePartitioningBufferPoolSize(0)
+                .setScaleWritersEnabled(false)
+                .setMinWriterCount(4)
+                .setMaxWriterCount(maxWriterCount)
                 .setTaskConcurrency(processorCount)
-                .setHttpResponseThreads(4)
-                .setHttpTimeoutThreads(10)
-                .setTaskNotificationThreads(13)
-                .setTaskYieldThreads(8)
+                .setHttpResponseThreads("4")
+                .setHttpTimeoutThreads("10")
+                .setTaskNotificationThreads("13")
+                .setTaskYieldThreads("8")
+                .setDriverTimeoutThreads("10")
                 .setLevelTimeMultiplier(new BigDecimal("2.1"))
-                .setStatisticsCpuTimerEnabled(false);
+                .setStatisticsCpuTimerEnabled(false)
+                .setInterruptStuckSplitTasksEnabled(false)
+                .setInterruptStuckSplitTasksWarningThreshold(new Duration(3, TimeUnit.MINUTES))
+                .setInterruptStuckSplitTasksTimeout(new Duration(4, TimeUnit.MINUTES))
+                .setInterruptStuckSplitTasksDetectionInterval(new Duration(10, TimeUnit.MINUTES));
 
         assertFullMapping(properties, expected);
     }

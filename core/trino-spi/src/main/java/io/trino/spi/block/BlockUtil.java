@@ -14,11 +14,13 @@
 package io.trino.spi.block;
 
 import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
+import jakarta.annotation.Nullable;
 
 import java.util.Arrays;
+import java.util.Optional;
 
 import static java.lang.Math.ceil;
+import static java.lang.Math.clamp;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -28,13 +30,20 @@ final class BlockUtil
 
     private static final int DEFAULT_CAPACITY = 64;
     // See java.util.ArrayList for an explanation
-    static final int MAX_ARRAY_SIZE = Integer.MAX_VALUE - 8;
+    // Two additional positions are reserved for a spare null position and offset position
+    static final int MAX_ARRAY_SIZE = Integer.MAX_VALUE - 8 - 2;
 
-    private BlockUtil()
-    {
-    }
+    private BlockUtil() {}
 
     static void checkArrayRange(int[] array, int offset, int length)
+    {
+        requireNonNull(array, "array is null");
+        if (offset < 0 || length < 0 || offset + length > array.length) {
+            throw new IndexOutOfBoundsException(format("Invalid offset %s and length %s in array with %s elements", offset, length, array.length));
+        }
+    }
+
+    static void checkArrayRange(boolean[] array, int offset, int length)
     {
         requireNonNull(array, "array is null");
         if (offset < 0 || length < 0 || offset + length > array.length) {
@@ -63,21 +72,32 @@ final class BlockUtil
         }
     }
 
+    static void checkReadablePosition(Block block, int position)
+    {
+        checkValidPosition(position, block.getPositionCount());
+    }
+
     static int calculateNewArraySize(int currentSize)
     {
-        // grow array by 50%
+        return calculateNewArraySize(currentSize, DEFAULT_CAPACITY);
+    }
+
+    static int calculateNewArraySize(int currentSize, int minimumSize)
+    {
+        if (currentSize < 0 || currentSize > MAX_ARRAY_SIZE || minimumSize < 0 || minimumSize > MAX_ARRAY_SIZE) {
+            throw new IllegalArgumentException("Invalid currentSize or minimumSize");
+        }
+        if (currentSize == MAX_ARRAY_SIZE) {
+            throw new IllegalArgumentException("Cannot grow array beyond size " + MAX_ARRAY_SIZE);
+        }
+
+        minimumSize = Math.max(minimumSize, DEFAULT_CAPACITY);
+
+        // grow the array by 50% if possible
         long newSize = (long) currentSize + (currentSize >> 1);
 
-        // verify new size is within reasonable bounds
-        if (newSize < DEFAULT_CAPACITY) {
-            newSize = DEFAULT_CAPACITY;
-        }
-        else if (newSize > MAX_ARRAY_SIZE) {
-            newSize = MAX_ARRAY_SIZE;
-            if (newSize == currentSize) {
-                throw new IllegalArgumentException(format("Cannot grow array beyond '%s'", MAX_ARRAY_SIZE));
-            }
-        }
+        // ensure new size is within bounds
+        newSize = clamp(newSize, minimumSize, MAX_ARRAY_SIZE);
         return (int) newSize;
     }
 
@@ -133,7 +153,7 @@ final class BlockUtil
         if (slice.isCompact() && index == 0 && length == slice.length()) {
             return slice;
         }
-        return Slices.copyOf(slice, index, length);
+        return slice.copy(index, length);
     }
 
     /**
@@ -181,13 +201,29 @@ final class BlockUtil
         return Arrays.copyOfRange(array, index, index + length);
     }
 
-    static int countUsedPositions(boolean[] positions)
+    static int countSelectedPositionsFromOffsets(boolean[] positions, int[] offsets, int offsetBase)
     {
+        checkArrayRange(offsets, offsetBase, positions.length);
         int used = 0;
-        for (boolean position : positions) {
-            // Avoid branching by casting boolean to integer.
-            // This improves CPU utilization by avoiding branch mispredictions.
-            used += position ? 1 : 0;
+        for (int i = 0; i < positions.length; i++) {
+            int offsetStart = offsets[offsetBase + i];
+            int offsetEnd = offsets[offsetBase + i + 1];
+            used += ((positions[i] ? 1 : 0) * (offsetEnd - offsetStart));
+        }
+        return used;
+    }
+
+    static int countAndMarkSelectedPositionsFromOffsets(boolean[] positions, int[] offsets, int offsetBase, boolean[] elementPositions)
+    {
+        checkArrayRange(offsets, offsetBase, positions.length);
+        int used = 0;
+        for (int i = 0; i < positions.length; i++) {
+            int offsetStart = offsets[offsetBase + i];
+            int offsetEnd = offsets[offsetBase + i + 1];
+            if (positions[i]) {
+                used += (offsetEnd - offsetStart);
+                Arrays.fill(elementPositions, offsetStart, offsetEnd, true);
+            }
         }
         return used;
     }
@@ -229,5 +265,128 @@ final class BlockUtil
         }
         // No newly loaded blocks
         return blocks;
+    }
+
+    static boolean[] copyIsNullAndAppendNull(@Nullable boolean[] isNull, int offsetBase, int positionCount)
+    {
+        int desiredLength = offsetBase + positionCount + 1;
+        boolean[] newIsNull = new boolean[desiredLength];
+        if (isNull != null) {
+            checkArrayRange(isNull, offsetBase, positionCount);
+            System.arraycopy(isNull, 0, newIsNull, 0, desiredLength - 1);
+        }
+        // mark the last element to append null
+        newIsNull[desiredLength - 1] = true;
+        return newIsNull;
+    }
+
+    static int[] copyOffsetsAndAppendNull(int[] offsets, int offsetBase, int positionCount)
+    {
+        int desiredLength = offsetBase + positionCount + 2;
+        checkArrayRange(offsets, offsetBase, positionCount + 1);
+        int[] newOffsets = Arrays.copyOf(offsets, desiredLength);
+        // Null element does not move the offset forward
+        newOffsets[desiredLength - 1] = newOffsets[desiredLength - 2];
+        return newOffsets;
+    }
+
+    /**
+     * Returns a new byte array of size capacity if the input buffer is null or
+     * smaller than the capacity. Returns the original array otherwise.
+     * Any original values in the input buffer will be preserved in the output.
+     */
+    public static byte[] ensureCapacity(@Nullable byte[] buffer, int capacity)
+    {
+        if (buffer == null) {
+            buffer = new byte[capacity];
+        }
+        else if (buffer.length < capacity) {
+            buffer = Arrays.copyOf(buffer, capacity);
+        }
+
+        return buffer;
+    }
+
+    /**
+     * Returns a new short array of size capacity if the input buffer is null or
+     * smaller than the capacity. Returns the original array otherwise.
+     * Any original values in the input buffer will be preserved in the output.
+     */
+    public static short[] ensureCapacity(@Nullable short[] buffer, int capacity)
+    {
+        if (buffer == null) {
+            buffer = new short[capacity];
+        }
+        else if (buffer.length < capacity) {
+            buffer = Arrays.copyOf(buffer, capacity);
+        }
+
+        return buffer;
+    }
+
+    /**
+     * Returns a new int array of size capacity if the input buffer is null or
+     * smaller than the capacity. Returns the original array otherwise.
+     * Any original values in the input buffer will be preserved in the output.
+     */
+    public static int[] ensureCapacity(@Nullable int[] buffer, int capacity)
+    {
+        if (buffer == null) {
+            buffer = new int[capacity];
+        }
+        else if (buffer.length < capacity) {
+            buffer = Arrays.copyOf(buffer, capacity);
+        }
+
+        return buffer;
+    }
+
+    /**
+     * Returns a new long array of size capacity if the input buffer is null or
+     * smaller than the capacity. Returns the original array otherwise.
+     * Any original values in the input buffer will be preserved in the output.
+     */
+    public static long[] ensureCapacity(@Nullable long[] buffer, int capacity)
+    {
+        if (buffer == null) {
+            buffer = new long[capacity];
+        }
+        else if (buffer.length < capacity) {
+            buffer = Arrays.copyOf(buffer, capacity);
+        }
+
+        return buffer;
+    }
+
+    static void appendRawBlockRange(Block rawBlock, int offset, int length, BlockBuilder blockBuilder)
+    {
+        rawBlock = rawBlock.getLoadedBlock();
+        switch (rawBlock) {
+            case RunLengthEncodedBlock rleBlock -> blockBuilder.appendRepeated(rleBlock.getValue(), 0, length);
+            case DictionaryBlock dictionaryBlock -> blockBuilder.appendPositions(dictionaryBlock.getDictionary(), dictionaryBlock.getRawIds(), offset, length);
+            case ValueBlock valueBlock -> blockBuilder.appendRange(valueBlock, offset, length);
+            case LazyBlock _ -> throw new IllegalStateException("Did not expect LazyBlock after loading " + rawBlock.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Ideally, the underlying nulls array in Block implementations should be a byte array instead of a boolean array.
+     * This method is used to perform that conversion until the Block implementations are changed.
+     */
+    static Optional<ByteArrayBlock> getNulls(@Nullable boolean[] valueIsNull, int arrayOffset, int positionCount)
+    {
+        if (valueIsNull == null) {
+            return Optional.empty();
+        }
+        byte[] booleansAsBytes = new byte[positionCount];
+        boolean foundAnyNull = false;
+        for (int i = 0; i < positionCount; i++) {
+            booleansAsBytes[i] = (byte) (valueIsNull[arrayOffset + i] ? 1 : 0);
+            foundAnyNull = foundAnyNull || valueIsNull[arrayOffset + i];
+        }
+        if (!foundAnyNull) {
+            return Optional.empty();
+        }
+        return Optional.of(new ByteArrayBlock(booleansAsBytes.length, Optional.empty(), booleansAsBytes));
     }
 }

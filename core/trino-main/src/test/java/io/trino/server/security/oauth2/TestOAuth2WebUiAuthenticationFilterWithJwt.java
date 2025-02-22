@@ -15,15 +15,10 @@ package io.trino.server.security.oauth2;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Resources;
-import io.airlift.http.client.HttpClientConfig;
-import io.airlift.http.client.jetty.JettyHttpClient;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jws;
-import io.jsonwebtoken.Jwts;
-import io.trino.server.security.jwt.JwkService;
-import io.trino.server.security.jwt.JwkSigningKeyResolver;
 
-import java.net.URI;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -31,7 +26,7 @@ public class TestOAuth2WebUiAuthenticationFilterWithJwt
         extends BaseOAuth2WebUiAuthenticationFilterTest
 {
     @Override
-    protected ImmutableMap<String, String> getOAuth2Config(String idpUrl)
+    protected Map<String, String> getOAuth2Config(String idpUrl)
     {
         return ImmutableMap.<String, String>builder()
                 .put("web-ui.enabled", "true")
@@ -42,13 +37,16 @@ public class TestOAuth2WebUiAuthenticationFilterWithJwt
                 .put("http-server.authentication.oauth2.issuer", "https://localhost:4444/")
                 .put("http-server.authentication.oauth2.auth-url", idpUrl + "/oauth2/auth")
                 .put("http-server.authentication.oauth2.token-url", idpUrl + "/oauth2/token")
+                .put("http-server.authentication.oauth2.end-session-url", idpUrl + "/oauth2/sessions/logout")
                 .put("http-server.authentication.oauth2.jwks-url", idpUrl + "/.well-known/jwks.json")
                 .put("http-server.authentication.oauth2.client-id", TRINO_CLIENT_ID)
                 .put("http-server.authentication.oauth2.client-secret", TRINO_CLIENT_SECRET)
                 .put("http-server.authentication.oauth2.additional-audiences", TRUSTED_CLIENT_ID)
+                .put("http-server.authentication.oauth2.max-clock-skew", "0s")
                 .put("http-server.authentication.oauth2.user-mapping.pattern", "(.*)(@.*)?")
+                .put("http-server.authentication.oauth2.oidc.discovery", "false")
                 .put("oauth2-jwk.http-client.trust-store-path", Resources.getResource("cert/localhost.pem").getPath())
-                .build();
+                .buildOrThrow();
     }
 
     @Override
@@ -65,14 +63,8 @@ public class TestOAuth2WebUiAuthenticationFilterWithJwt
     protected void validateAccessToken(String cookieValue)
     {
         assertThat(cookieValue).isNotBlank();
-        Jws<Claims> jwt = Jwts.parserBuilder()
-                .setSigningKeyResolver(new JwkSigningKeyResolver(new JwkService(
-                        URI.create("https://localhost:" + hydraIdP.getAuthPort() + "/.well-known/jwks.json"),
-                        new JettyHttpClient(new HttpClientConfig()
-                                .setTrustStorePath(Resources.getResource("cert/localhost.pem").getPath())))))
-                .build()
-                .parseClaimsJws(cookieValue);
-        Claims claims = jwt.getBody();
+        Jws<Claims> jwt = parseJwsClaims(cookieValue);
+        Claims claims = jwt.getPayload();
         assertThat(claims.getSubject()).isEqualTo("foo@bar.com");
         assertThat(claims.get("client_id")).isEqualTo(TRINO_CLIENT_ID);
         assertThat(claims.getIssuer()).isEqualTo("https://localhost:4444/");

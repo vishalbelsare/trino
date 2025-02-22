@@ -13,16 +13,18 @@
  */
 package io.trino.cost;
 
+import io.trino.sql.ir.Comparison;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.tree.ComparisonExpression;
 
 import java.util.Optional;
 import java.util.OptionalDouble;
 
 import static io.trino.cost.SymbolStatsEstimate.buildFrom;
-import static io.trino.util.MoreMath.firstNonNaN;
+import static io.trino.util.MoreMath.averageExcludingNaNs;
 import static io.trino.util.MoreMath.max;
+import static io.trino.util.MoreMath.maxExcludeNaN;
 import static io.trino.util.MoreMath.min;
+import static io.trino.util.MoreMath.minExcludeNaN;
 import static java.lang.Double.NEGATIVE_INFINITY;
 import static java.lang.Double.NaN;
 import static java.lang.Double.POSITIVE_INFINITY;
@@ -31,6 +33,11 @@ import static java.lang.Double.isNaN;
 
 public final class ComparisonStatsCalculator
 {
+    // We assume uniform distribution of values within each range.
+    // Within the overlapping range, we assume that all pairs of distinct values from both ranges exist.
+    // Based on the above, we estimate that half of the pairs of values will match inequality predicate on average.
+    public static final double OVERLAPPING_RANGE_INEQUALITY_FILTER_COEFFICIENT = 0.5;
+
     private ComparisonStatsCalculator() {}
 
     public static PlanNodeStatsEstimate estimateExpressionToLiteralComparison(
@@ -38,23 +45,15 @@ public final class ComparisonStatsCalculator
             SymbolStatsEstimate expressionStatistics,
             Optional<Symbol> expressionSymbol,
             OptionalDouble literalValue,
-            ComparisonExpression.Operator operator)
+            Comparison.Operator operator)
     {
-        switch (operator) {
-            case EQUAL:
-                return estimateExpressionEqualToLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
-            case NOT_EQUAL:
-                return estimateExpressionNotEqualToLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
-            case LESS_THAN:
-            case LESS_THAN_OR_EQUAL:
-                return estimateExpressionLessThanLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
-            case GREATER_THAN:
-            case GREATER_THAN_OR_EQUAL:
-                return estimateExpressionGreaterThanLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
-            case IS_DISTINCT_FROM:
-                return PlanNodeStatsEstimate.unknown();
-        }
-        throw new IllegalArgumentException("Unexpected comparison operator: " + operator);
+        return switch (operator) {
+            case EQUAL -> estimateExpressionEqualToLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
+            case NOT_EQUAL -> estimateExpressionNotEqualToLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
+            case LESS_THAN, LESS_THAN_OR_EQUAL -> estimateExpressionLessThanLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
+            case GREATER_THAN, GREATER_THAN_OR_EQUAL -> estimateExpressionGreaterThanLiteral(inputStatistics, expressionStatistics, expressionSymbol, literalValue);
+            case IDENTICAL -> PlanNodeStatsEstimate.unknown();
+        };
     }
 
     private static PlanNodeStatsEstimate estimateExpressionEqualToLiteral(
@@ -98,7 +97,7 @@ public final class ComparisonStatsCalculator
                     .setNullsFraction(0.0)
                     .setDistinctValuesCount(max(expressionStatistics.getDistinctValuesCount() - 1, 0))
                     .build();
-            estimate = estimate.addSymbolStatistics(expressionSymbol.get(), symbolNewEstimate);
+            estimate.addSymbolStatistics(expressionSymbol.get(), symbolNewEstimate);
         }
         return estimate.build();
     }
@@ -153,21 +152,20 @@ public final class ComparisonStatsCalculator
             Optional<Symbol> leftExpressionSymbol,
             SymbolStatsEstimate rightExpressionStatistics,
             Optional<Symbol> rightExpressionSymbol,
-            ComparisonExpression.Operator operator)
+            Comparison.Operator operator)
     {
-        switch (operator) {
-            case EQUAL:
-                return estimateExpressionEqualToExpression(inputStatistics, leftExpressionStatistics, leftExpressionSymbol, rightExpressionStatistics, rightExpressionSymbol);
-            case NOT_EQUAL:
-                return estimateExpressionNotEqualToExpression(inputStatistics, leftExpressionStatistics, leftExpressionSymbol, rightExpressionStatistics, rightExpressionSymbol);
-            case LESS_THAN:
-            case LESS_THAN_OR_EQUAL:
-            case GREATER_THAN:
-            case GREATER_THAN_OR_EQUAL:
-            case IS_DISTINCT_FROM:
-                return PlanNodeStatsEstimate.unknown();
-        }
-        throw new IllegalArgumentException("Unexpected comparison operator: " + operator);
+        return switch (operator) {
+            case EQUAL -> estimateExpressionEqualToExpression(inputStatistics, leftExpressionStatistics, leftExpressionSymbol, rightExpressionStatistics, rightExpressionSymbol);
+            case NOT_EQUAL -> estimateExpressionNotEqualToExpression(inputStatistics, leftExpressionStatistics, leftExpressionSymbol, rightExpressionStatistics, rightExpressionSymbol);
+            case LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL -> estimateExpressionToExpressionInequality(
+                    operator,
+                    inputStatistics,
+                    leftExpressionStatistics,
+                    leftExpressionSymbol,
+                    rightExpressionStatistics,
+                    rightExpressionSymbol);
+            case IDENTICAL -> PlanNodeStatsEstimate.unknown();
+        };
     }
 
     private static PlanNodeStatsEstimate estimateExpressionEqualToExpression(
@@ -240,14 +238,122 @@ public final class ComparisonStatsCalculator
         return result.build();
     }
 
-    private static double averageExcludingNaNs(double first, double second)
+    private static PlanNodeStatsEstimate estimateExpressionToExpressionInequality(
+            Comparison.Operator operator,
+            PlanNodeStatsEstimate inputStatistics,
+            SymbolStatsEstimate leftExpressionStatistics,
+            Optional<Symbol> leftExpressionSymbol,
+            SymbolStatsEstimate rightExpressionStatistics,
+            Optional<Symbol> rightExpressionSymbol)
     {
-        if (isNaN(first) && isNaN(second)) {
-            return NaN;
+        if (leftExpressionStatistics.isUnknown() || rightExpressionStatistics.isUnknown()) {
+            return PlanNodeStatsEstimate.unknown();
         }
-        if (!isNaN(first) && !isNaN(second)) {
-            return (first + second) / 2;
+        if (isNaN(leftExpressionStatistics.getNullsFraction()) && isNaN(rightExpressionStatistics.getNullsFraction())) {
+            return PlanNodeStatsEstimate.unknown();
         }
-        return firstNonNaN(first, second);
+        if (leftExpressionStatistics.statisticRange().isEmpty() || rightExpressionStatistics.statisticRange().isEmpty()) {
+            return inputStatistics.mapOutputRowCount(rowCount -> 0.0);
+        }
+
+        // We don't know the correlation between NULLs, so we take the max nullsFraction from the expression statistics
+        // to make a conservative estimate (nulls are fully correlated) for the NULLs filter factor
+        double nullsFilterFactor = 1 - maxExcludeNaN(leftExpressionStatistics.getNullsFraction(), rightExpressionStatistics.getNullsFraction());
+        return switch (operator) {
+            case LESS_THAN, LESS_THAN_OR_EQUAL -> estimateExpressionLessThanOrEqualToExpression(
+                    inputStatistics,
+                    leftExpressionStatistics,
+                    leftExpressionSymbol,
+                    rightExpressionStatistics,
+                    rightExpressionSymbol,
+                    nullsFilterFactor);
+            case GREATER_THAN, GREATER_THAN_OR_EQUAL -> estimateExpressionLessThanOrEqualToExpression(
+                    inputStatistics,
+                    rightExpressionStatistics,
+                    rightExpressionSymbol,
+                    leftExpressionStatistics,
+                    leftExpressionSymbol,
+                    nullsFilterFactor);
+            default -> throw new IllegalArgumentException("Unsupported inequality operator " + operator);
+        };
+    }
+
+    private static PlanNodeStatsEstimate estimateExpressionLessThanOrEqualToExpression(
+            PlanNodeStatsEstimate inputStatistics,
+            SymbolStatsEstimate leftExpressionStatistics,
+            Optional<Symbol> leftExpressionSymbol,
+            SymbolStatsEstimate rightExpressionStatistics,
+            Optional<Symbol> rightExpressionSymbol,
+            double nullsFilterFactor)
+    {
+        StatisticRange leftRange = StatisticRange.from(leftExpressionStatistics);
+        StatisticRange rightRange = StatisticRange.from(rightExpressionStatistics);
+        // left is always greater than right, no overlap
+        if (leftRange.getLow() > rightRange.getHigh()) {
+            return inputStatistics.mapOutputRowCount(rowCount -> 0.0);
+        }
+        // left is always lesser than right
+        if (leftRange.getHigh() < rightRange.getLow()) {
+            PlanNodeStatsEstimate.Builder estimate = PlanNodeStatsEstimate.buildFrom(inputStatistics);
+            leftExpressionSymbol.ifPresent(symbol -> estimate.addSymbolStatistics(
+                    symbol,
+                    leftExpressionStatistics.mapNullsFraction(nullsFraction -> 0.0)));
+            rightExpressionSymbol.ifPresent(symbol -> estimate.addSymbolStatistics(
+                    symbol,
+                    rightExpressionStatistics.mapNullsFraction(nullsFraction -> 0.0)));
+            return estimate.setOutputRowCount(inputStatistics.getOutputRowCount() * nullsFilterFactor)
+                    .build();
+        }
+
+        PlanNodeStatsEstimate.Builder estimate = PlanNodeStatsEstimate.buildFrom(inputStatistics);
+        double leftOverlappingRangeFraction = leftRange.overlapPercentWith(rightRange);
+        double leftAlwaysLessRangeFraction;
+        if (leftRange.getLow() < rightRange.getLow()) {
+            leftAlwaysLessRangeFraction = min(
+                    leftRange.overlapPercentWith(new StatisticRange(leftRange.getLow(), rightRange.getLow(), NaN)),
+                    // Prevents expanding NDVs in case range fractions addition goes beyond 1 for infinite ranges
+                    1 - leftOverlappingRangeFraction);
+        }
+        else {
+            leftAlwaysLessRangeFraction = 0;
+        }
+        leftExpressionSymbol.ifPresent(symbol -> estimate.addSymbolStatistics(
+                symbol,
+                SymbolStatsEstimate.builder()
+                        .setLowValue(leftRange.getLow())
+                        .setHighValue(minExcludeNaN(leftRange.getHigh(), rightRange.getHigh()))
+                        .setAverageRowSize(leftExpressionStatistics.getAverageRowSize())
+                        .setDistinctValuesCount(leftExpressionStatistics.getDistinctValuesCount() * (leftAlwaysLessRangeFraction + leftOverlappingRangeFraction))
+                        .setNullsFraction(0)
+                        .build()));
+
+        double rightOverlappingRangeFraction = rightRange.overlapPercentWith(leftRange);
+        double rightAlwaysGreaterRangeFraction;
+        if (leftRange.getHigh() < rightRange.getHigh()) {
+            rightAlwaysGreaterRangeFraction = min(
+                    rightRange.overlapPercentWith(new StatisticRange(leftRange.getHigh(), rightRange.getHigh(), NaN)),
+                    // Prevents expanding NDVs in case range fractions addition goes beyond 1 for infinite ranges
+                    1 - rightOverlappingRangeFraction);
+        }
+        else {
+            rightAlwaysGreaterRangeFraction = 0;
+        }
+        rightExpressionSymbol.ifPresent(symbol -> estimate.addSymbolStatistics(
+                symbol,
+                SymbolStatsEstimate.builder()
+                        .setLowValue(maxExcludeNaN(leftRange.getLow(), rightRange.getLow()))
+                        .setHighValue(rightRange.getHigh())
+                        .setAverageRowSize(rightExpressionStatistics.getAverageRowSize())
+                        .setDistinctValuesCount(rightExpressionStatistics.getDistinctValuesCount() * (rightOverlappingRangeFraction + rightAlwaysGreaterRangeFraction))
+                        .setNullsFraction(0)
+                        .build()));
+        double filterFactor =
+                // all left range values which are below right range are selected
+                leftAlwaysLessRangeFraction +
+                        // for pairs in overlapping range, only half of pairs are selected
+                        leftOverlappingRangeFraction * rightOverlappingRangeFraction * OVERLAPPING_RANGE_INEQUALITY_FILTER_COEFFICIENT +
+                        // all pairs where left value is in overlapping range and right value is above left range are selected
+                        leftOverlappingRangeFraction * rightAlwaysGreaterRangeFraction;
+        return estimate.setOutputRowCount(inputStatistics.getOutputRowCount() * nullsFilterFactor * filterFactor).build();
     }
 }

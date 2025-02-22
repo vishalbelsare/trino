@@ -19,9 +19,10 @@ import com.google.common.collect.Streams;
 import io.airlift.log.Logger;
 import io.trino.plugin.bigquery.BigQueryQueryRunner.BigQuerySqlExecutor;
 import io.trino.tpch.TpchTable;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.AbstractMap.SimpleImmutableEntry;
 import java.util.Collection;
@@ -36,7 +37,11 @@ import static java.lang.String.format;
 import static java.lang.String.join;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toUnmodifiableSet;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestBigQueryInstanceCleaner
 {
     public static final Logger LOG = Logger.get(TestBigQueryInstanceCleaner.class);
@@ -50,11 +55,11 @@ public class TestBigQueryInstanceCleaner
             .collect(toUnmodifiableSet());
 
     // see https://cloud.google.com/bigquery/docs/information-schema-tables#tables_view for possible values
-    public static final Collection<String> tableTypesToDrop = ImmutableList.of("BASE TABLE", "VIEW", "MATERIALIZED VIEW");
+    public static final Collection<String> tableTypesToDrop = ImmutableList.of("BASE TABLE", "VIEW", "MATERIALIZED VIEW", "SNAPSHOT");
 
     private BigQuerySqlExecutor bigQuerySqlExecutor;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         this.bigQuerySqlExecutor = new BigQuerySqlExecutor();
@@ -89,8 +94,15 @@ public class TestBigQueryInstanceCleaner
         });
     }
 
-    @Test(dataProvider = "cleanUpSchemasDataProvider")
-    public void cleanUpTables(String schemaName)
+    @Test
+    public void cleanUpTables()
+    {
+        // Other schemas created by tests are taken care of by cleanUpDatasets
+        cleanUpTables(TPCH_SCHEMA);
+        cleanUpTables(TEST_SCHEMA);
+    }
+
+    private void cleanUpTables(String schemaName)
     {
         logObjectsCount(schemaName);
         if (!tablesToKeep.isEmpty()) {
@@ -128,16 +140,6 @@ public class TestBigQueryInstanceCleaner
         logObjectsCount(schemaName);
     }
 
-    @DataProvider
-    public static Object[][] cleanUpSchemasDataProvider()
-    {
-        // Other schemas created by tests are taken care of by cleanUpDatasets
-        return new Object[][] {
-                {TPCH_SCHEMA},
-                {TEST_SCHEMA},
-        };
-    }
-
     private void logObjectsCount(String schemaName)
     {
         TableResult result = bigQuerySqlExecutor.executeQuery(format("" +
@@ -153,16 +155,13 @@ public class TestBigQueryInstanceCleaner
 
     private static String getDropStatement(String schemaName, String objectName, String objectType)
     {
-        switch (objectType) {
-            case "BASE TABLE":
-                return format("DROP TABLE IF EXISTS %s.%s", quoted(schemaName), quoted(objectName));
-            case "VIEW":
-                return format("DROP VIEW IF EXISTS %s.%s", quoted(schemaName), quoted(objectName));
-            case "MATERIALIZED VIEW":
-                return format("DROP MATERIALIZED VIEW IF EXISTS %s.%s", quoted(schemaName), quoted(objectName));
-            default:
-                throw new IllegalArgumentException("Unexpected object type " + objectType);
-        }
+        return switch (objectType) {
+            case "BASE TABLE" -> format("DROP TABLE IF EXISTS %s.%s", quoted(schemaName), quoted(objectName));
+            case "VIEW" -> format("DROP VIEW IF EXISTS %s.%s", quoted(schemaName), quoted(objectName));
+            case "MATERIALIZED VIEW" -> format("DROP MATERIALIZED VIEW IF EXISTS %s.%s", quoted(schemaName), quoted(objectName));
+            case "SNAPSHOT" -> format("DROP SNAPSHOT TABLE IF EXISTS %s.%s", quoted(schemaName), quoted(objectName));
+            default -> throw new IllegalArgumentException("Unexpected object type " + objectType);
+        };
     }
 
     private static String quoted(String identifier)

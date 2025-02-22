@@ -17,14 +17,16 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.SortOrder;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.Assignments;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.exchange;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
@@ -64,7 +66,7 @@ public class TestPruneExchangeColumns
                             p.exchange(e -> e
                                     .addSource(p.values(b))
                                     .addInputsSet(b)
-                                    .fixedHashDistributionParitioningScheme(
+                                    .fixedHashDistributionPartitioningScheme(
                                             ImmutableList.of(a),
                                             ImmutableList.of(a))));
                 })
@@ -85,7 +87,7 @@ public class TestPruneExchangeColumns
                             p.exchange(e -> e
                                     .addSource(p.values(b, h1))
                                     .addInputsSet(b, h1)
-                                    .fixedHashDistributionParitioningScheme(
+                                    .fixedHashDistributionPartitioningScheme(
                                             ImmutableList.of(a, h),
                                             ImmutableList.of(a),
                                             h)));
@@ -127,7 +129,7 @@ public class TestPruneExchangeColumns
                 })
                 .matches(
                         project(
-                                ImmutableMap.of("a", expression("a")),
+                                ImmutableMap.of("a", expression(new Reference(BIGINT, "a"))),
                                 exchange(
                                         REMOTE,
                                         GATHER,

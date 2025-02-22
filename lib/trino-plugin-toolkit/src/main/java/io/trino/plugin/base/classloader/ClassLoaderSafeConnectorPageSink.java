@@ -13,12 +13,11 @@
  */
 package io.trino.plugin.base.classloader;
 
+import com.google.inject.Inject;
 import io.airlift.slice.Slice;
 import io.trino.spi.Page;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.ConnectorPageSink;
-
-import javax.inject.Inject;
 
 import java.util.Collection;
 import java.util.concurrent.CompletableFuture;
@@ -41,23 +40,23 @@ public class ClassLoaderSafeConnectorPageSink
     @Override
     public long getCompletedBytes()
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.getCompletedBytes();
         }
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getSystemMemoryUsage();
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getMemoryUsage();
         }
     }
 
     @Override
     public long getValidationCpuNanos()
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.getValidationCpuNanos();
         }
     }
@@ -65,15 +64,23 @@ public class ClassLoaderSafeConnectorPageSink
     @Override
     public CompletableFuture<?> appendPage(Page page)
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.appendPage(page);
+        }
+    }
+
+    @Override
+    public void closeIdleWriters()
+    {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            delegate.closeIdleWriters();
         }
     }
 
     @Override
     public CompletableFuture<Collection<Slice>> finish()
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             return delegate.finish();
         }
     }
@@ -81,7 +88,7 @@ public class ClassLoaderSafeConnectorPageSink
     @Override
     public void abort()
     {
-        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             delegate.abort();
         }
     }

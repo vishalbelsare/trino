@@ -14,11 +14,10 @@
 package io.trino.tests.product.launcher.env.common;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.tests.product.launcher.docker.DockerFiles;
 import io.trino.tests.product.launcher.env.Environment;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
-
-import javax.inject.Inject;
 
 import java.util.List;
 
@@ -43,23 +42,24 @@ public class HadoopKerberosKms
     {
         this.configDir = dockerFiles.getDockerFilesHostDirectory("common/hadoop-kerberos-kms/");
         this.hadoopKerberos = requireNonNull(hadoopKerberos, "hadoopKerberos is null");
-        requireNonNull(environmentConfig, "environmentConfig is null");
         hadoopImagesVersion = environmentConfig.getHadoopImagesVersion();
     }
 
     @Override
     public void extendEnvironment(Environment.Builder builder)
     {
-        // TODO (https://github.com/trinodb/trino/issues/1652) create images with HDP and KMS
-        String dockerImageName = "ghcr.io/trinodb/testing/cdh5.15-hive-kerberized-kms:" + hadoopImagesVersion;
+        String dockerImageName = "ghcr.io/trinodb/testing/hdp3.1-hive-kerberized-kms:" + hadoopImagesVersion;
 
         builder.configureContainer(HADOOP, container -> {
             container.setDockerImageName(dockerImageName);
             container
-                    .withCopyFileToContainer(forHostPath(configDir.getPath("kms-core-site.xml")), "/etc/hadoop-kms/conf/core-site.xml");
+                    .withCopyFileToContainer(forHostPath(configDir.getPath("kms-core-site.xml")), "/opt/hadoop/etc/hadoop/core-site.xml");
         });
 
-        builder.configureContainer(COORDINATOR, container -> container.setDockerImageName(dockerImageName));
+        builder.configureContainer(COORDINATOR,
+                container -> container
+                        .withCopyFileToContainer(forHostPath(configDir.getPath("hive-disable-key-provider-cache-site.xml")), "/etc/hadoop-kms/conf/hive-disable-key-provider-cache-site.xml")
+                        .setDockerImageName(dockerImageName));
 
         builder.configureContainer(TESTS, container -> {
             container.setDockerImageName(dockerImageName);

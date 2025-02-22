@@ -14,31 +14,35 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import io.airlift.log.Logging;
-import io.trino.plugin.jdbc.mapping.IdentifierMappingModule;
-import io.trino.plugin.jdbc.mapping.SchemaMappingRule;
-import io.trino.plugin.jdbc.mapping.TableMappingRule;
+import io.trino.plugin.base.mapping.IdentifierMappingModule;
+import io.trino.plugin.base.mapping.SchemaMappingRule;
+import io.trino.plugin.base.mapping.TableMappingRule;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.sql.SqlExecutor;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.airlift.log.Level.WARN;
-import static io.trino.plugin.jdbc.mapping.RuleBasedIdentifierMappingUtils.updateRuleBasedIdentifierMappingFile;
+import static io.trino.plugin.base.mapping.RuleBasedIdentifierMappingUtils.updateRuleBasedIdentifierMappingFile;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.testng.Assert.assertEquals;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 // Tests are using JSON based identifier mapping which is one for all tests
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(ExecutionMode.SAME_THREAD)
 public abstract class BaseCaseInsensitiveMappingTest
         extends AbstractTestQueryFramework
 {
@@ -46,7 +50,7 @@ public abstract class BaseCaseInsensitiveMappingTest
 
     protected abstract SqlExecutor onRemoteDatabase();
 
-    @BeforeClass
+    @BeforeAll
     public void disableMappingRefreshVerboseLogging()
     {
         Logging logging = Logging.initialize();
@@ -82,18 +86,17 @@ public abstract class BaseCaseInsensitiveMappingTest
                                 quoted("lower_case_name") + " varchar(1), " +
                                 quoted("Mixed_Case_Name") + " varchar(1), " +
                                 quoted("UPPER_CASE_NAME") + " varchar(1))")) {
-            onRemoteDatabase().execute("INSERT INTO " + (quoted("SomeSchema") + "." + quoted("NonLowerCaseTable")) + " SELECT 'a', 'b', 'c'");
+            onRemoteDatabase().execute("INSERT INTO " + (quoted("SomeSchema") + "." + quoted("NonLowerCaseTable")) + " SELECT 'a', 'b', 'c'" + optionalFromDual().orElse(""));
             assertQuery(
                     "SELECT column_name FROM information_schema.columns WHERE table_schema = 'someschema' AND table_name = 'nonlowercasetable'",
                     "VALUES 'lower_case_name', 'mixed_case_name', 'upper_case_name'");
             assertQuery(
                     "SELECT column_name FROM information_schema.columns WHERE table_name = 'nonlowercasetable'",
                     "VALUES 'lower_case_name', 'mixed_case_name', 'upper_case_name'");
-            assertEquals(
-                    computeActual("SHOW COLUMNS FROM someschema.nonlowercasetable").getMaterializedRows().stream()
+            assertThat(computeActual("SHOW COLUMNS FROM someschema.nonlowercasetable").getMaterializedRows().stream()
                             .map(row -> row.getField(0))
-                            .collect(toImmutableSet()),
-                    ImmutableSet.of("lower_case_name", "mixed_case_name", "upper_case_name"));
+                            .collect(toImmutableSet()))
+                    .containsOnly("lower_case_name", "mixed_case_name", "upper_case_name");
 
             // Note: until https://github.com/prestodb/presto/issues/2863 is resolved, this is *the* way to access the tables.
 
@@ -115,10 +118,21 @@ public abstract class BaseCaseInsensitiveMappingTest
         }
     }
 
+    /**
+     * Must return a non-empty optional with the FROM clause to select from a dual table for databases that don't allow a SELECT without a FROM clause like Oracle.
+     * Must return an empty optional for databases which don't require a FROM clause with a SELECT.
+     */
+    protected Optional<String> optionalFromDual()
+    {
+        return Optional.empty();
+    }
+
     @Test
     public void testSchemaNameClash()
             throws Exception
     {
+        updateRuleBasedIdentifierMappingFile(getMappingFile(), ImmutableList.of(), ImmutableList.of());
+
         String[] nameVariants = {"casesensitivename", "CaseSensitiveName", "CASESENSITIVENAME"};
         assertThat(Stream.of(nameVariants)
                 .map(name -> name.toLowerCase(ENGLISH))
@@ -135,7 +149,7 @@ public abstract class BaseCaseInsensitiveMappingTest
                         AutoCloseable ignore4 = withSchema("some_schema");
                         AutoCloseable ignore5 = withTable("some_schema", "some_table", "(c int)")) {
                     assertThat(computeActual("SHOW SCHEMAS").getOnlyColumn().filter("casesensitivename"::equals)).hasSize(1); // TODO change io.trino.plugin.jdbc.JdbcClient.getSchemaNames to return a List
-                    assertQueryFails("SHOW TABLES FROM casesensitivename", "Failed to find remote schema name: Ambiguous name: casesensitivename");
+                    assertQueryFails("SHOW TABLES FROM casesensitivename", "Error listing tables for catalog \\w+: Failed to find remote schema name: Ambiguous name: casesensitivename");
                     assertQueryFails("SELECT * FROM casesensitivename.some_table_name", "Failed to find remote schema name: Ambiguous name: casesensitivename");
                     assertQuery("SHOW TABLES FROM some_schema", "VALUES 'some_table'");
                     assertQueryReturnsEmptyResult("SELECT * FROM some_schema.some_table");
@@ -148,6 +162,8 @@ public abstract class BaseCaseInsensitiveMappingTest
     public void testTableNameClash()
             throws Exception
     {
+        updateRuleBasedIdentifierMappingFile(getMappingFile(), ImmutableList.of(), ImmutableList.of());
+
         String[] nameVariants = {"casesensitivename", "CaseSensitiveName", "CASESENSITIVENAME"};
         assertThat(Stream.of(nameVariants)
                 .map(name -> name.toLowerCase(ENGLISH))
@@ -235,17 +251,20 @@ public abstract class BaseCaseInsensitiveMappingTest
     public void testTableNameRuleMapping()
             throws Exception
     {
+        String schema = "remote_schema";
         updateRuleBasedIdentifierMappingFile(
                 getMappingFile(),
                 ImmutableList.of(),
-                ImmutableList.of(new TableMappingRule(getSession().getSchema().orElseThrow(), "remote_table", "trino_table")));
+                ImmutableList.of(new TableMappingRule(schema, "remote_table", "trino_table")));
 
-        try (AutoCloseable ignore1 = withTable("remote_table", "(c varchar(5))")) {
-            assertThat(computeActual("SHOW TABLES").getOnlyColumn())
+        try (AutoCloseable ignore = withSchema(schema);
+                AutoCloseable ignore1 = withTable(schema, "remote_table", "(c varchar(5))")) {
+            assertThat(computeActual("SHOW TABLES FROM " + schema).getOnlyColumn())
                     .contains("trino_table");
-            assertQuery("SHOW COLUMNS FROM trino_table", "SELECT 'c', 'varchar(5)', '', ''");
-            assertUpdate("INSERT INTO trino_table VALUES 'dane'", 1);
-            assertQuery("SELECT * FROM trino_table", "VALUES 'dane'");
+            assertThat(query("SHOW COLUMNS FROM " + schema + ".trino_table")).result().projected("Column").onlyColumnAsSet()
+                    .contains("c");
+            assertUpdate("INSERT INTO " + schema + ".trino_table VALUES 'dane'", 1);
+            assertQuery("SELECT * FROM " + schema + ".trino_table", "VALUES 'dane'");
         }
     }
 
@@ -253,7 +272,7 @@ public abstract class BaseCaseInsensitiveMappingTest
     public void testTableNameClashWithRuleMapping()
             throws Exception
     {
-        String schema = getSession().getSchema().orElseThrow();
+        String schema = "remote_schema";
         List<TableMappingRule> tableMappingRules = ImmutableList.of(
                 new TableMappingRule(schema, "casesensitivename", "casesensitivename_a"),
                 new TableMappingRule(schema, "CaseSensitiveName", "casesensitivename_b"),
@@ -270,21 +289,22 @@ public abstract class BaseCaseInsensitiveMappingTest
             for (int j = i + 1; j < nameVariants.length; j++) {
                 String remoteTable = nameVariants[i];
                 String otherRemoteTable = nameVariants[j];
-                try (AutoCloseable ignore1 = withTable(remoteTable, "(c varchar(5))");
-                        AutoCloseable ignore2 = withTable(otherRemoteTable, "(d varchar(5))")) {
+                try (AutoCloseable ignore = withSchema(schema);
+                        AutoCloseable ignore1 = withTable(schema, remoteTable, "(c varchar(5))");
+                        AutoCloseable ignore2 = withTable(schema, otherRemoteTable, "(d varchar(5))")) {
                     String table = tableMappingRules.stream()
                             .filter(rule -> rule.getRemoteTable().equals(remoteTable))
                             .map(TableMappingRule::getMapping)
                             .collect(onlyElement());
 
-                    assertThat(computeActual("SHOW TABLES")
+                    assertThat(computeActual("SHOW TABLES FROM " + schema)
                             .getOnlyColumn()
                             .map(String.class::cast)
                             .filter(anObject -> anObject.startsWith("casesensitivename")))
                             .hasSize(2);
-                    assertQuery("SHOW COLUMNS FROM " + table, "SELECT 'c', 'varchar(5)', '', ''");
-                    assertUpdate("INSERT INTO " + table + " VALUES 'dane'", 1);
-                    assertQuery("SELECT * FROM " + table, "VALUES 'dane'");
+                    assertQuery("SHOW COLUMNS FROM " + schema + "." + table, "SELECT 'c', 'varchar(5)', '', ''");
+                    assertUpdate("INSERT INTO " + schema + "." + table + " VALUES 'dane'", 1);
+                    assertQuery("SELECT * FROM " + schema + "." + table, "VALUES 'dane'");
                 }
             }
         }
@@ -305,7 +325,8 @@ public abstract class BaseCaseInsensitiveMappingTest
                     .contains("trino_schema");
             assertThat(computeActual("SHOW TABLES IN trino_schema").getOnlyColumn())
                     .contains("trino_table");
-            assertQuery("SHOW COLUMNS FROM trino_schema.trino_table", "SELECT 'c', 'varchar(5)', '', ''");
+            assertThat(query("SHOW COLUMNS FROM trino_schema.trino_table")).result().projected("Column").onlyColumnAsSet()
+                    .contains("c");
             assertUpdate("INSERT INTO trino_schema.trino_table VALUES 'dane'", 1);
             assertQuery("SELECT * FROM trino_schema.trino_table", "VALUES 'dane'");
         }

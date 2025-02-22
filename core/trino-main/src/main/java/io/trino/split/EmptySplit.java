@@ -15,48 +15,44 @@ package io.trino.split;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableList;
-import io.trino.connector.CatalogName;
-import io.trino.spi.HostAddress;
+import com.google.common.collect.ImmutableMap;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorSplit;
 
-import java.util.List;
+import java.util.Map;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class EmptySplit
         implements ConnectorSplit
 {
-    private final CatalogName catalogName;
+    private static final int INSTANCE_SIZE = instanceSize(EmptySplit.class);
+
+    private final CatalogHandle catalogHandle;
 
     @JsonCreator
     public EmptySplit(
-            @JsonProperty("catalogName") CatalogName catalogName)
+            @JsonProperty("catalogHandle") CatalogHandle catalogHandle)
     {
-        this.catalogName = requireNonNull(catalogName, "catalogName is null");
+        this.catalogHandle = requireNonNull(catalogHandle, "catalogHandle is null");
     }
 
     @Override
-    public boolean isRemotelyAccessible()
+    public Map<String, String> getSplitInfo()
     {
-        return true;
+        return ImmutableMap.of();
     }
 
     @Override
-    public List<HostAddress> getAddresses()
+    public long getRetainedSizeInBytes()
     {
-        return ImmutableList.of();
-    }
-
-    @Override
-    public Object getInfo()
-    {
-        return this;
+        return INSTANCE_SIZE + catalogHandle.getRetainedSizeInBytes();
     }
 
     @JsonProperty
-    public CatalogName getCatalogName()
+    public CatalogHandle getCatalogHandle()
     {
-        return catalogName;
+        return catalogHandle;
     }
 }

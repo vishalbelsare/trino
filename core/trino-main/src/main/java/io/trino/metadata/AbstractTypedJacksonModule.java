@@ -13,6 +13,7 @@
  */
 package io.trino.metadata;
 
+import com.fasterxml.jackson.annotation.JsonTypeInfo.As;
 import com.fasterxml.jackson.annotation.JsonTypeInfo.Id;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
@@ -34,8 +35,8 @@ import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.databind.ser.BeanSerializerFactory;
 import com.fasterxml.jackson.databind.ser.std.StdSerializer;
 import com.fasterxml.jackson.databind.type.TypeFactory;
-import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import io.trino.cache.NonEvictableCache;
 
 import java.io.IOException;
 import java.util.concurrent.ExecutionException;
@@ -43,6 +44,7 @@ import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
+import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static java.util.Objects.requireNonNull;
 
 public abstract class AbstractTypedJacksonModule<T>
@@ -52,12 +54,12 @@ public abstract class AbstractTypedJacksonModule<T>
 
     protected AbstractTypedJacksonModule(
             Class<T> baseClass,
-            Function<T, String> nameResolver,
-            Function<String, Class<? extends T>> classResolver)
+            Function<Object, String> nameResolver,
+            Function<String, Class<?>> classResolver)
     {
         super(baseClass.getSimpleName() + "Module", Version.unknownVersion());
 
-        TypeIdResolver typeResolver = new InternalTypeResolver<>(nameResolver, classResolver);
+        TypeIdResolver typeResolver = new InternalTypeResolver(nameResolver, classResolver);
 
         addSerializer(baseClass, new InternalTypeSerializer<>(baseClass, typeResolver));
         addDeserializer(baseClass, new InternalTypeDeserializer<>(baseClass, typeResolver));
@@ -76,7 +78,9 @@ public abstract class AbstractTypedJacksonModule<T>
                     typeIdResolver,
                     TYPE_PROPERTY,
                     false,
-                    null);
+                    null,
+                    As.PROPERTY,
+                    true);
         }
 
         @SuppressWarnings("unchecked")
@@ -92,7 +96,7 @@ public abstract class AbstractTypedJacksonModule<T>
             extends StdSerializer<T>
     {
         private final TypeSerializer typeSerializer;
-        private final Cache<Class<?>, JsonSerializer<T>> serializerCache = CacheBuilder.newBuilder().build();
+        private final NonEvictableCache<Class<?>, JsonSerializer<T>> serializerCache = buildNonEvictableCache(CacheBuilder.newBuilder());
 
         public InternalTypeSerializer(Class<T> baseClass, TypeIdResolver typeIdResolver)
         {
@@ -132,13 +136,13 @@ public abstract class AbstractTypedJacksonModule<T>
         }
     }
 
-    private static class InternalTypeResolver<T>
+    private static class InternalTypeResolver
             extends TypeIdResolverBase
     {
-        private final Function<T, String> nameResolver;
-        private final Function<String, Class<? extends T>> classResolver;
+        private final Function<Object, String> nameResolver;
+        private final Function<String, Class<?>> classResolver;
 
-        public InternalTypeResolver(Function<T, String> nameResolver, Function<String, Class<? extends T>> classResolver)
+        public InternalTypeResolver(Function<Object, String> nameResolver, Function<String, Class<?>> classResolver)
         {
             this.nameResolver = requireNonNull(nameResolver, "nameResolver is null");
             this.classResolver = requireNonNull(classResolver, "classResolver is null");
@@ -150,13 +154,12 @@ public abstract class AbstractTypedJacksonModule<T>
             return idFromValueAndType(value, value.getClass());
         }
 
-        @SuppressWarnings("unchecked")
         @Override
         public String idFromValueAndType(Object value, Class<?> suggestedType)
         {
             requireNonNull(value, "value is null");
-            String type = nameResolver.apply((T) value);
-            checkArgument(type != null, "Unknown class: %s", suggestedType.getSimpleName());
+            String type = nameResolver.apply(value);
+            checkArgument(type != null, "Unknown class: %s", value.getClass().getName());
             return type;
         }
 

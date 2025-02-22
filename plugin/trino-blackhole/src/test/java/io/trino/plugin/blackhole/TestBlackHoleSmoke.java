@@ -18,197 +18,273 @@ import com.google.common.collect.Iterables;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.MaterializedRow;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.AfterTest;
-import org.testng.annotations.BeforeTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
-import static io.airlift.testing.Assertions.assertGreaterThan;
 import static io.trino.plugin.blackhole.BlackHoleConnector.FIELD_LENGTH_PROPERTY;
 import static io.trino.plugin.blackhole.BlackHoleConnector.PAGES_PER_SPLIT_PROPERTY;
 import static io.trino.plugin.blackhole.BlackHoleConnector.PAGE_PROCESSING_DELAY;
 import static io.trino.plugin.blackhole.BlackHoleConnector.ROWS_PER_PAGE_PROPERTY;
 import static io.trino.plugin.blackhole.BlackHoleConnector.SPLIT_COUNT_PROPERTY;
-import static io.trino.plugin.blackhole.BlackHoleQueryRunner.createQueryRunner;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.testing.MaterializedResult.resultBuilder;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.IntStream.range;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
-public class TestBlackHoleSmoke
+@TestInstance(PER_CLASS)
+@Execution(SAME_THREAD)
+final class TestBlackHoleSmoke
+        extends AbstractTestQueryFramework
 {
-    private QueryRunner queryRunner;
-
-    @BeforeTest
-    public void setUp()
+    @Override
+    protected QueryRunner createQueryRunner()
             throws Exception
     {
-        queryRunner = createQueryRunner();
+        return BlackHoleQueryRunner.builder().build();
     }
 
-    @AfterTest(alwaysRun = true)
-    public void tearDown()
+    @AfterAll
+    void tearDown()
     {
-        assertThatNoBlackHoleTableIsCreated();
-        queryRunner.close();
-        queryRunner = null;
+        assertThat(listBlackHoleTables()).isEmpty();
     }
 
     @Test
-    public void testCreateSchema()
+    void testCreateSchema()
     {
-        assertEquals(queryRunner.execute("SHOW SCHEMAS FROM blackhole").getRowCount(), 2);
-        assertThatQueryReturnsValue("CREATE TABLE test_schema as SELECT * FROM tpch.tiny.nation", 25L);
+        assertThat(query("SHOW SCHEMAS FROM blackhole"))
+                .result().rowCount().isEqualTo(2);
+        assertUpdate("CREATE TABLE test_schema as SELECT * FROM tpch.tiny.nation", 25);
 
-        queryRunner.execute("CREATE SCHEMA blackhole.test");
-        assertEquals(queryRunner.execute("SHOW SCHEMAS FROM blackhole").getRowCount(), 3);
-        assertThatQueryReturnsValue("CREATE TABLE test.test_schema as SELECT * FROM tpch.tiny.region", 5L);
+        assertUpdate("CREATE SCHEMA blackhole.test");
+        assertThat(query("SHOW SCHEMAS FROM blackhole"))
+                .result().rowCount().isEqualTo(3);
+        assertUpdate("CREATE TABLE test.test_schema as SELECT * FROM tpch.tiny.region", 5);
 
-        assertThatQueryReturnsValue("DROP TABLE test_schema", true);
-        assertThatQueryReturnsValue("DROP TABLE test.test_schema", true);
+        assertUpdate("DROP TABLE test_schema");
+        assertUpdate("DROP TABLE test.test_schema");
     }
 
     @Test
-    public void createTableWhenTableIsAlreadyCreated()
+    void testCreateTableWhenTableIsAlreadyCreated()
     {
         String createTableSql = "CREATE TABLE nation as SELECT * FROM tpch.tiny.nation";
-        queryRunner.execute(createTableSql);
-        assertThatThrownBy(() -> queryRunner.execute(createTableSql))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessage("line 1:1: Destination table 'blackhole.default.nation' already exists");
-        assertThatQueryReturnsValue("DROP TABLE nation", true);
+        assertUpdate(createTableSql, 25);
+        assertThat(query(createTableSql))
+                .failure().hasMessage("line 1:1: Destination table 'blackhole.default.nation' already exists");
+        assertUpdate("DROP TABLE nation");
     }
 
     @Test
-    public void blackHoleConnectorUsage()
+    void testBlackHoleConnectorUsage()
     {
-        assertThatQueryReturnsValue("CREATE TABLE nation as SELECT * FROM tpch.tiny.nation", 25L);
+        assertUpdate("CREATE TABLE nation as SELECT * FROM tpch.tiny.nation", 25);
 
         List<QualifiedObjectName> tableNames = listBlackHoleTables();
-        assertEquals(tableNames.size(), 1, "Expected only one table.");
-        assertEquals(tableNames.get(0).getObjectName(), "nation", "Expected 'nation' table.");
+        assertThat(tableNames).hasSize(1);
+        assertThat(tableNames.get(0).objectName()).isEqualTo("nation");
 
-        assertThatQueryReturnsValue("INSERT INTO nation SELECT * FROM tpch.tiny.nation", 25L);
+        assertUpdate("INSERT INTO nation SELECT * FROM tpch.tiny.nation", 25);
 
-        assertThatQueryReturnsValue("INSERT INTO nation SELECT * FROM tpch.tiny.nation", 25L);
+        assertUpdate("INSERT INTO nation SELECT * FROM tpch.tiny.nation", 25);
 
-        assertThatQueryReturnsValue("SELECT count(*) FROM nation", 0L);
+        assertQuery("SELECT count(*) FROM nation", "SELECT 0");
 
-        assertThatQueryReturnsValue("DROP TABLE nation", true);
+        assertUpdate("DROP TABLE nation");
     }
 
     @Test
-    public void notAllPropertiesSetForDataGeneration()
+    void testNotAllPropertiesSetForDataGeneration()
     {
-        assertThatThrownBy(() -> queryRunner.execute(
+        assertThat(query(
                 format("CREATE TABLE nation WITH ( %s = 3, %s = 1 ) as SELECT * FROM tpch.tiny.nation",
                         ROWS_PER_PAGE_PROPERTY,
                         SPLIT_COUNT_PROPERTY)))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessage("All properties [split_count, pages_per_split, rows_per_page] must be set if any are set");
+                .failure().hasMessage("All properties [split_count, pages_per_split, rows_per_page] must be set if any are set");
     }
 
     @Test
-    public void createTableWithDistribution()
+    void testCreateTableWithDistribution()
     {
-        assertThatQueryReturnsValue(
+        assertUpdate(
                 "CREATE TABLE distributed_test WITH ( distributed_on = array['orderkey'] ) AS SELECT * FROM tpch.tiny.orders",
-                15000L);
-        assertThatQueryReturnsValue("DROP TABLE distributed_test", true);
+                15000);
+        assertUpdate("DROP TABLE distributed_test");
     }
 
     @Test
-    public void testCreateTableInNotExistSchema()
+    void testCreateTableInNotExistSchema()
     {
         int tablesBeforeCreate = listBlackHoleTables().size();
 
         String createTableSql = "CREATE TABLE schema1.test_table (x date)";
-        assertThatThrownBy(() -> queryRunner.execute(createTableSql))
-                .isInstanceOf(RuntimeException.class)
+        assertThat(query(createTableSql))
+                .failure()
                 .hasMessage("Schema schema1 not found");
 
         int tablesAfterCreate = listBlackHoleTables().size();
-        assertEquals(tablesBeforeCreate, tablesAfterCreate);
+        assertThat(tablesBeforeCreate).isEqualTo(tablesAfterCreate);
     }
 
     @Test
-    public void dataGenerationUsage()
+    void testCreateOrReplaceTable()
+    {
+        assertUpdate("CREATE OR REPLACE TABLE test_create_or_replace(x int)");
+        assertThat(query("DESCRIBE test_create_or_replace")).result().projected("Column", "Type")
+                .matches(resultBuilder(getSession(), VARCHAR, VARCHAR)
+                        .row("x", "integer")
+                        .build());
+
+        assertUpdate("CREATE OR REPLACE TABLE test_create_or_replace(y varchar)");
+        assertThat(query("DESCRIBE test_create_or_replace")).result().projected("Column", "Type")
+                .matches(resultBuilder(getSession(), VARCHAR, VARCHAR)
+                        .row("y", "varchar")
+                        .build());
+
+        assertUpdate("DROP TABLE test_create_or_replace");
+    }
+
+    @Test
+    void testCreateOrReplaceTableAsSelect()
+    {
+        assertUpdate("CREATE OR REPLACE TABLE test_create_or_replace_as_select AS SELECT 1 x", 1);
+        assertThat(query("DESCRIBE test_create_or_replace_as_select")).result().projected("Column", "Type")
+                .matches(resultBuilder(getSession(), VARCHAR, VARCHAR)
+                        .row("x", "integer")
+                        .build());
+
+        assertUpdate("CREATE OR REPLACE TABLE test_create_or_replace_as_select AS SELECT '2' y", 1);
+        assertThat(query("DESCRIBE test_create_or_replace_as_select")).result().projected("Column", "Type")
+                .matches(resultBuilder(getSession(), VARCHAR, VARCHAR)
+                        .row("y", "varchar(1)")
+                        .build());
+
+        assertUpdate("DROP TABLE test_create_or_replace_as_select");
+    }
+
+    @Test
+    void testDataGenerationUsage()
     {
         Session session = testSessionBuilder()
                 .setCatalog("blackhole")
                 .setSchema("default")
                 .build();
 
-        assertThatQueryReturnsValue(
+        assertUpdate(
+                session,
                 format("CREATE TABLE nation WITH ( %s = 3, %s = 2, %s = 1 ) as SELECT * FROM tpch.tiny.nation",
                         ROWS_PER_PAGE_PROPERTY,
                         PAGES_PER_SPLIT_PROPERTY,
                         SPLIT_COUNT_PROPERTY),
-                25L,
-                session);
-        assertThatQueryReturnsValue("SELECT count(*) FROM nation", 6L, session);
-        assertThatQueryReturnsValue("INSERT INTO nation SELECT * FROM tpch.tiny.nation", 25L, session);
-        assertThatQueryReturnsValue("SELECT count(*) FROM nation", 6L, session);
+                25);
+        assertQuery(session, "SELECT count(*) FROM nation", "SELECT 6");
+        assertUpdate(session, "INSERT INTO nation SELECT * FROM tpch.tiny.nation", 25);
+        assertQuery(session, "SELECT count(*) FROM nation", "SELECT 6");
 
-        MaterializedResult rows = queryRunner.execute(session, "SELECT * FROM nation LIMIT 1");
-        assertEquals(rows.getRowCount(), 1);
+        MaterializedResult rows = computeActual(session, "SELECT * FROM nation LIMIT 1");
+        assertThat(rows.getRowCount()).isEqualTo(1);
         MaterializedRow row = Iterables.getOnlyElement(rows);
-        assertEquals(row.getFieldCount(), 4);
-        assertEquals(row.getField(0), 0L);
-        assertEquals(row.getField(1), "****************");
-        assertEquals(row.getField(2), 0L);
-        assertEquals(row.getField(3), "****************");
+        assertThat(row.getFieldCount()).isEqualTo(4);
+        assertThat(row.getField(0)).isEqualTo(0L);
+        assertThat(row.getField(1)).isEqualTo("****************");
+        assertThat(row.getField(2)).isEqualTo(0L);
+        assertThat(row.getField(3)).isEqualTo("****************");
 
-        assertThatQueryReturnsValue("DROP TABLE nation", true);
+        assertUpdate("DROP TABLE nation");
     }
 
     @Test
-    public void fieldLength()
+    void testCreateViewWithComment()
+    {
+        String viewName = "test_crerate_view_with_comment_" + randomNameSuffix();
+        assertUpdate("CREATE VIEW " + viewName + " COMMENT 'test comment' AS SELECT * FROM tpch.tiny.nation");
+
+        assertThat(getTableComment(viewName)).isEqualTo("test comment");
+
+        assertUpdate("DROP VIEW " + viewName);
+    }
+
+    @Test
+    void testCommentOnView()
+    {
+        String viewName = "test_comment_on_view_" + randomNameSuffix();
+        assertUpdate("CREATE VIEW " + viewName + " AS SELECT * FROM tpch.tiny.nation");
+
+        // comment set
+        assertUpdate("COMMENT ON VIEW " + viewName + " IS 'new comment'");
+        assertThat(getTableComment(viewName)).isEqualTo("new comment");
+
+        // comment deleted
+        assertUpdate("COMMENT ON VIEW " + viewName + " IS NULL");
+        assertThat(getTableComment(viewName)).isEqualTo(null);
+
+        // comment set to non-empty value before verifying setting empty comment
+        assertUpdate("COMMENT ON VIEW " + viewName + " IS 'updated comment'");
+        assertThat(getTableComment(viewName)).isEqualTo("updated comment");
+
+        // comment set to empty
+        assertUpdate("COMMENT ON VIEW " + viewName + " IS ''");
+        assertThat(getTableComment(viewName)).isEqualTo("");
+
+        assertUpdate("DROP VIEW " + viewName);
+    }
+
+    @Test
+    void testFieldLength()
     {
         Session session = testSessionBuilder()
                 .setCatalog("blackhole")
                 .setSchema("default")
                 .build();
 
-        assertThatQueryReturnsValue(
+        assertUpdate(
+                session,
                 format("CREATE TABLE nation WITH ( %s = 8, %s = 1, %s = 1, %s = 1 ) AS " +
                                 "SELECT nationkey, name, regionkey, comment, 'abc' short_varchar FROM tpch.tiny.nation",
                         FIELD_LENGTH_PROPERTY,
                         ROWS_PER_PAGE_PROPERTY,
                         PAGES_PER_SPLIT_PROPERTY,
                         SPLIT_COUNT_PROPERTY),
-                25L,
-                session);
+                25);
 
-        MaterializedResult rows = queryRunner.execute(session, "SELECT * FROM nation");
-        assertEquals(rows.getRowCount(), 1);
+        MaterializedResult rows = computeActual(session, "SELECT * FROM nation");
+        assertThat(rows.getRowCount()).isEqualTo(1);
         MaterializedRow row = Iterables.getOnlyElement(rows);
-        assertEquals(row.getFieldCount(), 5);
-        assertEquals(row.getField(0), 0L);
-        assertEquals(row.getField(1), "********");
-        assertEquals(row.getField(2), 0L);
-        assertEquals(row.getField(3), "********");
-        assertEquals(row.getField(4), "***"); // this one is shorter due to column type being VARCHAR(3)
+        assertThat(row.getFieldCount()).isEqualTo(5);
+        assertThat(row.getField(0)).isEqualTo(0L);
+        assertThat(row.getField(1)).isEqualTo("********");
+        assertThat(row.getField(2)).isEqualTo(0L);
+        assertThat(row.getField(3)).isEqualTo("********");
+        assertThat(row.getField(4)).isEqualTo("***"); // this one is shorter due to column type being VARCHAR(3)
 
-        assertThatQueryReturnsValue("DROP TABLE nation", true);
+        assertUpdate("DROP TABLE nation");
     }
 
     @Test
-    public void testInsertAllTypes()
+    void testInsertAllTypes()
     {
         createBlackholeAllTypesTable();
-        assertThatQueryReturnsValue(
+        assertUpdate(
                 "INSERT INTO blackhole_all_types VALUES (" +
                         "'abc', " +
                         "BIGINT '1', " +
@@ -222,46 +298,46 @@ public class TestBlackHoleSmoke
                         "TIMESTAMP '2014-01-02 12:12', " +
                         "cast('bar' as varbinary), " +
                         "DECIMAL '3.14', " +
-                        "DECIMAL '1234567890.123456789')", 1L);
+                        "DECIMAL '1234567890.123456789')", 1);
         dropBlackholeAllTypesTable();
     }
 
     @Test
-    public void testSelectAllTypes()
+    void testSelectAllTypes()
     {
         createBlackholeAllTypesTable();
-        MaterializedResult rows = queryRunner.execute("SELECT * FROM blackhole_all_types");
-        assertEquals(rows.getRowCount(), 1);
+        MaterializedResult rows = computeActual("SELECT * FROM blackhole_all_types");
+        assertThat(rows.getRowCount()).isEqualTo(1);
         MaterializedRow row = Iterables.getOnlyElement(rows);
-        assertEquals(row.getFieldCount(), 13);
-        assertEquals(row.getField(0), "**********");
-        assertEquals(row.getField(1), 0L);
-        assertEquals(row.getField(2), 0);
-        assertEquals(row.getField(3), (short) 0);
-        assertEquals(row.getField(4), (byte) 0);
-        assertEquals(row.getField(5), 0.0f);
-        assertEquals(row.getField(6), 0.0);
-        assertEquals(row.getField(7), false);
-        assertEquals(row.getField(8), LocalDate.ofEpochDay(0));
-        assertEquals(row.getField(9), LocalDateTime.of(1970, 1, 1, 0, 0, 0));
-        assertEquals(row.getField(10), "****************".getBytes(UTF_8));
-        assertEquals(row.getField(11), new BigDecimal("0.00"));
-        assertEquals(row.getField(12), new BigDecimal("00000000000000000000.0000000000"));
+        assertThat(row.getFieldCount()).isEqualTo(13);
+        assertThat(row.getField(0)).isEqualTo("**********");
+        assertThat(row.getField(1)).isEqualTo(0L);
+        assertThat(row.getField(2)).isEqualTo(0);
+        assertThat(row.getField(3)).isEqualTo((short) 0);
+        assertThat(row.getField(4)).isEqualTo((byte) 0);
+        assertThat(row.getField(5)).isEqualTo(0.0f);
+        assertThat(row.getField(6)).isEqualTo(0.0);
+        assertThat(row.getField(7)).isEqualTo(false);
+        assertThat(row.getField(8)).isEqualTo(LocalDate.ofEpochDay(0));
+        assertThat(row.getField(9)).isEqualTo(LocalDateTime.of(1970, 1, 1, 0, 0, 0));
+        assertThat(row.getField(10)).isEqualTo("****************".getBytes(UTF_8));
+        assertThat(row.getField(11)).isEqualTo(new BigDecimal("0.00"));
+        assertThat(row.getField(12)).isEqualTo(new BigDecimal("00000000000000000000.0000000000"));
         dropBlackholeAllTypesTable();
     }
 
     @Test
-    public void testSelectWithUnenforcedConstraint()
+    void testSelectWithUnenforcedConstraint()
     {
         createBlackholeAllTypesTable();
-        MaterializedResult rows = queryRunner.execute("SELECT * FROM blackhole_all_types where _bigint > 10");
-        assertEquals(rows.getRowCount(), 0);
+        MaterializedResult rows = computeActual("SELECT * FROM blackhole_all_types where _bigint > 10");
+        assertThat(rows.getRowCount()).isEqualTo(0);
         dropBlackholeAllTypesTable();
     }
 
     private void createBlackholeAllTypesTable()
     {
-        assertThatQueryReturnsValue(
+        assertUpdate(
                 format("CREATE TABLE blackhole_all_types (" +
                                 "  _varchar VARCHAR(10)" +
                                 ", _bigint BIGINT" +
@@ -279,17 +355,16 @@ public class TestBlackHoleSmoke
                                 ") WITH ( %s = 1, %s = 1, %s = 1 ) ",
                         ROWS_PER_PAGE_PROPERTY,
                         PAGES_PER_SPLIT_PROPERTY,
-                        SPLIT_COUNT_PROPERTY),
-                true);
+                        SPLIT_COUNT_PROPERTY));
     }
 
     private void dropBlackholeAllTypesTable()
     {
-        assertThatQueryReturnsValue("DROP TABLE IF EXISTS blackhole_all_types", true);
+        assertUpdate("DROP TABLE IF EXISTS blackhole_all_types");
     }
 
     @Test
-    public void pageProcessingDelay()
+    void testPageProcessingDelay()
     {
         Session session = testSessionBuilder()
                 .setCatalog("blackhole")
@@ -298,7 +373,8 @@ public class TestBlackHoleSmoke
 
         Duration pageProcessingDelay = new Duration(1, SECONDS);
 
-        assertThatQueryReturnsValue(
+        assertUpdate(
+                session,
                 format("CREATE TABLE nation WITH ( %s = 8, %s = 1, %s = 1, %s = 1, %s = '%s' ) AS " +
                                 "SELECT * FROM tpch.tiny.nation",
                         FIELD_LENGTH_PROPERTY,
@@ -307,43 +383,88 @@ public class TestBlackHoleSmoke
                         SPLIT_COUNT_PROPERTY,
                         PAGE_PROCESSING_DELAY,
                         pageProcessingDelay),
-                25L,
-                session);
+                25);
 
         Stopwatch stopwatch = Stopwatch.createStarted();
 
-        assertEquals(queryRunner.execute(session, "SELECT * FROM nation").getRowCount(), 1);
-        queryRunner.execute(session, "INSERT INTO nation SELECT CAST(null AS BIGINT), CAST(null AS VARCHAR(25)), CAST(null AS BIGINT), CAST(null AS VARCHAR(152))");
+        assertThat(query(session, "SELECT * FROM nation"))
+                .result().rowCount().isEqualTo(1);
+        assertUpdate(session, "INSERT INTO nation SELECT CAST(null AS BIGINT), CAST(null AS VARCHAR(25)), CAST(null AS BIGINT), CAST(null AS VARCHAR(152))", 1);
 
         stopwatch.stop();
-        assertGreaterThan(stopwatch.elapsed(MILLISECONDS), pageProcessingDelay.toMillis());
+        assertThat(stopwatch.elapsed(MILLISECONDS)).isGreaterThan(pageProcessingDelay.toMillis());
 
-        assertThatQueryReturnsValue("DROP TABLE nation", true);
+        assertUpdate("DROP TABLE nation");
     }
 
-    private void assertThatNoBlackHoleTableIsCreated()
+    @Test
+    void testMultipleSplits()
     {
-        assertEquals(listBlackHoleTables().size(), 0, "No blackhole tables expected");
+        assertUpdate("CREATE TABLE table_multiple_splits (a integer) WITH (split_count = 5, pages_per_split = 3, rows_per_page = 2)");
+
+        assertThat(query("TABLE table_multiple_splits"))
+                .matches("SELECT 0 FROM TABLE(sequence(1, 2 * 3 * 5))");
+
+        assertThat(query(range(0, 7)
+                .mapToObj(i -> "SELECT * FROM table_multiple_splits")
+                .collect(joining(" UNION ALL "))))
+                .matches("SELECT 0 FROM TABLE(sequence(1, 2 * 3 * 5 * 7))");
+
+        assertUpdate("DROP TABLE table_multiple_splits");
     }
 
     private List<QualifiedObjectName> listBlackHoleTables()
     {
+        QueryRunner queryRunner = getQueryRunner();
         return queryRunner.listTables(queryRunner.getDefaultSession(), "blackhole", "default");
     }
 
-    private void assertThatQueryReturnsValue(String sql, Object expected)
+    @Test
+    void testAddColumn()
     {
-        assertThatQueryReturnsValue(sql, expected, null);
+        assertUpdate("CREATE TABLE test_add_column(col int)");
+
+        assertUpdate("ALTER TABLE test_add_column ADD COLUMN new_col varchar");
+
+        assertQueryReturnsEmptyResult("SELECT * FROM test_add_column");
+        assertThat(query("DESCRIBE test_add_column")).result()
+                .matches(resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+                        .row("col", "integer", "", "")
+                        .row("new_col", "varchar", "", "")
+                        .build());
+
+        assertUpdate("DROP TABLE test_add_column");
     }
 
-    private void assertThatQueryReturnsValue(String sql, Object expected, Session session)
+    @Test
+    void testDropColumn()
     {
-        MaterializedResult rows = session == null ? queryRunner.execute(sql) : queryRunner.execute(session, sql);
-        MaterializedRow materializedRow = Iterables.getOnlyElement(rows);
-        int fieldCount = materializedRow.getFieldCount();
-        assertEquals(fieldCount, 1, format("Expected only one column, but got '%d'", fieldCount));
-        Object value = materializedRow.getField(0);
-        assertEquals(value, expected);
-        assertEquals(Iterables.getOnlyElement(rows).getFieldCount(), 1);
+        assertUpdate("CREATE TABLE test_drop_column(col int, another_col varchar)");
+
+        assertUpdate("ALTER TABLE test_drop_column DROP COLUMN another_col");
+
+        assertQueryReturnsEmptyResult("SELECT * FROM test_drop_column");
+        assertThat(query("DESCRIBE test_drop_column")).result()
+                .matches(resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+                        .row("col", "integer", "", "")
+                        .build());
+
+        assertUpdate("DROP TABLE test_drop_column");
+    }
+
+    @Test
+    void testRenameColumn()
+    {
+        assertUpdate("CREATE TABLE test_rename_column(col int)");
+
+        assertUpdate("ALTER TABLE test_rename_column RENAME COLUMN col TO renamed");
+
+        assertQueryReturnsEmptyResult("SELECT * FROM test_rename_column");
+        assertThat(query("DESCRIBE test_rename_column")).result()
+                .matches(resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+                        .row("renamed", "integer", "", "")
+                        .build());
+
+        assertUpdate("DROP TABLE test_rename_column");
     }
 }

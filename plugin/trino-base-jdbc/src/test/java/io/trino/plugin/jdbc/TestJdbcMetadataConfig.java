@@ -14,7 +14,7 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -28,29 +28,35 @@ public class TestJdbcMetadataConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(JdbcMetadataConfig.class)
-                .setAllowDropTable(false)
+                .setComplexExpressionPushdownEnabled(true)
                 .setJoinPushdownEnabled(false)
+                .setComplexJoinPushdownEnabled(true)
                 .setAggregationPushdownEnabled(true)
                 .setTopNPushdownEnabled(true)
-                .setDomainCompactionThreshold(32));
+                .setBulkListColumns(false)
+                .setDomainCompactionThreshold(256));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("allow-drop-table", "true")
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("complex-expression-pushdown.enabled", "false")
                 .put("join-pushdown.enabled", "true")
+                .put("join-pushdown.with-expressions", "false")
                 .put("aggregation-pushdown.enabled", "false")
+                .put("jdbc.bulk-list-columns.enabled", "true")
                 .put("domain-compaction-threshold", "42")
                 .put("topn-pushdown.enabled", "false")
-                .build();
+                .buildOrThrow();
 
         JdbcMetadataConfig expected = new JdbcMetadataConfig()
-                .setAllowDropTable(true)
+                .setComplexExpressionPushdownEnabled(false)
                 .setJoinPushdownEnabled(true)
+                .setComplexJoinPushdownEnabled(false)
                 .setAggregationPushdownEnabled(false)
                 .setTopNPushdownEnabled(false)
+                .setBulkListColumns(true)
                 .setDomainCompactionThreshold(42);
 
         assertFullMapping(properties, expected);

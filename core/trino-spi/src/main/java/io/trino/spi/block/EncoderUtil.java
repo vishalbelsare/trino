@@ -15,8 +15,7 @@ package io.trino.spi.block;
 
 import io.airlift.slice.SliceInput;
 import io.airlift.slice.SliceOutput;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -24,9 +23,7 @@ import java.util.Optional;
 
 final class EncoderUtil
 {
-    private EncoderUtil()
-    {
-    }
+    private EncoderUtil() {}
 
     /**
      * Append null values for the block as a stream of bits.

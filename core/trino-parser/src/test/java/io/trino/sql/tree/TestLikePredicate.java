@@ -14,11 +14,11 @@
 package io.trino.sql.tree;
 
 import com.google.common.collect.ImmutableList;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestLikePredicate
 {
@@ -29,7 +29,7 @@ public class TestLikePredicate
         StringLiteral pattern = new StringLiteral("b");
         StringLiteral escape = new StringLiteral("c");
 
-        assertEquals(new LikePredicate(value, pattern, escape).getChildren(), ImmutableList.of(value, pattern, escape));
-        assertEquals(new LikePredicate(value, pattern, Optional.empty()).getChildren(), ImmutableList.of(value, pattern));
+        assertThat(new LikePredicate(value, pattern, escape).getChildren()).isEqualTo(ImmutableList.of(value, pattern, escape));
+        assertThat(new LikePredicate(value, pattern, Optional.empty()).getChildren()).isEqualTo(ImmutableList.of(value, pattern));
     }
 }

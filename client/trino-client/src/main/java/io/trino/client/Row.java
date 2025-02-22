@@ -14,15 +14,12 @@
 package io.trino.client;
 
 import com.google.common.collect.ImmutableList;
+import jakarta.annotation.Nullable;
 
-import javax.annotation.Nullable;
-
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
@@ -65,7 +62,7 @@ public final class Row
         return fields.stream()
                 .map(field -> {
                     if (field.getName().isPresent()) {
-                        return format("%s=%s", field.getName().get(), field.getValue());
+                        return field.getName().get() + "=" + field.getValue();
                     }
                     return String.valueOf(field.getValue());
                 })
@@ -77,11 +74,25 @@ public final class Row
         return new Builder();
     }
 
+    public static Builder builderWithExpectedSize(int fields)
+    {
+        return new Builder(fields);
+    }
+
     public static final class Builder
     {
-        private List<RowField> fields = new ArrayList<>();
+        private final ImmutableList.Builder<RowField> fields;
+        private int size;
 
-        private Builder() {}
+        private Builder()
+        {
+            this.fields = ImmutableList.builder();
+        }
+
+        private Builder(int fields)
+        {
+            this.fields = ImmutableList.builderWithExpectedSize(fields);
+        }
 
         public Builder addField(String name, @Nullable Object value)
         {
@@ -93,16 +104,16 @@ public final class Row
             return addField(Optional.empty(), value);
         }
 
-        private Builder addField(Optional<String> name, @Nullable Object value)
+        public Builder addField(Optional<String> name, @Nullable Object value)
         {
-            int ordinal = fields.size();
-            fields.add(new RowField(ordinal, name, value));
+            requireNonNull(name, "name is null");
+            fields.add(new RowField(size++, name, value));
             return this;
         }
 
         public Row build()
         {
-            return new Row(fields);
+            return new Row(fields.build());
         }
     }
 }

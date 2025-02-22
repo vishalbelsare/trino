@@ -16,15 +16,15 @@ package io.trino.operator;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.Immutable;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.spi.Mergeable;
 import io.trino.spi.metrics.Metrics;
 import io.trino.sql.planner.plan.PlanNodeId;
+import jakarta.annotation.Nullable;
 
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.Immutable;
-
+import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -49,6 +49,7 @@ public class OperatorStats
     private final Duration addInputCpu;
     private final DataSize physicalInputDataSize;
     private final long physicalInputPositions;
+    private final Duration physicalInputReadTime;
     private final DataSize internalNetworkInputDataSize;
     private final long internalNetworkInputPositions;
     private final DataSize rawInputDataSize;
@@ -65,6 +66,7 @@ public class OperatorStats
     private final long dynamicFilterSplitsProcessed;
     private final Metrics metrics;
     private final Metrics connectorMetrics;
+    private final Metrics pipelineMetrics;
 
     private final DataSize physicalWrittenDataSize;
 
@@ -76,9 +78,7 @@ public class OperatorStats
 
     private final DataSize userMemoryReservation;
     private final DataSize revocableMemoryReservation;
-    private final DataSize systemMemoryReservation;
     private final DataSize peakUserMemoryReservation;
-    private final DataSize peakSystemMemoryReservation;
     private final DataSize peakRevocableMemoryReservation;
     private final DataSize peakTotalMemoryReservation;
 
@@ -104,6 +104,7 @@ public class OperatorStats
             @JsonProperty("addInputCpu") Duration addInputCpu,
             @JsonProperty("physicalInputDataSize") DataSize physicalInputDataSize,
             @JsonProperty("physicalInputPositions") long physicalInputPositions,
+            @JsonProperty("physicalInputReadTime") Duration physicalInputReadTime,
             @JsonProperty("internalNetworkInputDataSize") DataSize internalNetworkInputDataSize,
             @JsonProperty("internalNetworkInputPositions") long internalNetworkInputPositions,
             @JsonProperty("rawInputDataSize") DataSize rawInputDataSize,
@@ -120,6 +121,7 @@ public class OperatorStats
             @JsonProperty("dynamicFilterSplitsProcessed") long dynamicFilterSplitsProcessed,
             @JsonProperty("metrics") Metrics metrics,
             @JsonProperty("connectorMetrics") Metrics connectorMetrics,
+            @JsonProperty("pipelineMetrics") Metrics pipelineMetrics,
 
             @JsonProperty("physicalWrittenDataSize") DataSize physicalWrittenDataSize,
 
@@ -131,9 +133,7 @@ public class OperatorStats
 
             @JsonProperty("userMemoryReservation") DataSize userMemoryReservation,
             @JsonProperty("revocableMemoryReservation") DataSize revocableMemoryReservation,
-            @JsonProperty("systemMemoryReservation") DataSize systemMemoryReservation,
             @JsonProperty("peakUserMemoryReservation") DataSize peakUserMemoryReservation,
-            @JsonProperty("peakSystemMemoryReservation") DataSize peakSystemMemoryReservation,
             @JsonProperty("peakRevocableMemoryReservation") DataSize peakRevocableMemoryReservation,
             @JsonProperty("peakTotalMemoryReservation") DataSize peakTotalMemoryReservation,
 
@@ -159,6 +159,7 @@ public class OperatorStats
         this.addInputCpu = requireNonNull(addInputCpu, "addInputCpu is null");
         this.physicalInputDataSize = requireNonNull(physicalInputDataSize, "physicalInputDataSize is null");
         this.physicalInputPositions = physicalInputPositions;
+        this.physicalInputReadTime = requireNonNull(physicalInputReadTime, "physicalInputReadTime is null");
         this.internalNetworkInputDataSize = requireNonNull(internalNetworkInputDataSize, "internalNetworkInputDataSize is null");
         this.internalNetworkInputPositions = internalNetworkInputPositions;
         this.rawInputDataSize = requireNonNull(rawInputDataSize, "rawInputDataSize is null");
@@ -177,6 +178,7 @@ public class OperatorStats
         this.dynamicFilterSplitsProcessed = dynamicFilterSplitsProcessed;
         this.metrics = requireNonNull(metrics, "metrics is null");
         this.connectorMetrics = requireNonNull(connectorMetrics, "connectorMetrics is null");
+        this.pipelineMetrics = requireNonNull(pipelineMetrics, "pipelineMetrics is null");
 
         this.physicalWrittenDataSize = requireNonNull(physicalWrittenDataSize, "physicalWrittenDataSize is null");
 
@@ -188,10 +190,8 @@ public class OperatorStats
 
         this.userMemoryReservation = requireNonNull(userMemoryReservation, "userMemoryReservation is null");
         this.revocableMemoryReservation = requireNonNull(revocableMemoryReservation, "revocableMemoryReservation is null");
-        this.systemMemoryReservation = requireNonNull(systemMemoryReservation, "systemMemoryReservation is null");
 
         this.peakUserMemoryReservation = requireNonNull(peakUserMemoryReservation, "peakUserMemoryReservation is null");
-        this.peakSystemMemoryReservation = requireNonNull(peakSystemMemoryReservation, "peakSystemMemoryReservation is null");
         this.peakRevocableMemoryReservation = requireNonNull(peakRevocableMemoryReservation, "peakRevocableMemoryReservation is null");
         this.peakTotalMemoryReservation = requireNonNull(peakTotalMemoryReservation, "peakTotalMemoryReservation is null");
 
@@ -266,6 +266,12 @@ public class OperatorStats
     public long getPhysicalInputPositions()
     {
         return physicalInputPositions;
+    }
+
+    @JsonProperty
+    public Duration getPhysicalInputReadTime()
+    {
+        return physicalInputReadTime;
     }
 
     @JsonProperty
@@ -353,6 +359,12 @@ public class OperatorStats
     }
 
     @JsonProperty
+    public Metrics getPipelineMetrics()
+    {
+        return pipelineMetrics;
+    }
+
+    @JsonProperty
     public DataSize getPhysicalWrittenDataSize()
     {
         return physicalWrittenDataSize;
@@ -395,12 +407,6 @@ public class OperatorStats
     }
 
     @JsonProperty
-    public DataSize getSystemMemoryReservation()
-    {
-        return systemMemoryReservation;
-    }
-
-    @JsonProperty
     public DataSize getPeakUserMemoryReservation()
     {
         return peakUserMemoryReservation;
@@ -410,12 +416,6 @@ public class OperatorStats
     public DataSize getPeakRevocableMemoryReservation()
     {
         return peakRevocableMemoryReservation;
-    }
-
-    @JsonProperty
-    public DataSize getPeakSystemMemoryReservation()
-    {
-        return peakSystemMemoryReservation;
     }
 
     @JsonProperty
@@ -443,12 +443,27 @@ public class OperatorStats
         return info;
     }
 
-    public OperatorStats add(OperatorStats operatorStats)
+    public OperatorStats addFillingPipelineMetrics(OperatorStats operators, Metrics pipelineMetrics)
     {
-        return add(ImmutableList.of(operatorStats));
+        return add(ImmutableList.of(operators), Optional.of(pipelineMetrics));
+    }
+
+    public OperatorStats addFillingPipelineMetrics(Iterable<OperatorStats> operators, Metrics pipelineMetrics)
+    {
+        return add(operators, Optional.of(pipelineMetrics));
+    }
+
+    public OperatorStats add(OperatorStats operators)
+    {
+        return add(ImmutableList.of(operators), Optional.empty());
     }
 
     public OperatorStats add(Iterable<OperatorStats> operators)
+    {
+        return add(operators, Optional.empty());
+    }
+
+    private OperatorStats add(Iterable<OperatorStats> operators, Optional<Metrics> pipelineMetrics)
     {
         long totalDrivers = this.totalDrivers;
 
@@ -457,6 +472,7 @@ public class OperatorStats
         long addInputCpu = this.addInputCpu.roundTo(NANOSECONDS);
         long physicalInputDataSize = this.physicalInputDataSize.toBytes();
         long physicalInputPositions = this.physicalInputPositions;
+        long physicalInputReadTimeNanos = this.physicalInputReadTime.roundTo(NANOSECONDS);
         long internalNetworkInputDataSize = this.internalNetworkInputDataSize.toBytes();
         long internalNetworkInputPositions = this.internalNetworkInputPositions;
         long rawInputDataSize = this.rawInputDataSize.toBytes();
@@ -473,6 +489,7 @@ public class OperatorStats
         long dynamicFilterSplitsProcessed = this.dynamicFilterSplitsProcessed;
         Metrics.Accumulator metricsAccumulator = Metrics.accumulator().add(this.getMetrics());
         Metrics.Accumulator connectorMetricsAccumulator = Metrics.accumulator().add(this.getConnectorMetrics());
+        Optional<Metrics.Accumulator> pipelineMetricsAccumulator = pipelineMetrics.isPresent() ? Optional.empty() : Optional.of(Metrics.accumulator().add(this.getPipelineMetrics()));
 
         long physicalWrittenDataSize = this.physicalWrittenDataSize.toBytes();
 
@@ -484,9 +501,7 @@ public class OperatorStats
 
         long memoryReservation = this.userMemoryReservation.toBytes();
         long revocableMemoryReservation = this.revocableMemoryReservation.toBytes();
-        long systemMemoryReservation = this.systemMemoryReservation.toBytes();
         long peakUserMemory = this.peakUserMemoryReservation.toBytes();
-        long peakSystemMemory = this.peakSystemMemoryReservation.toBytes();
         long peakRevocableMemory = this.peakRevocableMemoryReservation.toBytes();
         long peakTotalMemory = this.peakTotalMemoryReservation.toBytes();
 
@@ -495,6 +510,7 @@ public class OperatorStats
         Optional<BlockedReason> blockedReason = this.blockedReason;
 
         Mergeable<OperatorInfo> base = getMergeableInfoOrNull(info);
+        ImmutableList.Builder<OperatorInfo> operatorInfos = ImmutableList.builder();
         for (OperatorStats operator : operators) {
             checkArgument(operator.getOperatorId() == operatorId, "Expected operatorId to be %s but was %s", operatorId, operator.getOperatorId());
             checkArgument(operator.getOperatorType().equals(operatorType), "Expected operatorType to be %s but was %s", operatorType, operator.getOperatorType());
@@ -506,6 +522,7 @@ public class OperatorStats
             addInputCpu += operator.getAddInputCpu().roundTo(NANOSECONDS);
             physicalInputDataSize += operator.getPhysicalInputDataSize().toBytes();
             physicalInputPositions += operator.getPhysicalInputPositions();
+            physicalInputReadTimeNanos += operator.getPhysicalInputReadTime().roundTo(NANOSECONDS);
             internalNetworkInputDataSize += operator.getInternalNetworkInputDataSize().toBytes();
             internalNetworkInputPositions += operator.getInternalNetworkInputPositions();
             rawInputDataSize += operator.getRawInputDataSize().toBytes();
@@ -522,6 +539,7 @@ public class OperatorStats
             dynamicFilterSplitsProcessed += operator.getDynamicFilterSplitsProcessed();
             metricsAccumulator.add(operator.getMetrics());
             connectorMetricsAccumulator.add(operator.getConnectorMetrics());
+            pipelineMetricsAccumulator.ifPresent(accumulator -> accumulator.add(operator.getPipelineMetrics()));
 
             physicalWrittenDataSize += operator.getPhysicalWrittenDataSize().toBytes();
 
@@ -533,10 +551,8 @@ public class OperatorStats
 
             memoryReservation += operator.getUserMemoryReservation().toBytes();
             revocableMemoryReservation += operator.getRevocableMemoryReservation().toBytes();
-            systemMemoryReservation += operator.getSystemMemoryReservation().toBytes();
 
             peakUserMemory = max(peakUserMemory, operator.getPeakUserMemoryReservation().toBytes());
-            peakSystemMemory = max(peakSystemMemory, operator.getPeakSystemMemoryReservation().toBytes());
             peakRevocableMemory = max(peakRevocableMemory, operator.getPeakRevocableMemoryReservation().toBytes());
             peakTotalMemory = max(peakTotalMemory, operator.getPeakTotalMemoryReservation().toBytes());
 
@@ -549,7 +565,7 @@ public class OperatorStats
             OperatorInfo info = operator.getInfo();
             if (base != null && info != null) {
                 verify(base.getClass() == info.getClass(), "Cannot merge operator infos: %s and %s", base, info);
-                base = mergeInfo(base, info);
+                operatorInfos.add(info);
             }
         }
 
@@ -567,6 +583,7 @@ public class OperatorStats
                 new Duration(addInputCpu, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 DataSize.ofBytes(physicalInputDataSize),
                 physicalInputPositions,
+                new Duration(physicalInputReadTimeNanos, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 DataSize.ofBytes(internalNetworkInputDataSize),
                 internalNetworkInputPositions,
                 DataSize.ofBytes(rawInputDataSize),
@@ -583,6 +600,7 @@ public class OperatorStats
                 dynamicFilterSplitsProcessed,
                 metricsAccumulator.get(),
                 connectorMetricsAccumulator.get(),
+                pipelineMetrics.orElseGet(() -> pipelineMetricsAccumulator.orElseThrow().get()),
 
                 DataSize.ofBytes(physicalWrittenDataSize),
 
@@ -594,9 +612,7 @@ public class OperatorStats
 
                 DataSize.ofBytes(memoryReservation),
                 DataSize.ofBytes(revocableMemoryReservation),
-                DataSize.ofBytes(systemMemoryReservation),
                 DataSize.ofBytes(peakUserMemory),
-                DataSize.ofBytes(peakSystemMemory),
                 DataSize.ofBytes(peakRevocableMemory),
                 DataSize.ofBytes(peakTotalMemory),
 
@@ -604,7 +620,7 @@ public class OperatorStats
 
                 blockedReason,
 
-                (OperatorInfo) base);
+                (OperatorInfo) mergeInfos(base, operatorInfos.build()));
     }
 
     @SuppressWarnings("unchecked")
@@ -618,9 +634,12 @@ public class OperatorStats
     }
 
     @SuppressWarnings("unchecked")
-    private static <T> Mergeable<T> mergeInfo(Mergeable<T> base, T other)
+    private static <T> Mergeable<T> mergeInfos(Mergeable<T> base, List<T> others)
     {
-        return (Mergeable<T>) base.mergeWith(other);
+        if (base == null) {
+            return null;
+        }
+        return (Mergeable<T>) base.mergeWith(others);
     }
 
     public OperatorStats summarize()
@@ -641,6 +660,7 @@ public class OperatorStats
                 addInputCpu,
                 physicalInputDataSize,
                 physicalInputPositions,
+                physicalInputReadTime,
                 internalNetworkInputDataSize,
                 internalNetworkInputPositions,
                 rawInputDataSize,
@@ -655,6 +675,7 @@ public class OperatorStats
                 dynamicFilterSplitsProcessed,
                 metrics,
                 connectorMetrics,
+                pipelineMetrics,
                 physicalWrittenDataSize,
                 blockedWall,
                 finishCalls,
@@ -662,9 +683,52 @@ public class OperatorStats
                 finishCpu,
                 userMemoryReservation,
                 revocableMemoryReservation,
-                systemMemoryReservation,
                 peakUserMemoryReservation,
-                peakSystemMemoryReservation,
+                peakRevocableMemoryReservation,
+                peakTotalMemoryReservation,
+                spilledDataSize,
+                blockedReason,
+                info);
+    }
+
+    public OperatorStats withPipelineMetrics(Metrics pipelineMetrics)
+    {
+        return new OperatorStats(
+                stageId,
+                pipelineId,
+                operatorId,
+                planNodeId,
+                operatorType,
+                totalDrivers,
+                addInputCalls,
+                addInputWall,
+                addInputCpu,
+                physicalInputDataSize,
+                physicalInputPositions,
+                physicalInputReadTime,
+                internalNetworkInputDataSize,
+                internalNetworkInputPositions,
+                rawInputDataSize,
+                inputDataSize,
+                inputPositions,
+                sumSquaredInputPositions,
+                getOutputCalls,
+                getOutputWall,
+                getOutputCpu,
+                outputDataSize,
+                outputPositions,
+                dynamicFilterSplitsProcessed,
+                metrics,
+                connectorMetrics,
+                pipelineMetrics,
+                physicalWrittenDataSize,
+                blockedWall,
+                finishCalls,
+                finishWall,
+                finishCpu,
+                userMemoryReservation,
+                revocableMemoryReservation,
+                peakUserMemoryReservation,
                 peakRevocableMemoryReservation,
                 peakTotalMemoryReservation,
                 spilledDataSize,

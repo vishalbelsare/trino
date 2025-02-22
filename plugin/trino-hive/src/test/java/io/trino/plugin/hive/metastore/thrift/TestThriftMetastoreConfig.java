@@ -16,13 +16,14 @@ package io.trino.plugin.hive.metastore.thrift;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.net.HostAndPort;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 
+import static io.airlift.configuration.testing.ConfigAssertions.assertDeprecatedEquivalence;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
@@ -37,12 +38,13 @@ public class TestThriftMetastoreConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(ThriftMetastoreConfig.class)
-                .setMetastoreTimeout(new Duration(10, SECONDS))
+                .setConnectTimeout(new Duration(10, SECONDS))
+                .setReadTimeout(new Duration(10, SECONDS))
                 .setSocksProxy(null)
                 .setMaxRetries(9)
                 .setBackoffScaleFactor(2.0)
                 .setMinBackoffDelay(new Duration(1, SECONDS))
-                .setMaxBackoffDelay(new Duration(1, SECONDS))
+                .setMaxBackoffDelay(new Duration(2, SECONDS))
                 .setMaxRetryTime(new Duration(30, SECONDS))
                 .setTlsEnabled(false)
                 .setKeystorePath(null)
@@ -50,11 +52,14 @@ public class TestThriftMetastoreConfig
                 .setTruststorePath(null)
                 .setTruststorePassword(null)
                 .setImpersonationEnabled(false)
+                .setUseSparkTableStatisticsFallback(true)
                 .setDelegationTokenCacheTtl(new Duration(1, HOURS))
                 .setDelegationTokenCacheMaximumSize(1000)
                 .setDeleteFilesOnDrop(false)
                 .setMaxWaitForTransactionLock(new Duration(10, MINUTES))
-                .setAssumeCanonicalPartitionKeys(false));
+                .setAssumeCanonicalPartitionKeys(false)
+                .setWriteStatisticsThreads(20)
+                .setCatalogName(null));
     }
 
     @Test
@@ -64,8 +69,9 @@ public class TestThriftMetastoreConfig
         Path keystoreFile = Files.createTempFile(null, null);
         Path truststoreFile = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("hive.metastore-timeout", "20s")
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("hive.metastore.thrift.client.connect-timeout", "22s")
+                .put("hive.metastore.thrift.client.read-timeout", "44s")
                 .put("hive.metastore.thrift.client.socks-proxy", "localhost:1234")
                 .put("hive.metastore.thrift.client.max-retries", "15")
                 .put("hive.metastore.thrift.client.backoff-scale-factor", "3.0")
@@ -82,11 +88,15 @@ public class TestThriftMetastoreConfig
                 .put("hive.metastore.thrift.delegation-token.cache-maximum-size", "9999")
                 .put("hive.metastore.thrift.delete-files-on-drop", "true")
                 .put("hive.metastore.thrift.txn-lock-max-wait", "5m")
+                .put("hive.metastore.thrift.write-statistics-threads", "10")
                 .put("hive.metastore.thrift.assume-canonical-partition-keys", "true")
-                .build();
+                .put("hive.metastore.thrift.use-spark-table-statistics-fallback", "false")
+                .put("hive.metastore.thrift.catalog-name", "custom_catalog_name")
+                .buildOrThrow();
 
         ThriftMetastoreConfig expected = new ThriftMetastoreConfig()
-                .setMetastoreTimeout(new Duration(20, SECONDS))
+                .setConnectTimeout(new Duration(22, SECONDS))
+                .setReadTimeout(new Duration(44, SECONDS))
                 .setSocksProxy(HostAndPort.fromParts("localhost", 1234))
                 .setMaxRetries(15)
                 .setBackoffScaleFactor(3.0)
@@ -103,8 +113,25 @@ public class TestThriftMetastoreConfig
                 .setDelegationTokenCacheMaximumSize(9999)
                 .setDeleteFilesOnDrop(true)
                 .setMaxWaitForTransactionLock(new Duration(5, MINUTES))
-                .setAssumeCanonicalPartitionKeys(true);
+                .setAssumeCanonicalPartitionKeys(true)
+                .setWriteStatisticsThreads(10)
+                .setUseSparkTableStatisticsFallback(false)
+                .setCatalogName("custom_catalog_name");
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testLegacyPropertyMappings()
+    {
+        assertDeprecatedEquivalence(
+                ThriftMetastoreConfig.class,
+                Map.of(
+                        "hive.metastore.thrift.client.connect-timeout", "42s",
+                        "hive.metastore.thrift.client.read-timeout", "42s",
+                        "hive.metastore.thrift.impersonation.enabled", "true"),
+                Map.of(
+                        "hive.metastore-timeout", "42s",
+                        "hive.metastore.impersonation-enabled", "true"));
     }
 }

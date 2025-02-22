@@ -13,29 +13,26 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestRowPatternMatchingInWindow
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -662,12 +659,12 @@ public class TestRowPatternMatchingInWindow
                         "     (6, null, null) ");
 
         // Exception: trying to resume matching from the first row of the match. If uncaught, it would cause an infinite loop.
-        assertThatThrownBy(() -> assertions.query(format(query, "AFTER MATCH SKIP TO A")))
-                .hasMessage("AFTER MATCH SKIP failed: cannot skip to first row of match");
+        assertThat(assertions.query(format(query, "AFTER MATCH SKIP TO A")))
+                .failure().hasMessage("AFTER MATCH SKIP failed: cannot skip to first row of match");
 
         // Exception: trying to skip to label which was not matched
-        assertThatThrownBy(() -> assertions.query(format(query, "AFTER MATCH SKIP TO D")))
-                .hasMessage("AFTER MATCH SKIP failed: pattern variable is not present in match");
+        assertThat(assertions.query(format(query, "AFTER MATCH SKIP TO D")))
+                .failure().hasMessage("AFTER MATCH SKIP failed: pattern variable is not present in match");
     }
 
     @Test
@@ -1126,9 +1123,8 @@ public class TestRowPatternMatchingInWindow
     public void testWindowFunctions()
     {
         // multiple partitions, unordered input
-        // function row_number() ignores frame and numbers rows within partition
         // function array_agg() respects frame, which is reduced to the match (and empty in case of unmatched or skipped rows)
-        assertThat(assertions.query("SELECT part as partition, id AS row_id, val OVER w, label OVER w, row_number() OVER w, array_agg(value) OVER w " +
+        assertThat(assertions.query("SELECT part as partition, id AS row_id, val OVER w, label OVER w, array_agg(value) OVER w " +
                 "          FROM (VALUES " +
                 "                   (1, 'p1', 90), " +
                 "                   (2, 'p1', 80), " +
@@ -1155,18 +1151,18 @@ public class TestRowPatternMatchingInWindow
                 "                   DEFINE B AS B.value > NEXT (B.value) " +
                 "                )"))
                 .matches("VALUES " +
-                        "     ('p1', 1, 80, CAST('B' AS varchar), BIGINT '1', ARRAY[90, 80]), " +
-                        "     ('p1', 2, null, null, 2, null), " +
-                        "     ('p1', 3, null, null, 3, null), " +
-                        "     ('p1', 4, null, null, 4, null), " +
-                        "     ('p1', 5, 90,   'B',  5, ARRAY[90]), " +
-                        "     ('p1', 6, null, null, 6, null), " +
-                        "     ('p2', 1, null, null, 1, null), " +
-                        "     ('p2', 2, 20,   'B',  2, ARRAY[20]), " +
-                        "     ('p2', 3, null, null, 3, null), " +
-                        "     ('p3', 1, null, null, 1, null), " +
-                        "     ('p3', 2, null, null, 2, null), " +
-                        "     ('p3', 3, null, null, 3, null) ");
+                        "     ('p1', 1, 80, CAST('B' AS varchar), ARRAY[90, 80]), " +
+                        "     ('p1', 2, null, null, null), " +
+                        "     ('p1', 3, null, null, null), " +
+                        "     ('p1', 4, null, null, null), " +
+                        "     ('p1', 5, 90,   'B',  ARRAY[90]), " +
+                        "     ('p1', 6, null, null, null), " +
+                        "     ('p2', 1, null, null, null), " +
+                        "     ('p2', 2, 20,   'B',  ARRAY[20]), " +
+                        "     ('p2', 3, null, null, null), " +
+                        "     ('p3', 1, null, null, null), " +
+                        "     ('p3', 2, null, null, null), " +
+                        "     ('p3', 3, null, null, null) ");
 
         // with the option SEEK, pattern for the current row can be found starting from some following row within the base frame
         // e.g. for row 1, the match starts at row 2.
