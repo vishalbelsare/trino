@@ -13,16 +13,14 @@
  */
 package io.trino.util;
 
-import javax.validation.ConstraintValidator;
-import javax.validation.ConstraintValidatorContext;
+import jakarta.validation.ConstraintValidator;
+import jakarta.validation.ConstraintValidatorContext;
 
 public class PowerOfTwoValidator
         implements ConstraintValidator<PowerOfTwo, Integer>
 {
     @Override
-    public void initialize(PowerOfTwo powerOfTwo)
-    {
-    }
+    public void initialize(PowerOfTwo powerOfTwo) {}
 
     @Override
     public boolean isValid(Integer value, ConstraintValidatorContext context)

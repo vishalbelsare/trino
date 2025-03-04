@@ -14,7 +14,6 @@
 package io.trino.operator;
 
 import com.google.common.util.concurrent.MoreExecutors;
-import io.trino.execution.Lifespan;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.TestingSession;
@@ -36,12 +35,13 @@ public final class TestingOperatorContext
                 scheduledExecutor,
                 TestingSession.testSessionBuilder().build());
 
-        MemoryTrackingContext pipelineMemoryContext = new MemoryTrackingContext(newSimpleAggregatedMemoryContext(), newSimpleAggregatedMemoryContext(), newSimpleAggregatedMemoryContext());
+        MemoryTrackingContext pipelineMemoryContext = new MemoryTrackingContext(newSimpleAggregatedMemoryContext(), newSimpleAggregatedMemoryContext());
 
         PipelineContext pipelineContext = new PipelineContext(
                 1,
                 taskContext,
                 executor,
+                scheduledExecutor,
                 scheduledExecutor,
                 pipelineMemoryContext,
                 false,
@@ -52,8 +52,8 @@ public final class TestingOperatorContext
                 pipelineContext,
                 executor,
                 scheduledExecutor,
+                scheduledExecutor,
                 pipelineMemoryContext,
-                Lifespan.taskWide(),
                 0L);
 
         OperatorContext operatorContext = driverContext.addOperatorContext(
@@ -62,6 +62,38 @@ public final class TestingOperatorContext
                 "operator type");
 
         return operatorContext;
+    }
+
+    public static DriverContext createDriverContext(ScheduledExecutorService scheduledExecutor)
+    {
+        Executor executor = MoreExecutors.directExecutor();
+
+        TaskContext taskContext = TestingTaskContext.createTaskContext(
+                executor,
+                scheduledExecutor,
+                TestingSession.testSessionBuilder().build());
+
+        MemoryTrackingContext pipelineMemoryContext = new MemoryTrackingContext(newSimpleAggregatedMemoryContext(), newSimpleAggregatedMemoryContext());
+
+        PipelineContext pipelineContext = new PipelineContext(
+                1,
+                taskContext,
+                executor,
+                scheduledExecutor,
+                scheduledExecutor,
+                pipelineMemoryContext,
+                false,
+                false,
+                false);
+
+        DriverContext driverContext = new DriverContext(
+                pipelineContext,
+                executor,
+                scheduledExecutor,
+                scheduledExecutor,
+                pipelineMemoryContext,
+                0L);
+        return driverContext;
     }
 
     private TestingOperatorContext() {}

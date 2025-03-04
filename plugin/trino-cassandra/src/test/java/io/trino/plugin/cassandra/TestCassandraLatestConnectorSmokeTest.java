@@ -13,12 +13,10 @@
  */
 package io.trino.plugin.cassandra;
 
-import com.google.common.collect.ImmutableMap;
 import io.trino.testing.QueryRunner;
 
 import java.sql.Timestamp;
 
-import static io.trino.plugin.cassandra.CassandraQueryRunner.createCassandraQueryRunner;
 import static io.trino.plugin.cassandra.CassandraTestingUtils.createTestTables;
 
 public class TestCassandraLatestConnectorSmokeTest
@@ -28,9 +26,11 @@ public class TestCassandraLatestConnectorSmokeTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        CassandraServer server = closeAfterClass(new CassandraServer("3.11.10"));
+        CassandraServer server = closeAfterClass(new CassandraServer("cassandra:5.0.2", "cu-cassandra-latest.yaml"));
         CassandraSession session = server.getSession();
         createTestTables(session, KEYSPACE, Timestamp.from(TIMESTAMP_VALUE.toInstant()));
-        return createCassandraQueryRunner(server, ImmutableMap.of(), REQUIRED_TPCH_TABLES);
+        return CassandraQueryRunner.builder(server)
+                .setInitialTables(REQUIRED_TPCH_TABLES)
+                .build();
     }
 }

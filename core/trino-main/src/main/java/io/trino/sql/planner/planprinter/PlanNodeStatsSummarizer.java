@@ -13,11 +13,12 @@
  */
 package io.trino.sql.planner.planprinter;
 
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ListMultimap;
 import io.airlift.units.Duration;
 import io.trino.execution.StageInfo;
 import io.trino.execution.TaskInfo;
-import io.trino.operator.HashCollisionsInfo;
 import io.trino.operator.OperatorStats;
 import io.trino.operator.PipelineStats;
 import io.trino.operator.TaskStats;
@@ -32,10 +33,10 @@ import java.util.Map;
 import java.util.Set;
 
 import static com.google.common.collect.Iterables.getLast;
-import static com.google.common.collect.Lists.reverse;
 import static io.airlift.units.DataSize.succinctBytes;
 import static io.trino.util.MoreMaps.mergeMaps;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.stream.Collectors.toList;
 
 public final class PlanNodeStatsSummarizer
@@ -51,15 +52,21 @@ public final class PlanNodeStatsSummarizer
 
     public static Map<PlanNodeId, PlanNodeStats> aggregateTaskStats(List<TaskInfo> taskInfos)
     {
-        Map<PlanNodeId, PlanNodeStats> aggregatedStats = new HashMap<>();
+        ListMultimap<PlanNodeId, PlanNodeStats> groupedStats = ArrayListMultimap.create();
         List<PlanNodeStats> planNodeStats = taskInfos.stream()
-                .map(TaskInfo::getStats)
+                .map(TaskInfo::stats)
                 .flatMap(taskStats -> getPlanNodeStats(taskStats).stream())
                 .collect(toList());
         for (PlanNodeStats stats : planNodeStats) {
-            aggregatedStats.merge(stats.getPlanNodeId(), stats, PlanNodeStats::mergeWith);
+            groupedStats.put(stats.getPlanNodeId(), stats);
         }
-        return aggregatedStats;
+
+        ImmutableMap.Builder<PlanNodeId, PlanNodeStats> aggregatedStatsBuilder = ImmutableMap.builder();
+        for (PlanNodeId planNodeId : groupedStats.keySet()) {
+            List<PlanNodeStats> groupedPlanNodeStats = groupedStats.get(planNodeId);
+            aggregatedStatsBuilder.put(planNodeId, groupedPlanNodeStats.get(0).mergeWith(groupedPlanNodeStats.subList(1, groupedPlanNodeStats.size())));
+        }
+        return aggregatedStatsBuilder.buildOrThrow();
     }
 
     private static List<PlanNodeStats> getPlanNodeStats(TaskStats taskStats)
@@ -78,9 +85,11 @@ public final class PlanNodeStatsSummarizer
         Map<PlanNodeId, Long> planNodeSpilledDataSize = new HashMap<>();
         Map<PlanNodeId, Long> planNodeScheduledMillis = new HashMap<>();
         Map<PlanNodeId, Long> planNodeCpuMillis = new HashMap<>();
+        Map<PlanNodeId, Long> planNodePhysicalInputDataSize = new HashMap<>();
+        Map<PlanNodeId, Double> planNodePhysicalInputReadNanos = new HashMap<>();
+        Map<PlanNodeId, Long> planNodeBlockedMillis = new HashMap<>();
 
         Map<PlanNodeId, Map<String, BasicOperatorStats>> basicOperatorStats = new HashMap<>();
-        Map<PlanNodeId, Map<String, OperatorHashCollisionsStats>> operatorHashCollisionsStats = new HashMap<>();
         Map<PlanNodeId, WindowOperatorStats> windowNodeStats = new HashMap<>();
 
         for (PipelineStats pipelineStats : taskStats.getPipelines()) {
@@ -104,8 +113,17 @@ public final class PlanNodeStatsSummarizer
                 long cpuMillis = operatorStats.getAddInputCpu().toMillis() + operatorStats.getGetOutputCpu().toMillis() + operatorStats.getFinishCpu().toMillis();
                 planNodeCpuMillis.merge(planNodeId, cpuMillis, Long::sum);
 
-                // A pipeline like hash build before join might link to another "internal" pipelines which provide actual input for this plan node
+                planNodeBlockedMillis.merge(planNodeId, operatorStats.getBlockedWall().toMillis(), Long::sum);
+                planNodeSpilledDataSize.merge(planNodeId, operatorStats.getSpilledDataSize().toBytes(), Long::sum);
+                planNodePhysicalInputDataSize.merge(planNodeId, operatorStats.getPhysicalInputDataSize().toBytes(), Long::sum);
+                planNodePhysicalInputReadNanos.merge(planNodeId, operatorStats.getPhysicalInputReadTime().getValue(NANOSECONDS), Double::sum);
+                // A plan node like LocalExchange consists of LocalExchangeSource which links to another pipeline containing LocalExchangeSink
                 if (operatorStats.getPlanNodeId().equals(inputPlanNode) && !pipelineStats.isInputPipeline()) {
+                    continue;
+                }
+                // Skip DynamicFilterSourceOperator as input operator as for join build side HashBuilderOperator metrics
+                // should be reported
+                if (operatorStats.getOperatorType().equals("DynamicFilterSourceOperator")) {
                     continue;
                 }
                 if (processedNodes.contains(planNodeId)) {
@@ -125,13 +143,12 @@ public final class PlanNodeStatsSummarizer
 
                 planNodeInputPositions.merge(planNodeId, operatorStats.getInputPositions(), Long::sum);
                 planNodeInputBytes.merge(planNodeId, operatorStats.getInputDataSize().toBytes(), Long::sum);
-                planNodeSpilledDataSize.merge(planNodeId, operatorStats.getSpilledDataSize().toBytes(), Long::sum);
                 processedNodes.add(planNodeId);
             }
 
             // Gather output statistics
             processedNodes.clear();
-            for (OperatorStats operatorStats : reverse(pipelineStats.getOperatorSummaries())) {
+            for (OperatorStats operatorStats : pipelineStats.getOperatorSummaries().reversed()) {
                 PlanNodeId planNodeId = operatorStats.getPlanNodeId();
 
                 // An "internal" pipeline like a hash build, links to another pipeline which is the actual output for this plan node
@@ -151,22 +168,8 @@ public final class PlanNodeStatsSummarizer
             for (OperatorStats operatorStats : pipelineStats.getOperatorSummaries()) {
                 PlanNodeId planNodeId = operatorStats.getPlanNodeId();
 
-                if (operatorStats.getInfo() instanceof HashCollisionsInfo) {
-                    HashCollisionsInfo hashCollisionsInfo = (HashCollisionsInfo) operatorStats.getInfo();
-                    operatorHashCollisionsStats.merge(planNodeId,
-                            ImmutableMap.of(
-                                    operatorStats.getOperatorType(),
-                                    new OperatorHashCollisionsStats(
-                                            hashCollisionsInfo.getWeightedHashCollisions(),
-                                            hashCollisionsInfo.getWeightedSumSquaredHashCollisions(),
-                                            hashCollisionsInfo.getWeightedExpectedHashCollisions(),
-                                            operatorStats.getInputPositions())),
-                            (map1, map2) -> mergeMaps(map1, map2, OperatorHashCollisionsStats::merge));
-                }
-
                 // The only statistics we have for Window Functions are very low level, thus displayed only in VERBOSE mode
-                if (operatorStats.getInfo() instanceof WindowInfo) {
-                    WindowInfo windowInfo = (WindowInfo) operatorStats.getInfo();
+                if (operatorStats.getInfo() instanceof WindowInfo windowInfo) {
                     windowNodeStats.merge(planNodeId, WindowOperatorStats.create(windowInfo), WindowOperatorStats::mergeWith);
                 }
             }
@@ -186,24 +189,12 @@ public final class PlanNodeStatsSummarizer
             // and therefore only have scheduled time, but no output stats
             long outputPositions = planNodeOutputPositions.getOrDefault(planNodeId, 0L);
 
-            if (operatorHashCollisionsStats.containsKey(planNodeId)) {
-                nodeStats = new HashCollisionPlanNodeStats(
-                        planNodeId,
-                        new Duration(planNodeScheduledMillis.get(planNodeId), MILLISECONDS),
-                        new Duration(planNodeCpuMillis.get(planNodeId), MILLISECONDS),
-                        planNodeInputPositions.get(planNodeId),
-                        succinctBytes(planNodeInputBytes.get(planNodeId)),
-                        outputPositions,
-                        succinctBytes(planNodeOutputBytes.getOrDefault(planNodeId, 0L)),
-                        succinctBytes(planNodeSpilledDataSize.get(planNodeId)),
-                        basicOperatorStats.get(planNodeId),
-                        operatorHashCollisionsStats.get(planNodeId));
-            }
-            else if (windowNodeStats.containsKey(planNodeId)) {
+            if (windowNodeStats.containsKey(planNodeId)) {
                 nodeStats = new WindowPlanNodeStats(
                         planNodeId,
                         new Duration(planNodeScheduledMillis.get(planNodeId), MILLISECONDS),
                         new Duration(planNodeCpuMillis.get(planNodeId), MILLISECONDS),
+                        new Duration(planNodeBlockedMillis.get(planNodeId), MILLISECONDS),
                         planNodeInputPositions.get(planNodeId),
                         succinctBytes(planNodeInputBytes.get(planNodeId)),
                         outputPositions,
@@ -217,8 +208,11 @@ public final class PlanNodeStatsSummarizer
                         planNodeId,
                         new Duration(planNodeScheduledMillis.get(planNodeId), MILLISECONDS),
                         new Duration(planNodeCpuMillis.get(planNodeId), MILLISECONDS),
+                        new Duration(planNodeBlockedMillis.get(planNodeId), MILLISECONDS),
                         planNodeInputPositions.get(planNodeId),
                         succinctBytes(planNodeInputBytes.get(planNodeId)),
+                        succinctBytes(planNodePhysicalInputDataSize.getOrDefault(planNodeId, 0L)),
+                        new Duration(planNodePhysicalInputReadNanos.getOrDefault(planNodeId, 0.0), NANOSECONDS),
                         outputPositions,
                         succinctBytes(planNodeOutputBytes.getOrDefault(planNodeId, 0L)),
                         succinctBytes(planNodeSpilledDataSize.get(planNodeId)),

@@ -14,7 +14,7 @@
 package io.trino.client.auth.external;
 
 import io.trino.client.ClientException;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -72,7 +72,7 @@ public class TestExternalAuthentication
     {
         RedirectHandler redirectHandler = new MockRedirectHandler();
 
-        TokenPoller poller = MockTokenPoller.onPoll((tokenUri) -> {
+        TokenPoller poller = MockTokenPoller.onPoll(tokenUri -> {
             sleepUninterruptibly(Duration.ofMillis(20));
             return TokenPollResult.pending(TOKEN_URI);
         });

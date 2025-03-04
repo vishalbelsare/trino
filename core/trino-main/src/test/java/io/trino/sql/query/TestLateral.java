@@ -13,28 +13,25 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestLateral
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -70,7 +67,7 @@ public class TestLateral
     @Test
     public void testNotInScope()
     {
-        assertThatThrownBy(() -> assertions.query("SELECT * FROM (VALUES 1) t(a), (SELECT * FROM LATERAL (SELECT a))"))
-                .hasMessage("line 1:63: Column 'a' cannot be resolved");
+        assertThat(assertions.query("SELECT * FROM (VALUES 1) t(a), (SELECT * FROM LATERAL (SELECT a))"))
+                .failure().hasMessage("line 1:63: Column 'a' cannot be resolved");
     }
 }

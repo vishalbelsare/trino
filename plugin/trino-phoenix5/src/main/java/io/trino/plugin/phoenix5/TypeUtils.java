@@ -24,6 +24,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import org.joda.time.DateTimeZone;
@@ -41,7 +42,6 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
-import static io.trino.spi.type.Decimals.decodeUnscaledValue;
 import static io.trino.spi.type.Decimals.encodeScaledValue;
 import static io.trino.spi.type.Decimals.encodeShortScaledValue;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -159,12 +159,11 @@ public final class TypeUtils
             return (long) (int) jdbcObject;
         }
 
-        if (type instanceof ArrayType) {
-            return jdbcObjectArrayToBlock(session, ((ArrayType) type).getElementType(), (Object[]) jdbcObject);
+        if (type instanceof ArrayType arrayType) {
+            return jdbcObjectArrayToBlock(session, arrayType.getElementType(), (Object[]) jdbcObject);
         }
 
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
+        if (type instanceof DecimalType decimalType) {
             BigDecimal value = (BigDecimal) jdbcObject;
             if (decimalType.isShort()) {
                 return encodeShortScaledValue(value, decimalType.getScale());
@@ -205,13 +204,12 @@ public final class TypeUtils
             return object;
         }
 
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
+        if (type instanceof DecimalType decimalType) {
             if (decimalType.isShort()) {
                 BigInteger unscaledValue = BigInteger.valueOf((long) object);
                 return new BigDecimal(unscaledValue, decimalType.getScale(), new MathContext(decimalType.getPrecision()));
             }
-            BigInteger unscaledValue = decodeUnscaledValue((Slice) object);
+            BigInteger unscaledValue = ((Int128) object).toBigInteger();
             return new BigDecimal(unscaledValue, decimalType.getScale(), new MathContext(decimalType.getPrecision()));
         }
 
@@ -241,9 +239,9 @@ public final class TypeUtils
             return ((Slice) object).toStringUtf8();
         }
 
-        if (type instanceof ArrayType) {
+        if (type instanceof ArrayType arrayType) {
             // process subarray of multi-dimensional array
-            return getJdbcObjectArray(session, ((ArrayType) type).getElementType(), (Block) object);
+            return getJdbcObjectArray(session, arrayType.getElementType(), (Block) object);
         }
 
         throw new TrinoException(NOT_SUPPORTED, "Unsupported type: " + type);

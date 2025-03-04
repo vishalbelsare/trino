@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.cassandra;
 
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.plugin.cassandra.util.CassandraCqlUtils;
 import io.trino.spi.connector.ColumnHandle;
@@ -22,8 +23,6 @@ import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.RecordSet;
-
-import javax.inject.Inject;
 
 import java.util.List;
 
@@ -36,11 +35,13 @@ public class CassandraRecordSetProvider
     private static final Logger log = Logger.get(CassandraRecordSetProvider.class);
 
     private final CassandraSession cassandraSession;
+    private final CassandraTypeManager cassandraTypeManager;
 
     @Inject
-    public CassandraRecordSetProvider(CassandraSession cassandraSession)
+    public CassandraRecordSetProvider(CassandraSession cassandraSession, CassandraTypeManager cassandraTypeManager)
     {
         this.cassandraSession = requireNonNull(cassandraSession, "cassandraSession is null");
+        this.cassandraTypeManager = requireNonNull(cassandraTypeManager);
     }
 
     @Override
@@ -53,7 +54,11 @@ public class CassandraRecordSetProvider
                 .map(column -> (CassandraColumnHandle) column)
                 .collect(toList());
 
-        String selectCql = CassandraCqlUtils.selectFrom(cassandraTable, cassandraColumns).getQueryString();
+        if (cassandraTable.relationHandle() instanceof CassandraQueryRelationHandle queryRelationHandle) {
+            return new CassandraRecordSet(cassandraSession, cassandraTypeManager, queryRelationHandle.getQuery(), cassandraColumns);
+        }
+
+        String selectCql = CassandraCqlUtils.selectFrom(cassandraTable.getRequiredNamedRelation(), cassandraColumns).asCql();
         StringBuilder sb = new StringBuilder(selectCql);
         if (sb.charAt(sb.length() - 1) == ';') {
             sb.setLength(sb.length() - 1);
@@ -62,6 +67,6 @@ public class CassandraRecordSetProvider
         String cql = sb.toString();
         log.debug("Creating record set: %s", cql);
 
-        return new CassandraRecordSet(cassandraSession, cql, cassandraColumns);
+        return new CassandraRecordSet(cassandraSession, cassandraTypeManager, cql, cassandraColumns);
     }
 }

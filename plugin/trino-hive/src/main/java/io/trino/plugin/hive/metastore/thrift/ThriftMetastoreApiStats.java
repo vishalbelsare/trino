@@ -13,15 +13,14 @@
  */
 package io.trino.plugin.hive.metastore.thrift;
 
+import com.google.errorprone.annotations.ThreadSafe;
 import io.airlift.stats.CounterStat;
 import io.airlift.stats.TimeStat;
-import org.apache.hadoop.hive.metastore.api.MetaException;
+import io.trino.hive.thrift.metastore.MetaException;
 import org.apache.thrift.TBase;
 import org.apache.thrift.TException;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
-
-import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.concurrent.Callable;
 
@@ -38,29 +37,20 @@ public class ThriftMetastoreApiStats
     public <V> Callable<V> wrap(Callable<V> callable)
     {
         return () -> {
-            try (TimeStat.BlockTimer ignored = time.time()) {
+            try (TimeStat.BlockTimer _ = time.time()) {
                 return callable.call();
             }
             catch (Exception e) {
                 if (e instanceof MetaException) {
                     metastoreExceptions.update(1);
-                    // Need to throw here instead of falling through due to JDK-8059299
-                    totalFailures.update(1);
-                    throw e;
                 }
-
-                if (e instanceof TException) {
+                else if (e instanceof TException) {
                     if (e instanceof TBase) {
                         // This exception is an API response and not a server error
                         throw e;
                     }
-
                     thriftExceptions.update(1);
-                    // Need to throw here instead of falling through due to JDK-8059299
-                    totalFailures.update(1);
-                    throw e;
                 }
-
                 totalFailures.update(1);
                 throw e;
             }

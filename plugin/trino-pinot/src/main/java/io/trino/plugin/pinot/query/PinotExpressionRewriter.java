@@ -23,8 +23,10 @@ import io.trino.spi.connector.SchemaTableName;
 import org.apache.pinot.common.function.TransformFunctionType;
 import org.apache.pinot.common.request.context.ExpressionContext;
 import org.apache.pinot.common.request.context.FunctionContext;
+import org.apache.pinot.core.operator.transform.transformer.datetime.BaseDateTimeTransformer;
+import org.apache.pinot.core.operator.transform.transformer.datetime.DateTimeTransformerFactory;
+import org.apache.pinot.core.operator.transform.transformer.datetime.EpochToEpochTransformer;
 import org.apache.pinot.segment.spi.AggregationFunctionType;
-import org.apache.pinot.spi.data.DateTimeFormatSpec;
 
 import java.util.HashMap;
 import java.util.Iterator;
@@ -49,12 +51,14 @@ import static io.trino.plugin.pinot.query.PinotPatterns.singleInput;
 import static io.trino.plugin.pinot.query.PinotPatterns.transformFunction;
 import static io.trino.plugin.pinot.query.PinotPatterns.transformFunctionType;
 import static io.trino.plugin.pinot.query.PinotSqlFormatter.getColumnHandle;
+import static io.trino.plugin.pinot.query.PinotTransformFunctionTypeResolver.getTransformFunctionType;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
-import static org.apache.pinot.common.function.TransformFunctionType.DATETIMECONVERT;
-import static org.apache.pinot.common.function.TransformFunctionType.DATETRUNC;
-import static org.apache.pinot.common.function.TransformFunctionType.TIMECONVERT;
+import static org.apache.pinot.common.function.TransformFunctionType.DATE_TIME_CONVERT;
+import static org.apache.pinot.common.function.TransformFunctionType.DATE_TRUNC;
+import static org.apache.pinot.common.function.TransformFunctionType.TIME_CONVERT;
+import static org.apache.pinot.common.request.Literal.stringValue;
 import static org.apache.pinot.common.request.context.ExpressionContext.Type.FUNCTION;
 import static org.apache.pinot.common.request.context.ExpressionContext.Type.IDENTIFIER;
 import static org.apache.pinot.common.request.context.ExpressionContext.Type.LITERAL;
@@ -65,8 +69,6 @@ import static org.apache.pinot.core.operator.transform.function.DateTruncTransfo
 import static org.apache.pinot.core.operator.transform.transformer.timeunit.TimeUnitTransformerFactory.getTimeUnitTransformer;
 import static org.apache.pinot.segment.spi.AggregationFunctionType.COUNT;
 import static org.apache.pinot.segment.spi.AggregationFunctionType.getAggregationFunctionType;
-import static org.apache.pinot.spi.data.DateTimeFormatSpec.validateFormat;
-import static org.apache.pinot.spi.data.DateTimeGranularitySpec.validateGranularity;
 
 public class PinotExpressionRewriter
 {
@@ -78,9 +80,9 @@ public class PinotExpressionRewriter
 
     static {
         Map<TransformFunctionType, RewriteRule<FunctionContext>> functionMap = new HashMap<>();
-        functionMap.put(DATETIMECONVERT, new DateTimeConvertRewriteRule());
-        functionMap.put(TIMECONVERT, new TimeConvertRewriteRule());
-        functionMap.put(DATETRUNC, new DateTruncRewriteRule());
+        functionMap.put(DATE_TIME_CONVERT, new DateTimeConvertRewriteRule());
+        functionMap.put(TIME_CONVERT, new TimeConvertRewriteRule());
+        functionMap.put(DATE_TRUNC, new DateTruncRewriteRule());
         FUNCTION_RULE_MAP = immutableEnumMap(functionMap);
 
         Map<AggregationFunctionType, RewriteRule<FunctionContext>> aggregationFunctionMap = new HashMap<>();
@@ -109,22 +111,18 @@ public class PinotExpressionRewriter
 
     private static ExpressionContext rewriteExpression(ExpressionContext expressionContext, Context context)
     {
-        switch (expressionContext.getType()) {
-            case LITERAL:
-                return expressionContext;
-            case IDENTIFIER:
-                return forIdentifier(getColumnHandle(expressionContext.getIdentifier(), context.getSchemaTableName(), context.getColumnHandles()).getColumnName());
-            case FUNCTION:
-                return forFunction(rewriteFunction(expressionContext.getFunction(), context));
-        }
-        throw new PinotException(PINOT_EXCEPTION, Optional.empty(), format("Unsupported expression type '%s'", expressionContext.getType()));
+        return switch (expressionContext.getType()) {
+            case LITERAL -> expressionContext;
+            case IDENTIFIER -> forIdentifier(getColumnHandle(expressionContext.getIdentifier(), context.getSchemaTableName(), context.getColumnHandles()).getColumnName());
+            case FUNCTION -> forFunction(rewriteFunction(expressionContext.getFunction(), context));
+        };
     }
 
     private static FunctionContext rewriteFunction(FunctionContext functionContext, Context context)
     {
         Optional<FunctionContext> result = Optional.empty();
         if (functionContext.getType() == FunctionContext.Type.TRANSFORM) {
-            RewriteRule<FunctionContext> rule = FUNCTION_RULE_MAP.get(TransformFunctionType.getTransformFunctionType(functionContext.getFunctionName()));
+            RewriteRule<FunctionContext> rule = FUNCTION_RULE_MAP.get(getTransformFunctionType(functionContext).orElseThrow());
             if (rule != null) {
                 result = applyRule(rule, functionContext, context);
             }
@@ -162,7 +160,7 @@ public class PinotExpressionRewriter
         @Override
         public Pattern<FunctionContext> getPattern()
         {
-            return transformFunction().with(transformFunctionType().equalTo(DATETIMECONVERT));
+            return transformFunction().with(transformFunctionType().equalTo(DATE_TIME_CONVERT));
         }
 
         @Override
@@ -176,15 +174,15 @@ public class PinotExpressionRewriter
 
             ImmutableList.Builder<ExpressionContext> argumentsBuilder = ImmutableList.builder();
             argumentsBuilder.add(rewriteExpression(object.getArguments().get(0), context));
-            String inputFormat = object.getArguments().get(1).getLiteral().toUpperCase(ENGLISH);
-            checkDateTimeFormatSpec(inputFormat);
-            argumentsBuilder.add(forLiteral(inputFormat));
-            String outputFormat = object.getArguments().get(2).getLiteral().toUpperCase(ENGLISH);
-            checkDateTimeFormatSpec(outputFormat);
-            argumentsBuilder.add(forLiteral(outputFormat));
-            String granularity = object.getArguments().get(3).getLiteral().toUpperCase(ENGLISH);
-            validateGranularity(granularity);
-            argumentsBuilder.add(forLiteral(granularity));
+            String inputFormat = object.getArguments().get(1).getLiteral().getValue().toString().toUpperCase(ENGLISH);
+            argumentsBuilder.add(forLiteral(stringValue(inputFormat)));
+            String outputFormat = object.getArguments().get(2).getLiteral().getValue().toString().toUpperCase(ENGLISH);
+            argumentsBuilder.add(forLiteral(stringValue(outputFormat)));
+            String granularity = object.getArguments().get(3).getLiteral().getValue().toString().toUpperCase(ENGLISH);
+            BaseDateTimeTransformer<?, ?> dateTimeTransformer = DateTimeTransformerFactory.getDateTimeTransformer(inputFormat, outputFormat, granularity);
+            // Even if the format is valid, make sure it is not a simple date format: format characters can be ambiguous due to lower casing
+            checkState(dateTimeTransformer instanceof EpochToEpochTransformer, "Unsupported date format: simple date format not supported");
+            argumentsBuilder.add(forLiteral(stringValue(granularity)));
             return new FunctionContext(object.getType(), object.getFunctionName(), argumentsBuilder.build());
         }
     }
@@ -195,7 +193,7 @@ public class PinotExpressionRewriter
         @Override
         public Pattern<FunctionContext> getPattern()
         {
-            return transformFunction().with(transformFunctionType().equalTo(TIMECONVERT));
+            return transformFunction().with(transformFunctionType().equalTo(TIME_CONVERT));
         }
 
         @Override
@@ -209,13 +207,13 @@ public class PinotExpressionRewriter
 
             ImmutableList.Builder<ExpressionContext> argumentsBuilder = ImmutableList.builder();
             argumentsBuilder.add(rewriteExpression(object.getArguments().get(0), context));
-            String inputTimeUnitArgument = object.getArguments().get(1).getLiteral().toUpperCase(ENGLISH);
+            String inputTimeUnitArgument = object.getArguments().get(1).getLiteral().getValue().toString().toUpperCase(ENGLISH);
             TimeUnit inputTimeUnit = TimeUnit.valueOf(inputTimeUnitArgument);
-            String outputTimeUnitArgument = object.getArguments().get(2).getLiteral().toUpperCase(ENGLISH);
+            String outputTimeUnitArgument = object.getArguments().get(2).getLiteral().getValue().toString().toUpperCase(ENGLISH);
             // Check that this is a valid time unit transform
             getTimeUnitTransformer(inputTimeUnit, outputTimeUnitArgument);
-            argumentsBuilder.add(forLiteral(inputTimeUnitArgument));
-            argumentsBuilder.add(forLiteral(outputTimeUnitArgument));
+            argumentsBuilder.add(forLiteral(stringValue(inputTimeUnitArgument)));
+            argumentsBuilder.add(forLiteral(stringValue(outputTimeUnitArgument)));
             return new FunctionContext(object.getType(), object.getFunctionName(), argumentsBuilder.build());
         }
     }
@@ -226,7 +224,7 @@ public class PinotExpressionRewriter
         @Override
         public Pattern<FunctionContext> getPattern()
         {
-            return transformFunction().with(transformFunctionType().equalTo(DATETRUNC));
+            return transformFunction().with(transformFunctionType().equalTo(DATE_TRUNC));
         }
 
         @Override
@@ -240,27 +238,27 @@ public class PinotExpressionRewriter
             ImmutableList.Builder<ExpressionContext> argumentsBuilder = ImmutableList.builder();
 
             checkState(arguments.get(0).getType() == LITERAL, "First argument must be a literal");
-            String unit = arguments.get(0).getLiteral().toLowerCase(ENGLISH);
-            argumentsBuilder.add(forLiteral(unit));
+            String unit = arguments.get(0).getLiteral().getValue().toString().toLowerCase(ENGLISH);
+            argumentsBuilder.add(forLiteral(stringValue(unit)));
             verifyIsIdentifierOrFunction(object.getArguments().get(1));
             ExpressionContext valueArgument = rewriteExpression(arguments.get(1), context);
             argumentsBuilder.add(valueArgument);
             if (arguments.size() >= 3) {
                 checkState(arguments.get(2).getType() == LITERAL, "Unexpected 3rd argument: '%s'", arguments.get(2));
-                String inputTimeUnitArgument = arguments.get(2).getLiteral().toUpperCase(ENGLISH);
+                String inputTimeUnitArgument = arguments.get(2).getLiteral().getValue().toString().toUpperCase(ENGLISH);
                 // Ensure this is a valid TimeUnit
                 TimeUnit inputTimeUnit = TimeUnit.valueOf(inputTimeUnitArgument);
-                argumentsBuilder.add(forLiteral(inputTimeUnit.name()));
+                argumentsBuilder.add(forLiteral(stringValue(inputTimeUnit.name())));
                 if (arguments.size() >= 4) {
                     checkState(arguments.get(3).getType() == LITERAL, "Unexpected 4th argument '%s'", arguments.get(3));
                     // Time zone is lower cased inside Pinot
                     argumentsBuilder.add(arguments.get(3));
                     if (arguments.size() >= 5) {
                         checkState(arguments.get(4).getType() == LITERAL, "Unexpected 5th argument: '%s'", arguments.get(4));
-                        String outputTimeUnitArgument = arguments.get(4).getLiteral().toUpperCase(ENGLISH);
+                        String outputTimeUnitArgument = arguments.get(4).getLiteral().getValue().toString().toUpperCase(ENGLISH);
                         // Ensure this is a valid TimeUnit
                         TimeUnit outputTimeUnit = TimeUnit.valueOf(outputTimeUnitArgument);
-                        argumentsBuilder.add(forLiteral(outputTimeUnit.name()));
+                        argumentsBuilder.add(forLiteral(stringValue(outputTimeUnit.name())));
                     }
                 }
             }
@@ -304,15 +302,6 @@ public class PinotExpressionRewriter
                     .collect(toImmutableList());
             return new FunctionContext(object.getType(), object.getFunctionName(), arguments);
         }
-    }
-
-    private static void checkDateTimeFormatSpec(String dateTimeFormat)
-    {
-        requireNonNull(dateTimeFormat, "dateTimeFormat is null");
-        validateFormat(dateTimeFormat);
-        // Even if the format is valid, make sure it is not a simple date format: format characters can be ambiguous due to lower casing
-        DateTimeFormatSpec dateTimeFormatSpec = new DateTimeFormatSpec(dateTimeFormat);
-        checkState(dateTimeFormatSpec.getSDFPattern() == null, "Unsupported date format: simple date format not supported");
     }
 
     private static void verifyIsIdentifierOrFunction(ExpressionContext expressionContext)

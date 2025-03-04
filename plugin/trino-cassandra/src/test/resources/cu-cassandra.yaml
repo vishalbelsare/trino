@@ -260,8 +260,6 @@ ssl_storage_port: 7011
 listen_address: 127.0.0.1
 
 start_native_transport: true
-# port for the CQL native transport to listen for clients on
-native_transport_port: 9142
 
 # Whether to start the thrift rpc server.
 start_rpc: false
@@ -568,3 +566,5 @@ encryption_options:
     # algorithm: SunX509
     # store_type: JKS
     # cipher_suites: [TLS_RSA_WITH_AES_128_CBC_SHA,TLS_RSA_WITH_AES_256_CBC_SHA]
+
+batch_size_warn_threshold_in_kb: 100

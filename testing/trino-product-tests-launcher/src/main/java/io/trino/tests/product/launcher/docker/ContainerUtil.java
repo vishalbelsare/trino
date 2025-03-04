@@ -20,7 +20,7 @@ import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Network;
-import io.trino.tests.product.launcher.testcontainers.SelectedPortWaitStrategy;
+import io.trino.testing.containers.wait.strategy.SelectedPortWaitStrategy;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.wait.strategy.WaitStrategy;
 
@@ -47,7 +47,7 @@ public final class ContainerUtil
                             .withForce(true)
                             .exec();
                 }
-                catch (ConflictException | NotFoundException ignored) {
+                catch (ConflictException | NotFoundException _) {
                 }
             }
         }
@@ -62,7 +62,7 @@ public final class ContainerUtil
                 dockerClient.removeNetworkCmd(network.getId())
                         .exec();
             }
-            catch (NotFoundException ignored) {
+            catch (NotFoundException _) {
                 // Possible when previous tests invocation leaves a network behind and it is being garbage collected by Ryuk in the background.
             }
         }

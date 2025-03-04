@@ -13,13 +13,9 @@
  */
 package io.trino.metadata;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import io.trino.connector.CatalogName;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
-
-import java.util.Objects;
 
 import static java.util.Objects.requireNonNull;
 
@@ -27,70 +23,26 @@ import static java.util.Objects.requireNonNull;
  * TableExecuteHandle wraps connectors ConnectorTableExecuteHandle which identifies instance of executing
  * specific table procedure o specific table. See {#link {@link ConnectorTableExecuteHandle}} for more details.
  */
-public final class TableExecuteHandle
+public record TableExecuteHandle(
+        CatalogHandle catalogHandle,
+        ConnectorTransactionHandle transactionHandle,
+        ConnectorTableExecuteHandle connectorHandle)
 {
-    private final CatalogName catalogName;
-    private final ConnectorTransactionHandle transactionHandle;
-    private final ConnectorTableExecuteHandle connectorHandle;
-
-    @JsonCreator
-    public TableExecuteHandle(
-            @JsonProperty("catalogName") CatalogName catalogName,
-            @JsonProperty("transactionHandle") ConnectorTransactionHandle transactionHandle,
-            @JsonProperty("connectorHandle") ConnectorTableExecuteHandle connectorHandle)
+    public TableExecuteHandle
     {
-        this.catalogName = requireNonNull(catalogName, "catalogName is null");
-        this.transactionHandle = requireNonNull(transactionHandle, "transactionHandle is null");
-        this.connectorHandle = requireNonNull(connectorHandle, "connectorHandle is null");
-    }
-
-    @JsonProperty
-    public CatalogName getCatalogName()
-    {
-        return catalogName;
-    }
-
-    @JsonProperty
-    public ConnectorTransactionHandle getTransactionHandle()
-    {
-        return transactionHandle;
-    }
-
-    @JsonProperty
-    public ConnectorTableExecuteHandle getConnectorHandle()
-    {
-        return connectorHandle;
+        requireNonNull(catalogHandle, "catalogHandle is null");
+        requireNonNull(transactionHandle, "transactionHandle is null");
+        requireNonNull(connectorHandle, "connectorHandle is null");
     }
 
     public TableExecuteHandle withConnectorHandle(ConnectorTableExecuteHandle connectorHandle)
     {
-        return new TableExecuteHandle(catalogName, transactionHandle, connectorHandle);
-    }
-
-    @Override
-    public boolean equals(Object obj)
-    {
-        if (this == obj) {
-            return true;
-        }
-        if (obj == null || getClass() != obj.getClass()) {
-            return false;
-        }
-        TableExecuteHandle o = (TableExecuteHandle) obj;
-        return Objects.equals(this.catalogName, o.catalogName) &&
-                Objects.equals(this.transactionHandle, o.transactionHandle) &&
-                Objects.equals(this.connectorHandle, o.connectorHandle);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(catalogName, transactionHandle, connectorHandle);
+        return new TableExecuteHandle(catalogHandle, transactionHandle, connectorHandle);
     }
 
     @Override
     public String toString()
     {
-        return "Execute[" + catalogName + ":" + connectorHandle + "]";
+        return catalogHandle + ":" + connectorHandle;
     }
 }

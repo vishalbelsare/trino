@@ -13,7 +13,6 @@
  */
 package io.trino.type;
 
-import com.google.common.base.Joiner;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
@@ -28,22 +27,17 @@ import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 
-import java.util.List;
-
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.StandardTypes.ARRAY;
 import static io.trino.spi.type.StandardTypes.MAP;
 import static io.trino.spi.type.StandardTypes.ROW;
-import static java.lang.String.format;
+import static java.util.stream.Collectors.joining;
 
 public final class TypeUtils
 {
     public static final int NULL_HASH_CODE = 0;
 
-    private TypeUtils()
-    {
-    }
+    private TypeUtils() {}
 
     public static int expectedValueSize(Type type, int defaultSize)
     {
@@ -107,18 +101,14 @@ public final class TypeUtils
 
     private static String getRowDisplayLabelForLegacyClients(RowType type)
     {
-        List<String> fields = type.getFields().stream()
+        return type.getFields().stream()
                 .map(field -> {
                     String typeDisplayName = getDisplayLabelForLegacyClients(field.getType());
                     if (field.getName().isPresent()) {
                         return field.getName().get() + ' ' + typeDisplayName;
                     }
-                    else {
-                        return typeDisplayName;
-                    }
+                    return typeDisplayName;
                 })
-                .collect(toImmutableList());
-
-        return format("%s(%s)", ROW, Joiner.on(", ").join(fields));
+                .collect(joining(", ", ROW + "(", ")"));
     }
 }

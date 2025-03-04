@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.AggregationNode;
@@ -25,16 +25,15 @@ import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.Expression;
 
 import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.sql.ExpressionUtils.and;
-import static io.trino.sql.ExpressionUtils.combineDisjunctsWithDefault;
+import static io.trino.sql.ir.Booleans.TRUE;
+import static io.trino.sql.ir.IrUtils.and;
+import static io.trino.sql.ir.IrUtils.combineDisjunctsWithDefault;
 import static io.trino.sql.planner.plan.Patterns.aggregation;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 
 /**
  * Implements filtered aggregations by transforming plans of the following shape:
@@ -65,13 +64,6 @@ public class ImplementFilteredAggregations
 {
     private static final Pattern<AggregationNode> PATTERN = aggregation()
             .matching(ImplementFilteredAggregations::hasFilters);
-
-    private final Metadata metadata;
-
-    public ImplementFilteredAggregations(Metadata metadata)
-    {
-        this.metadata = metadata;
-    }
 
     private static boolean hasFilters(AggregationNode aggregation)
     {
@@ -131,29 +123,26 @@ public class ImplementFilteredAggregations
                     mask));
         }
 
-        Expression predicate = TRUE_LITERAL;
+        Expression predicate = TRUE;
         if (!aggregationNode.hasNonEmptyGroupingSet() && !aggregateWithoutFilterOrMaskPresent) {
-            predicate = combineDisjunctsWithDefault(metadata, maskSymbols.build(), TRUE_LITERAL);
+            predicate = combineDisjunctsWithDefault(maskSymbols.build(), TRUE);
         }
 
         // identity projection for all existing inputs
         newAssignments.putIdentities(aggregationNode.getSource().getOutputSymbols());
 
         return Result.ofPlanNode(
-                new AggregationNode(
-                        context.getIdAllocator().getNextId(),
-                        new FilterNode(
+                AggregationNode.builderFrom(aggregationNode)
+                        .setId(context.getIdAllocator().getNextId())
+                        .setSource(new FilterNode(
                                 context.getIdAllocator().getNextId(),
                                 new ProjectNode(
                                         context.getIdAllocator().getNextId(),
                                         aggregationNode.getSource(),
                                         newAssignments.build()),
-                                predicate),
-                        aggregations.build(),
-                        aggregationNode.getGroupingSets(),
-                        ImmutableList.of(),
-                        aggregationNode.getStep(),
-                        aggregationNode.getHashSymbol(),
-                        aggregationNode.getGroupIdSymbol()));
+                                predicate))
+                        .setAggregations(aggregations.buildOrThrow())
+                        .setPreGroupedSymbols(ImmutableList.of())
+                        .build());
     }
 }

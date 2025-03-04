@@ -15,7 +15,7 @@ package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.jdbc.credential.CredentialProviderTypeConfig;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -37,9 +37,7 @@ public class TestCredentialProviderTypeConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("credential-provider.type", "FILE")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("credential-provider.type", "FILE");
 
         CredentialProviderTypeConfig expected = new CredentialProviderTypeConfig()
                 .setCredentialProviderType(FILE);

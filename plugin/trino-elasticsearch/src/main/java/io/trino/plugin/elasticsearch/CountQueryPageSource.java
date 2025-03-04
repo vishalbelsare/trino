@@ -27,6 +27,7 @@ class CountQueryPageSource
     // This implementation of the page source is used whenever a query doesn't reference any columns
     // from the ES table. We need to limit the number of rows per page in case there are projections
     // in the query that can cause page sizes to explode. For example: SELECT rand() FROM some_table
+    // TODO (https://github.com/trinodb/trino/issues/16824) allow connector to return pages of arbitrary row count and handle this gracefully in engine
     private static final int BATCH_SIZE = 10000;
 
     private final long readTimeNanos;
@@ -40,13 +41,13 @@ class CountQueryPageSource
 
         long start = System.nanoTime();
         long count = client.count(
-                split.getIndex(),
-                split.getShard(),
-                buildSearchQuery(table.getConstraint().transformKeys(ElasticsearchColumnHandle.class::cast), table.getQuery()));
+                split.index(),
+                split.shard(),
+                buildSearchQuery(table.constraint().transformKeys(ElasticsearchColumnHandle.class::cast), table.query(), table.regexes()));
         readTimeNanos = System.nanoTime() - start;
 
-        if (table.getLimit().isPresent()) {
-            count = Math.min(table.getLimit().getAsLong(), count);
+        if (table.limit().isPresent()) {
+            count = Math.min(table.limit().getAsLong(), count);
         }
 
         remaining = count;
@@ -80,13 +81,11 @@ class CountQueryPageSource
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
         return 0;
     }
 
     @Override
-    public void close()
-    {
-    }
+    public void close() {}
 }

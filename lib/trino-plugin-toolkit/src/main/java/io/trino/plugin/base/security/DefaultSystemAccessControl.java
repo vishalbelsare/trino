@@ -13,15 +13,15 @@
  */
 package io.trino.plugin.base.security;
 
+import io.trino.spi.security.Identity;
 import io.trino.spi.security.SystemAccessControl;
 import io.trino.spi.security.SystemAccessControlFactory;
-import io.trino.spi.security.SystemSecurityContext;
 
 import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.security.AccessDeniedException.denyImpersonateUser;
-import static java.util.Objects.requireNonNull;
+import static io.trino.spi.security.AccessDeniedException.denyWriteSystemInformationAccess;
 
 /**
  * Default system access control rules.
@@ -44,17 +44,22 @@ public class DefaultSystemAccessControl
         }
 
         @Override
-        public SystemAccessControl create(Map<String, String> config)
+        public SystemAccessControl create(Map<String, String> config, SystemAccessControlContext context)
         {
-            requireNonNull(config, "config is null");
             checkArgument(config.isEmpty(), "This access controller does not support any configuration properties");
             return INSTANCE;
         }
     }
 
     @Override
-    public void checkCanImpersonateUser(SystemSecurityContext context, String userName)
+    public void checkCanImpersonateUser(Identity identity, String userName)
     {
-        denyImpersonateUser(context.getIdentity().getUser(), userName);
+        denyImpersonateUser(identity.getUser(), userName);
+    }
+
+    @Override
+    public void checkCanWriteSystemInformation(Identity identity)
+    {
+        denyWriteSystemInformationAccess();
     }
 }

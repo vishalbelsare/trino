@@ -18,7 +18,7 @@ import io.trino.spi.type.Decimals;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.Type;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.util.OptionalDouble;
@@ -38,7 +38,7 @@ import static io.trino.spi.type.TimestampType.createTimestampType;
 import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.Float.floatToIntBits;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestStatsUtil
 {
@@ -52,7 +52,7 @@ public class TestStatsUtil
         assertToStatsRepresentation(DOUBLE, 0.1d, 0.1);
         assertToStatsRepresentation(REAL, (long) floatToIntBits(0.2f), 0.2f);
         assertToStatsRepresentation(createDecimalType(5, 2), 12345L, 123.45);
-        assertToStatsRepresentation(createDecimalType(25, 5), Decimals.encodeScaledValue(new BigDecimal("12345678901234567890.12345")), 12345678901234567890.12345);
+        assertToStatsRepresentation(createDecimalType(25, 5), Decimals.valueOf(new BigDecimal("12345678901234567890.12345")), 12345678901234567890.12345);
         assertToStatsRepresentation(DATE, 1L, 1);
         assertToStatsRepresentation(createTimestampType(0), 3_000_000L, 3_000_000.);
         assertToStatsRepresentation(createTimestampType(3), 3_000L, 3_000.);
@@ -69,6 +69,6 @@ public class TestStatsUtil
     private static void assertToStatsRepresentation(Type type, Object trinoValue, double expected)
     {
         verify(Primitives.wrap(type.getJavaType()).isInstance(trinoValue), "Incorrect class of value for %s: %s", type, trinoValue.getClass());
-        assertEquals(toStatsRepresentation(type, trinoValue), OptionalDouble.of(expected));
+        assertThat(toStatsRepresentation(type, trinoValue)).isEqualTo(OptionalDouble.of(expected));
     }
 }

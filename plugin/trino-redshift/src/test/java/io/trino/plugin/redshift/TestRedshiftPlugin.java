@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
 
@@ -28,6 +28,29 @@ public class TestRedshiftPlugin
     {
         Plugin plugin = new RedshiftPlugin();
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        factory.create("test", ImmutableMap.of("connection-url", "jdbc:redshift:test"), new TestingConnectorContext()).shutdown();
+        factory.create(
+                "test",
+                ImmutableMap.of(
+                        "connection-url", "jdbc:redshift:test",
+                        "bootstrap.quiet", "true"),
+                new TestingConnectorContext()).shutdown();
+    }
+
+    @Test
+    public void testCreateUnloadConnector()
+    {
+        Plugin plugin = new RedshiftPlugin();
+        ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
+        factory.create(
+                "test",
+                ImmutableMap.of(
+                        "connection-url", "jdbc:redshift:test",
+                        "redshift.unload-location", "s3://bucket/path",
+                        "redshift.unload-iam-role", "role",
+                        "s3.aws-access-key", "access-key",
+                        "s3.aws-secret-key", "secret-key",
+                        "s3.region", "region",
+                        "bootstrap.quiet", "true"),
+                new TestingConnectorContext()).shutdown();
     }
 }

@@ -13,15 +13,21 @@
  */
 package io.trino.plugin.pinot;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.net.HostAndPort;
 import io.airlift.configuration.testing.ConfigAssertions;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import jakarta.validation.constraints.AssertTrue;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestPinotConfig
 {
@@ -30,13 +36,8 @@ public class TestPinotConfig
     {
         ConfigAssertions.assertRecordedDefaults(
                 ConfigAssertions.recordDefaults(PinotConfig.class)
-                        .setControllerUrls("")
-                        .setIdleTimeout(new Duration(5, TimeUnit.MINUTES))
-                        .setMaxBacklogPerServer(30)
-                        .setMaxConnectionsPerServer(30)
-                        .setMinConnectionsPerServer(10)
-                        .setThreadPoolSize(30)
-                        .setEstimatedSizeInBytesForNonNumericColumn(20)
+                        .setControllerUrls(ImmutableList.of())
+                        .setBrokerUrl(null)
                         .setConnectionTimeout(new Duration(1, TimeUnit.MINUTES))
                         .setMetadataCacheExpiry(new Duration(2, TimeUnit.MINUTES))
                         .setPreferBrokerQueries(false)
@@ -44,24 +45,19 @@ public class TestPinotConfig
                         .setFetchRetryCount(2)
                         .setForbidSegmentQueries(false)
                         .setNonAggregateLimitForBrokerQueries(25_000)
-                        .setRequestTimeout(new Duration(30, TimeUnit.SECONDS))
-                        .setMaxRowsPerSplitForSegmentQueries(50_000)
                         .setMaxRowsForBrokerQueries(50_000)
                         .setAggregationPushdownEnabled(true)
-                        .setCountDistinctPushdownEnabled(true));
+                        .setCountDistinctPushdownEnabled(true)
+                        .setProxyEnabled(false)
+                        .setTargetSegmentPageSize(DataSize.of(1, MEGABYTE)));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("pinot.controller-urls", "host1:1111,host2:1111")
-                .put("pinot.idle-timeout", "1h")
-                .put("pinot.max-backlog-per-server", "15")
-                .put("pinot.max-connections-per-server", "10")
-                .put("pinot.min-connections-per-server", "1")
-                .put("pinot.thread-pool-size", "100")
-                .put("pinot.estimated-size-in-bytes-for-non-numeric-column", "30")
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
+                .put("pinot.controller-urls", "https://host1:1111,https://host2:1111")
+                .put("pinot.broker-url", "host1:1111")
                 .put("pinot.connection-timeout", "8m")
                 .put("pinot.metadata-expiry", "1m")
                 .put("pinot.prefer-broker-queries", "true")
@@ -69,21 +65,16 @@ public class TestPinotConfig
                 .put("pinot.fetch-retry-count", "3")
                 .put("pinot.non-aggregate-limit-for-broker-queries", "10")
                 .put("pinot.forbid-segment-queries", "true")
-                .put("pinot.request-timeout", "1m")
-                .put("pinot.max-rows-per-split-for-segment-queries", "10")
                 .put("pinot.max-rows-for-broker-queries", "5000")
                 .put("pinot.aggregation-pushdown.enabled", "false")
                 .put("pinot.count-distinct-pushdown.enabled", "false")
-                .build();
+                .put("pinot.proxy.enabled", "true")
+                .put("pinot.target-segment-page-size", "2MB")
+                .buildOrThrow();
 
         PinotConfig expected = new PinotConfig()
-                .setControllerUrls("host1:1111,host2:1111")
-                .setIdleTimeout(new Duration(1, TimeUnit.HOURS))
-                .setMaxBacklogPerServer(15)
-                .setMaxConnectionsPerServer(10)
-                .setMinConnectionsPerServer(1)
-                .setThreadPoolSize(100)
-                .setEstimatedSizeInBytesForNonNumericColumn(30)
+                .setControllerUrls(ImmutableList.of("https://host1:1111", "https://host2:1111"))
+                .setBrokerUrl(HostAndPort.fromString("host1:1111"))
                 .setConnectionTimeout(new Duration(8, TimeUnit.MINUTES))
                 .setMetadataCacheExpiry(new Duration(1, TimeUnit.MINUTES))
                 .setPreferBrokerQueries(true)
@@ -91,11 +82,11 @@ public class TestPinotConfig
                 .setFetchRetryCount(3)
                 .setNonAggregateLimitForBrokerQueries(10)
                 .setForbidSegmentQueries(true)
-                .setRequestTimeout(new Duration(1, TimeUnit.MINUTES))
-                .setMaxRowsPerSplitForSegmentQueries(10)
                 .setMaxRowsForBrokerQueries(5000)
                 .setAggregationPushdownEnabled(false)
-                .setCountDistinctPushdownEnabled(false);
+                .setCountDistinctPushdownEnabled(false)
+                .setProxyEnabled(true)
+                .setTargetSegmentPageSize(DataSize.of(2, MEGABYTE));
 
         ConfigAssertions.assertFullMapping(properties, expected);
     }
@@ -103,11 +94,34 @@ public class TestPinotConfig
     @Test
     public void testInvalidCountDistinctPushdown()
     {
-        assertThatThrownBy(() -> new PinotConfig()
-                .setAggregationPushdownEnabled(false)
-                .setCountDistinctPushdownEnabled(true)
-                .validate())
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Invalid configuration: pinot.aggregation-pushdown.enabled must be enabled if pinot.count-distinct-pushdown.enabled");
+        assertFailsValidation(
+                new PinotConfig()
+                        .setAggregationPushdownEnabled(false)
+                        .setCountDistinctPushdownEnabled(true),
+                "validConfiguration",
+                "Invalid configuration: pinot.aggregation-pushdown.enabled must be enabled if pinot.count-distinct-pushdown.enabled",
+                AssertTrue.class);
+    }
+
+    @Test
+    public void testControllerUrls()
+    {
+        PinotConfig config = new PinotConfig();
+        config.setControllerUrls(ImmutableList.of("my-controller-1:8443", "my-controller-2:8443"));
+        assertThat(config.allUrlSchemesEqual()).isTrue();
+        assertThat(config.isTlsEnabled()).isFalse();
+        config.setControllerUrls(ImmutableList.of("http://my-controller-1:9000", "http://my-controller-2:9000"));
+        assertThat(config.allUrlSchemesEqual()).isTrue();
+        assertThat(config.isTlsEnabled()).isFalse();
+        config.setControllerUrls(ImmutableList.of("https://my-controller-1:8443", "https://my-controller-2:8443"));
+        assertThat(config.allUrlSchemesEqual()).isTrue();
+        assertThat(config.isTlsEnabled()).isTrue();
+        config.setControllerUrls(ImmutableList.of("my-controller-1:8443", "http://my-controller-2:8443"));
+        assertThat(config.allUrlSchemesEqual()).isTrue();
+        assertThat(config.isTlsEnabled()).isFalse();
+        config.setControllerUrls(ImmutableList.of("http://my-controller-1:8443", "https://my-controller-2:8443"));
+        assertThat(config.allUrlSchemesEqual()).isFalse();
+        config.setControllerUrls(ImmutableList.of("my-controller-1:8443", "https://my-controller-2:8443"));
+        assertThat(config.allUrlSchemesEqual()).isFalse();
     }
 }

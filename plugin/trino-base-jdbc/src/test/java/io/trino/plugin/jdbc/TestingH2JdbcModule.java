@@ -17,13 +17,18 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import com.google.inject.Scopes;
 import com.google.inject.Singleton;
+import io.trino.plugin.base.mapping.IdentifierMapping;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
+import io.trino.plugin.jdbc.ptf.Query;
+import io.trino.spi.function.table.ConnectorTableFunction;
 import org.h2.Driver;
 
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -34,7 +39,7 @@ public class TestingH2JdbcModule
 
     public TestingH2JdbcModule()
     {
-        this((config, connectionFactory) -> new TestingH2JdbcClient(config, connectionFactory));
+        this(TestingH2JdbcClient::new);
     }
 
     public TestingH2JdbcModule(TestingH2JdbcClientFactory testingH2JdbcClientFactory)
@@ -43,13 +48,17 @@ public class TestingH2JdbcModule
     }
 
     @Override
-    public void configure(Binder binder) {}
+    public void configure(Binder binder)
+    {
+        newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
+    }
 
     @Provides
+    @Singleton
     @ForBaseJdbc
-    public JdbcClient provideJdbcClient(BaseJdbcConfig config, ConnectionFactory connectionFactory)
+    public JdbcClient provideJdbcClient(BaseJdbcConfig config, ConnectionFactory connectionFactory, QueryBuilder queryBuilder, IdentifierMapping identifierMapping)
     {
-        return testingH2JdbcClientFactory.create(config, connectionFactory);
+        return testingH2JdbcClientFactory.create(config, connectionFactory, queryBuilder, identifierMapping);
     }
 
     @Provides
@@ -57,18 +66,23 @@ public class TestingH2JdbcModule
     @ForBaseJdbc
     public ConnectionFactory getConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider)
     {
-        return new DriverConnectionFactory(new Driver(), config, credentialProvider);
+        return DriverConnectionFactory.builder(new Driver(), config.getConnectionUrl(), credentialProvider).build();
     }
 
     public static Map<String, String> createProperties()
     {
-        return ImmutableMap.<String, String>builder()
-                .put("connection-url", format("jdbc:h2:mem:test%s;DB_CLOSE_DELAY=-1", System.nanoTime() + ThreadLocalRandom.current().nextLong()))
-                .build();
+        return ImmutableMap.of(
+                "connection-url", createH2ConnectionUrl(),
+                "bootstrap.quiet", "true");
+    }
+
+    public static String createH2ConnectionUrl()
+    {
+        return format("jdbc:h2:mem:test%s;DB_CLOSE_DELAY=-1;DEFAULT_LOCK_TIMEOUT=5000", System.nanoTime() + ThreadLocalRandom.current().nextLong());
     }
 
     public interface TestingH2JdbcClientFactory
     {
-        TestingH2JdbcClient create(BaseJdbcConfig config, ConnectionFactory connectionFactory);
+        TestingH2JdbcClient create(BaseJdbcConfig config, ConnectionFactory connectionFactory, QueryBuilder queryBuilder, IdentifierMapping identifierMapping);
     }
 }

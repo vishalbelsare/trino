@@ -17,19 +17,16 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.tpcds.statistics.TpcdsTableStatisticsFactory;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
-import io.trino.spi.connector.ConnectorTableLayout;
-import io.trino.spi.connector.ConnectorTableLayoutHandle;
-import io.trino.spi.connector.ConnectorTableLayoutResult;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
-import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.DateType;
@@ -45,6 +42,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.CharType.createCharType;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.VarcharType.createVarcharType;
@@ -86,8 +84,12 @@ public class TpcdsMetadata
     }
 
     @Override
-    public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName)
+    public ConnectorTableHandle getTableHandle(ConnectorSession session, SchemaTableName tableName, Optional<ConnectorTableVersion> startVersion, Optional<ConnectorTableVersion> endVersion)
     {
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
+        }
+
         requireNonNull(tableName, "tableName is null");
         if (!tableNames.contains(tableName.getTableName())) {
             return null;
@@ -103,42 +105,12 @@ public class TpcdsMetadata
     }
 
     @Override
-    public List<ConnectorTableLayoutResult> getTableLayouts(
-            ConnectorSession session,
-            ConnectorTableHandle table,
-            Constraint constraint,
-            Optional<Set<ColumnHandle>> desiredColumns)
-    {
-        TpcdsTableHandle tableHandle = (TpcdsTableHandle) table;
-        ConnectorTableLayout layout = new ConnectorTableLayout(
-                new TpcdsTableLayoutHandle(tableHandle),
-                Optional.empty(),
-                TupleDomain.all(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                ImmutableList.of());
-
-        return ImmutableList.of(new ConnectorTableLayoutResult(layout, constraint.getSummary()));
-    }
-
-    @Override
-    public ConnectorTableLayout getTableLayout(ConnectorSession session, ConnectorTableLayoutHandle handle)
-    {
-        TpcdsTableLayoutHandle layout = (TpcdsTableLayoutHandle) handle;
-
-        return getTableLayouts(session, layout.getTable(), Constraint.alwaysTrue(), Optional.empty())
-                .get(0)
-                .getTableLayout();
-    }
-
-    @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         TpcdsTableHandle tpcdsTableHandle = (TpcdsTableHandle) tableHandle;
 
-        Table table = Table.getTable(tpcdsTableHandle.getTableName());
-        String schemaName = scaleFactorSchemaName(tpcdsTableHandle.getScaleFactor());
+        Table table = Table.getTable(tpcdsTableHandle.tableName());
+        String schemaName = scaleFactorSchemaName(tpcdsTableHandle.scaleFactor());
 
         return getTableMetadata(schemaName, table);
     }
@@ -154,12 +126,12 @@ public class TpcdsMetadata
     }
 
     @Override
-    public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint constraint)
+    public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         TpcdsTableHandle tpcdsTableHandle = (TpcdsTableHandle) tableHandle;
 
-        Table table = Table.getTable(tpcdsTableHandle.getTableName());
-        String schemaName = scaleFactorSchemaName(tpcdsTableHandle.getScaleFactor());
+        Table table = Table.getTable(tpcdsTableHandle.tableName());
+        String schemaName = scaleFactorSchemaName(tpcdsTableHandle.scaleFactor());
 
         return tpcdsTableStatisticsFactory.create(schemaName, table, getColumnHandles(session, tableHandle));
     }
@@ -171,14 +143,14 @@ public class TpcdsMetadata
         for (ColumnMetadata columnMetadata : getTableMetadata(session, tableHandle).getColumns()) {
             builder.put(columnMetadata.getName(), new TpcdsColumnHandle(columnMetadata.getName(), columnMetadata.getType()));
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     @Override
     public ColumnMetadata getColumnMetadata(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
     {
         ConnectorTableMetadata tableMetadata = getTableMetadata(session, tableHandle);
-        String columnName = ((TpcdsColumnHandle) columnHandle).getColumnName();
+        String columnName = ((TpcdsColumnHandle) columnHandle).columnName();
 
         for (ColumnMetadata column : tableMetadata.getColumns()) {
             if (column.getName().equals(columnName)) {
@@ -200,7 +172,7 @@ public class TpcdsMetadata
                 }
             }
         }
-        return tableColumns.build();
+        return tableColumns.buildOrThrow();
     }
 
     @Override
@@ -244,29 +216,21 @@ public class TpcdsMetadata
         try {
             return Double.parseDouble(schemaName.substring(2));
         }
-        catch (Exception ignored) {
+        catch (Exception _) {
             return -1;
         }
     }
 
     public static Type getTrinoType(ColumnType tpcdsType)
     {
-        switch (tpcdsType.getBase()) {
-            case IDENTIFIER:
-                return BigintType.BIGINT;
-            case INTEGER:
-                return IntegerType.INTEGER;
-            case DATE:
-                return DateType.DATE;
-            case DECIMAL:
-                return createDecimalType(tpcdsType.getPrecision().get(), tpcdsType.getScale().get());
-            case CHAR:
-                return createCharType(tpcdsType.getPrecision().get());
-            case VARCHAR:
-                return createVarcharType(tpcdsType.getPrecision().get());
-            case TIME:
-                return TimeType.TIME;
-        }
-        throw new IllegalArgumentException("Unsupported TPC-DS type " + tpcdsType);
+        return switch (tpcdsType.getBase()) {
+            case IDENTIFIER -> BigintType.BIGINT;
+            case INTEGER -> IntegerType.INTEGER;
+            case DATE -> DateType.DATE;
+            case DECIMAL -> createDecimalType(tpcdsType.getPrecision().get(), tpcdsType.getScale().get());
+            case CHAR -> createCharType(tpcdsType.getPrecision().get());
+            case VARCHAR -> createVarcharType(tpcdsType.getPrecision().get());
+            case TIME -> TimeType.TIME_MILLIS;
+        };
     }
 }

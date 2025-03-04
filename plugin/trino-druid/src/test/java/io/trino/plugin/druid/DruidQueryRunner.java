@@ -13,53 +13,136 @@
  */
 package io.trino.plugin.druid;
 
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableList;
+import com.google.common.io.Resources;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.airlift.log.Logger;
-import io.airlift.log.Logging;
-import io.trino.Session;
+import io.trino.plugin.base.util.Closables;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.MaterializedRow;
+import io.trino.testing.QueryRunner;
+import io.trino.tpch.TpchTable;
 
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
-import static io.airlift.testing.Closeables.closeAllSuppress;
+import static com.google.common.io.Resources.getResource;
+import static io.airlift.units.Duration.nanosSince;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.tpch.TpchTable.CUSTOMER;
+import static io.trino.tpch.TpchTable.LINE_ITEM;
+import static io.trino.tpch.TpchTable.NATION;
+import static io.trino.tpch.TpchTable.ORDERS;
+import static io.trino.tpch.TpchTable.PART;
+import static io.trino.tpch.TpchTable.REGION;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
-public class DruidQueryRunner
+public final class DruidQueryRunner
 {
     private DruidQueryRunner() {}
 
-    public static DistributedQueryRunner createDruidQueryRunnerTpch(TestingDruidServer testingDruidServer, Map<String, String> extraProperties)
-            throws Exception
-    {
-        DistributedQueryRunner queryRunner = null;
-        try {
-            queryRunner = DistributedQueryRunner.builder(createSession())
-                    .setExtraProperties(extraProperties)
-                    .build();
-            queryRunner.installPlugin(new TpchPlugin());
-            queryRunner.createCatalog("tpch", "tpch");
+    private static final Logger log = Logger.get(DruidQueryRunner.class);
 
-            Map<String, String> connectorProperties = new HashMap<>();
-            connectorProperties.putIfAbsent("connection-url", testingDruidServer.getJdbcUrl());
-            queryRunner.installPlugin(new DruidJdbcPlugin());
-            queryRunner.createCatalog("druid", "druid", connectorProperties);
-            return queryRunner;
+    private static final String SCHEMA = "druid";
+
+    public static Builder builder(TestingDruidServer druidServer)
+    {
+        return new Builder(druidServer)
+                .addConnectorProperty("connection-url", druidServer.getJdbcUrl());
+    }
+
+    public static class Builder
+            extends DistributedQueryRunner.Builder<Builder>
+    {
+        private final TestingDruidServer druidServer;
+        private final Map<String, String> connectorProperties = new HashMap<>();
+        private List<TpchTable<?>> initialTables = ImmutableList.of();
+
+        private Builder(TestingDruidServer druidServer)
+        {
+            super(testSessionBuilder()
+                    .setCatalog("druid")
+                    .setSchema(SCHEMA)
+                    .build());
+            this.druidServer = requireNonNull(druidServer, "druidServer is null");
         }
-        catch (Throwable e) {
-            closeAllSuppress(e, queryRunner);
-            throw e;
+
+        @CanIgnoreReturnValue
+        public Builder addConnectorProperty(String key, String value)
+        {
+            this.connectorProperties.put(key, value);
+            return this;
         }
+
+        @CanIgnoreReturnValue
+        public Builder setInitialTables(List<TpchTable<?>> initialTables)
+        {
+            this.initialTables = ImmutableList.copyOf(initialTables);
+            return this;
+        }
+
+        @Override
+        public DistributedQueryRunner build()
+                throws Exception
+        {
+            DistributedQueryRunner queryRunner = super.build();
+            try {
+                queryRunner.installPlugin(new TpchPlugin());
+                queryRunner.createCatalog("tpch", "tpch");
+
+                queryRunner.installPlugin(new DruidJdbcPlugin());
+                queryRunner.createCatalog("druid", "druid", connectorProperties);
+
+                log.info("Loading data from druid.%s...", SCHEMA);
+                long startTime = System.nanoTime();
+                for (TpchTable<?> table : initialTables) {
+                    long start = System.nanoTime();
+                    log.info("Running import for %s", table.getTableName());
+                    MaterializedResult rows = queryRunner.execute(DruidTpchTables.getSelectQuery(table.getTableName()));
+                    copyAndIngestTpchData(rows, druidServer, table.getTableName());
+                    log.info("Imported %s rows for %s in %s", rows.getRowCount(), table.getTableName(), nanosSince(start).convertToMostSuccinctTimeUnit());
+                }
+                log.info("Loading from druid.%s complete in %s", SCHEMA, nanosSince(startTime).toString(SECONDS));
+
+                return queryRunner;
+            }
+            catch (Throwable e) {
+                Closables.closeAllSuppress(e, queryRunner);
+                throw e;
+            }
+        }
+    }
+
+    public static void copyAndIngestTpchDataFromSourceToTarget(
+            MaterializedResult rows,
+            TestingDruidServer testingDruidServer,
+            String sourceDatasource,
+            String targetDatasource,
+            Optional<String> fileName)
+            throws IOException, InterruptedException
+    {
+        String tsvFileLocation = format("%s/%s.tsv", testingDruidServer.getHostWorkingDirectory(), targetDatasource);
+        writeDataAsTsv(rows, tsvFileLocation);
+        testingDruidServer.ingestData(
+                targetDatasource,
+                fileName,
+                Resources.toString(
+                        getResource(getIngestionSpecFileName(sourceDatasource)),
+                        Charset.defaultCharset()),
+                tsvFileLocation);
     }
 
     public static void copyAndIngestTpchData(MaterializedResult rows, TestingDruidServer testingDruidServer, String druidDatasource)
@@ -67,7 +150,13 @@ public class DruidQueryRunner
     {
         String tsvFileLocation = format("%s/%s.tsv", testingDruidServer.getHostWorkingDirectory(), druidDatasource);
         writeDataAsTsv(rows, tsvFileLocation);
-        testingDruidServer.ingestData(druidDatasource, getIngestionSpecFileName(druidDatasource), tsvFileLocation);
+        testingDruidServer.ingestData(
+                druidDatasource,
+                Optional.empty(),
+                Resources.toString(
+                        getResource(getIngestionSpecFileName(druidDatasource)),
+                        Charset.defaultCharset()),
+                tsvFileLocation);
     }
 
     private static String getIngestionSpecFileName(String datasource)
@@ -75,19 +164,11 @@ public class DruidQueryRunner
         return format("druid-tpch-ingest-%s.json", datasource);
     }
 
-    private static Session createSession()
-    {
-        return testSessionBuilder()
-                .setCatalog("druid")
-                .setSchema("druid")
-                .build();
-    }
-
     private static void writeDataAsTsv(MaterializedResult rows, String dataFile)
             throws IOException
     {
         File file = new File(dataFile);
-        try (BufferedWriter bw = new BufferedWriter(new FileWriter(file))) {
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(file, UTF_8))) {
             for (MaterializedRow row : rows.getMaterializedRows()) {
                 bw.write(convertToTSV(row.getFields()));
                 bw.newLine();
@@ -105,11 +186,9 @@ public class DruidQueryRunner
     public static void main(String[] args)
             throws Exception
     {
-        Logging.initialize();
-
-        DistributedQueryRunner queryRunner = createDruidQueryRunnerTpch(
-                new TestingDruidServer(),
-                ImmutableMap.of("http-server.http.port", "8080"));
+        QueryRunner queryRunner = builder(new TestingDruidServer())
+                .setInitialTables(ImmutableList.of(ORDERS, LINE_ITEM, NATION, REGION, PART, CUSTOMER))
+                .build();
 
         Logger log = Logger.get(DruidQueryRunner.class);
         log.info("======== SERVER STARTED ========");

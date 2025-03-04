@@ -13,13 +13,10 @@
  */
 package io.trino.verifier;
 
-import io.airlift.event.client.AbstractEventClient;
+import com.google.inject.Inject;
 import io.airlift.stats.QuantileDigest;
 import io.airlift.units.Duration;
 
-import javax.inject.Inject;
-
-import java.io.Closeable;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -30,8 +27,7 @@ import static java.lang.System.out;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class HumanReadableEventClient
-        extends AbstractEventClient
-        implements Closeable
+        implements EventConsumer
 {
     private static final double LARGE_SPEEDUP = 0.5;
     private static final double SMALL_SPEEDUP = 1.0;
@@ -57,10 +53,8 @@ public class HumanReadableEventClient
     }
 
     @Override
-    public <T> void postEvent(T event)
+    public void postEvent(VerifierQueryEvent queryEvent)
     {
-        VerifierQueryEvent queryEvent = (VerifierQueryEvent) event;
-
         Optional<Double> cpuRatio = getCpuRatio(queryEvent);
         if (cpuRatio.isPresent()) {
             recordCpuRatio(cpuRatio.get());

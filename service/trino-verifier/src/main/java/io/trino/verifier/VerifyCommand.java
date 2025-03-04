@@ -18,15 +18,20 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import com.google.inject.Binder;
+import com.google.inject.Inject;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
+import com.google.inject.Provider;
+import com.google.inject.Provides;
+import com.google.inject.Scopes;
+import com.google.inject.Singleton;
 import com.google.inject.TypeLiteral;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
-import io.airlift.event.client.EventClient;
+import io.airlift.json.JsonModule;
 import io.airlift.log.Logger;
-import io.trino.sql.parser.ParsingOptions;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AddColumn;
 import io.trino.sql.tree.Comment;
@@ -89,11 +94,11 @@ import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.sql.parser.ParsingOptions.DecimalLiteralTreatment.AS_DOUBLE;
 import static io.trino.verifier.QueryType.CREATE;
 import static io.trino.verifier.QueryType.MODIFY;
 import static io.trino.verifier.QueryType.READ;
 import static io.trino.verifier.VerifyCommand.VersionProvider;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static picocli.CommandLine.IVersionProvider;
@@ -125,7 +130,9 @@ public class VerifyCommand
         }
 
         ImmutableList.Builder<Module> builder = ImmutableList.<Module>builder()
-                .add(new PrestoVerifierModule())
+                .add(new JsonModule())
+                .add(new TrinoVerifierModule())
+                .add(new DataSourceModule(this))
                 .addAll(getAdditionalModules());
 
         Bootstrap app = new Bootstrap(builder.build());
@@ -141,15 +148,11 @@ public class VerifyCommand
         try {
             VerifierConfig config = injector.getInstance(VerifierConfig.class);
             injector.injectMembers(this);
-            Set<String> supportedEventClients = injector.getInstance(Key.get(new TypeLiteral<Set<String>>() {}, SupportedEventClients.class));
+            Set<String> supportedEventClients = injector.getInstance(Key.get(new TypeLiteral<>() {}, SupportedEventClients.class));
             for (String clientType : config.getEventClients()) {
                 checkArgument(supportedEventClients.contains(clientType), "Unsupported event client: %s", clientType);
             }
-            Set<EventClient> eventClients = injector.getInstance(Key.get(new TypeLiteral<Set<EventClient>>() {}));
-
-            VerifierDao dao = Jdbi.create(getQueryDatabase(injector))
-                    .installPlugin(new SqlObjectPlugin())
-                    .onDemand(VerifierDao.class);
+            VerifierDao dao = injector.getInstance(VerifierDao.class);
 
             ImmutableList.Builder<QueryPair> queriesBuilder = ImmutableList.builder();
             for (String suite : config.getSuites()) {
@@ -178,9 +181,9 @@ public class VerifyCommand
                     loadJdbcDriver(urls, config.getControlJdbcDriverName());
                 }
             }
-
             // TODO: construct this with Guice
-            int numFailedQueries = new Verifier(System.out, config, eventClients).run(queries);
+            int numFailedQueries = new Verifier(System.out, config, injector.getInstance(new Key<>(){}))
+                    .run(queries);
             System.exit((numFailedQueries > 0) ? 1 : 0);
         }
         catch (InterruptedException | MalformedURLException e) {
@@ -354,7 +357,7 @@ public class VerifyCommand
     static QueryType statementToQueryType(SqlParser parser, String sql)
     {
         try {
-            return statementToQueryType(parser.createStatement(sql, new ParsingOptions(AS_DOUBLE /* anything */)));
+            return statementToQueryType(parser.createStatement(sql));
         }
         catch (RuntimeException e) {
             throw new UnsupportedOperationException();
@@ -498,6 +501,56 @@ public class VerifyCommand
         {
             String version = getClass().getPackage().getImplementationVersion();
             return new String[] {spec.name() + " " + firstNonNull(version, "(version unknown)")};
+        }
+    }
+
+    private static class DataSourceModule
+            implements Module
+    {
+        private final VerifyCommand command;
+
+        private DataSourceModule(VerifyCommand command)
+        {
+            this.command = requireNonNull(command, "command is null");
+        }
+
+        @Override
+        public void configure(Binder binder)
+        {
+            binder.bind(VerifierDao.class).toProvider(VerifierDaoProvider.class).in(Scopes.SINGLETON);
+        }
+
+        @Singleton
+        @Provides
+        public ConnectionFactory createConnectionFactory(Injector injector)
+        {
+            return command.getQueryDatabase(injector);
+        }
+
+        @Singleton
+        @Provides
+        public static Jdbi createJdbi(ConnectionFactory connectionFactory)
+        {
+            return Jdbi.create(connectionFactory)
+                    .installPlugin(new SqlObjectPlugin());
+        }
+    }
+
+    private static class VerifierDaoProvider
+            implements Provider<VerifierDao>
+    {
+        private final VerifierDao dao;
+
+        @Inject
+        public VerifierDaoProvider(Jdbi jdbi)
+        {
+            this.dao = jdbi.onDemand(VerifierDao.class);
+        }
+
+        @Override
+        public VerifierDao get()
+        {
+            return dao;
         }
     }
 }

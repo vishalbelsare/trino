@@ -93,12 +93,20 @@ public class LocalDispatchQuery
 
         stateMachine.addStateChangeListener(state -> {
             if (state == QueryState.FAILED) {
+                // notificationSentOrGuaranteed.compareAndSet(false, true) ensures the queryCompletedEvent is only fired once.
+                // Either via an immediateFailureEvent or a finalQueryInfoListener.
+                // In cases when finalQueryInfoListener wins the race AND finalQueryInfo is not set the listener isn't triggered.
+                // getFullQueryInfo() force sets finalQueryInfo so the finalQueryInfoListener condition is met.
+                ExecutionFailureInfo failureInfo = getFullQueryInfo().getFailureInfo();
                 if (notificationSentOrGuaranteed.compareAndSet(false, true)) {
-                    queryMonitor.queryImmediateFailureEvent(getBasicQueryInfo(), getFullQueryInfo().getFailureInfo());
+                    queryMonitor.queryImmediateFailureEvent(getBasicQueryInfo(), failureInfo);
                 }
             }
-            if (state.isDone()) {
+            // any PLANNING or later state means the query has been submitted for execution
+            if (state.ordinal() >= QueryState.PLANNING.ordinal()) {
                 submitted.set(null);
+            }
+            if (state.isDone()) {
                 queryExecutionFuture.cancel(true);
             }
         });
@@ -123,8 +131,8 @@ public class LocalDispatchQuery
             }
             ListenableFuture<Void> minimumWorkerFuture = clusterSizeMonitor.waitForMinimumWorkers(executionMinCount, getRequiredWorkersMaxWait(session));
             // when worker requirement is met, start the execution
-            addSuccessCallback(minimumWorkerFuture, () -> startExecution(queryExecution));
-            addExceptionCallback(minimumWorkerFuture, throwable -> queryExecutor.execute(() -> stateMachine.transitionToFailed(throwable)));
+            addSuccessCallback(minimumWorkerFuture, () -> startExecution(queryExecution), queryExecutor);
+            addExceptionCallback(minimumWorkerFuture, stateMachine::transitionToFailed, queryExecutor);
 
             // cancel minimumWorkerFuture if query fails for some reason or is cancelled by user
             stateMachine.addStateChangeListener(state -> {
@@ -137,25 +145,23 @@ public class LocalDispatchQuery
 
     private void startExecution(QueryExecution queryExecution)
     {
-        queryExecutor.execute(() -> {
-            if (stateMachine.transitionToDispatching()) {
-                try {
-                    querySubmitter.accept(queryExecution);
-                    if (notificationSentOrGuaranteed.compareAndSet(false, true)) {
-                        queryExecution.addFinalQueryInfoListener(queryMonitor::queryCompletedEvent);
-                    }
-                }
-                catch (Throwable t) {
-                    // this should never happen but be safe
-                    stateMachine.transitionToFailed(t);
-                    log.error(t, "query submitter threw exception");
-                    throw t;
-                }
-                finally {
-                    submitted.set(null);
+        if (stateMachine.transitionToDispatching()) {
+            try {
+                querySubmitter.accept(queryExecution);
+                if (notificationSentOrGuaranteed.compareAndSet(false, true)) {
+                    queryExecution.addFinalQueryInfoListener(queryMonitor::queryCompletedEvent);
                 }
             }
-        });
+            catch (Throwable t) {
+                // this should never happen but be safe
+                stateMachine.transitionToFailed(t);
+                log.error(t, "query submitter threw exception");
+                throw t;
+            }
+            finally {
+                submitted.set(null);
+            }
+        }
     }
 
     @Override
@@ -301,6 +307,12 @@ public class LocalDispatchQuery
     }
 
     @Override
+    public boolean isInfoPruned()
+    {
+        return stateMachine.isQueryInfoPruned();
+    }
+
+    @Override
     public Optional<ErrorCode> getErrorCode()
     {
         return stateMachine.getFailureInfo().map(ExecutionFailureInfo::getErrorCode);
@@ -317,7 +329,7 @@ public class LocalDispatchQuery
         try {
             return tryGetFutureValue(queryExecutionFuture);
         }
-        catch (Exception ignored) {
+        catch (Exception _) {
             return Optional.empty();
         }
         catch (Error e) {

@@ -14,7 +14,8 @@
 package io.trino.plugin.kafka;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.plugin.kafka.schema.ContentSchemaReader;
+import com.google.inject.Inject;
+import io.trino.plugin.kafka.schema.ContentSchemaProvider;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
@@ -22,13 +23,12 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
@@ -44,16 +44,16 @@ public class KafkaSplitManager
 {
     private final KafkaConsumerFactory consumerFactory;
     private final KafkaFilterManager kafkaFilterManager;
-    private final ContentSchemaReader contentSchemaReader;
+    private final ContentSchemaProvider contentSchemaProvider;
     private final int messagesPerSplit;
 
     @Inject
-    public KafkaSplitManager(KafkaConsumerFactory consumerFactory, KafkaConfig kafkaConfig, KafkaFilterManager kafkaFilterManager, ContentSchemaReader contentSchemaReader)
+    public KafkaSplitManager(KafkaConsumerFactory consumerFactory, KafkaConfig kafkaConfig, KafkaFilterManager kafkaFilterManager, ContentSchemaProvider contentSchemaProvider)
     {
         this.consumerFactory = requireNonNull(consumerFactory, "consumerFactory is null");
-        this.messagesPerSplit = requireNonNull(kafkaConfig, "kafkaConfig is null").getMessagesPerSplit();
+        this.messagesPerSplit = kafkaConfig.getMessagesPerSplit();
         this.kafkaFilterManager = requireNonNull(kafkaFilterManager, "kafkaFilterManager is null");
-        this.contentSchemaReader = requireNonNull(contentSchemaReader, "contentSchemaReader is null");
+        this.contentSchemaProvider = requireNonNull(contentSchemaProvider, "contentSchemaProvider is null");
     }
 
     @Override
@@ -61,12 +61,12 @@ public class KafkaSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         KafkaTableHandle kafkaTableHandle = (KafkaTableHandle) table;
         try (KafkaConsumer<byte[], byte[]> kafkaConsumer = consumerFactory.create(session)) {
-            List<PartitionInfo> partitionInfos = kafkaConsumer.partitionsFor(kafkaTableHandle.getTopicName());
+            List<PartitionInfo> partitionInfos = kafkaConsumer.partitionsFor(kafkaTableHandle.topicName());
 
             List<TopicPartition> topicPartitions = partitionInfos.stream()
                     .map(KafkaSplitManager::toTopicPartition)
@@ -76,13 +76,13 @@ public class KafkaSplitManager
             Map<TopicPartition, Long> partitionEndOffsets = kafkaConsumer.endOffsets(topicPartitions);
             KafkaFilteringResult kafkaFilteringResult = kafkaFilterManager.getKafkaFilterResult(session, kafkaTableHandle,
                     partitionInfos, partitionBeginOffsets, partitionEndOffsets);
-            partitionInfos = kafkaFilteringResult.getPartitionInfos();
-            partitionBeginOffsets = kafkaFilteringResult.getPartitionBeginOffsets();
-            partitionEndOffsets = kafkaFilteringResult.getPartitionEndOffsets();
+            partitionInfos = kafkaFilteringResult.partitionInfos();
+            partitionBeginOffsets = kafkaFilteringResult.partitionBeginOffsets();
+            partitionEndOffsets = kafkaFilteringResult.partitionEndOffsets();
 
             ImmutableList.Builder<KafkaSplit> splits = ImmutableList.builder();
-            Optional<String> keyDataSchemaContents = contentSchemaReader.readKeyContentSchema(kafkaTableHandle);
-            Optional<String> messageDataSchemaContents = contentSchemaReader.readValueContentSchema(kafkaTableHandle);
+            Optional<String> keyDataSchemaContents = contentSchemaProvider.getKey(kafkaTableHandle);
+            Optional<String> messageDataSchemaContents = contentSchemaProvider.getMessage(kafkaTableHandle);
 
             for (PartitionInfo partitionInfo : partitionInfos) {
                 TopicPartition topicPartition = toTopicPartition(partitionInfo);
@@ -90,9 +90,9 @@ public class KafkaSplitManager
                 new Range(partitionBeginOffsets.get(topicPartition), partitionEndOffsets.get(topicPartition))
                         .partition(messagesPerSplit).stream()
                         .map(range -> new KafkaSplit(
-                                kafkaTableHandle.getTopicName(),
-                                kafkaTableHandle.getKeyDataFormat(),
-                                kafkaTableHandle.getMessageDataFormat(),
+                                kafkaTableHandle.topicName(),
+                                kafkaTableHandle.keyDataFormat(),
+                                kafkaTableHandle.messageDataFormat(),
                                 keyDataSchemaContents,
                                 messageDataSchemaContents,
                                 partitionInfo.partition(),
@@ -106,7 +106,7 @@ public class KafkaSplitManager
             if (e instanceof TrinoException) {
                 throw e;
             }
-            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Cannot list splits for table '%s' reading topic '%s'", kafkaTableHandle.getTableName(), kafkaTableHandle.getTopicName()), e);
+            throw new TrinoException(KAFKA_SPLIT_ERROR, format("Cannot list splits for table '%s' reading topic '%s'", kafkaTableHandle.tableName(), kafkaTableHandle.topicName()), e);
         }
     }
 

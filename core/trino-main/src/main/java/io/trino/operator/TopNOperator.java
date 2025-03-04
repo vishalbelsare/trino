@@ -16,16 +16,11 @@ package io.trino.operator;
 import com.google.common.collect.ImmutableList;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.operator.WorkProcessor.TransformationState;
-import io.trino.operator.WorkProcessorOperatorAdapter.AdapterWorkProcessorOperator;
-import io.trino.operator.WorkProcessorOperatorAdapter.AdapterWorkProcessorOperatorFactory;
 import io.trino.spi.Page;
-import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
 import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.List;
-import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
 import static io.trino.operator.WorkProcessorOperatorAdapter.createAdapterOperatorFactory;
@@ -35,30 +30,26 @@ import static java.util.Objects.requireNonNull;
  * Returns the top N rows from the source sorted according to the specified ordering in the keyChannelIndex channel.
  */
 public class TopNOperator
-        implements AdapterWorkProcessorOperator
+        implements WorkProcessorOperator
 {
     public static OperatorFactory createOperatorFactory(
             int operatorId,
             PlanNodeId planNodeId,
             List<? extends Type> types,
             int n,
-            List<Integer> sortChannels,
-            List<SortOrder> sortOrders,
-            TypeOperators typeOperators)
+            PageWithPositionComparator comparator)
     {
-        return createAdapterOperatorFactory(new Factory(operatorId, planNodeId, types, n, sortChannels, sortOrders, typeOperators));
+        return createAdapterOperatorFactory(new Factory(operatorId, planNodeId, types, n, comparator));
     }
 
     private static class Factory
-            implements AdapterWorkProcessorOperatorFactory
+            implements WorkProcessorOperatorFactory
     {
         private final int operatorId;
         private final PlanNodeId planNodeId;
         private final List<Type> sourceTypes;
         private final int n;
-        private final List<Integer> sortChannels;
-        private final List<SortOrder> sortOrders;
-        private final TypeOperators typeOperators;
+        private final PageWithPositionComparator comparator;
         private boolean closed;
 
         private Factory(
@@ -66,17 +57,13 @@ public class TopNOperator
                 PlanNodeId planNodeId,
                 List<? extends Type> types,
                 int n,
-                List<Integer> sortChannels,
-                List<SortOrder> sortOrders,
-                TypeOperators typeOperators)
+                PageWithPositionComparator comparator)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
             this.sourceTypes = ImmutableList.copyOf(requireNonNull(types, "types is null"));
             this.n = n;
-            this.sortChannels = ImmutableList.copyOf(requireNonNull(sortChannels, "sortChannels is null"));
-            this.sortOrders = ImmutableList.copyOf(requireNonNull(sortOrders, "sortOrders is null"));
-            this.typeOperators = typeOperators;
+            this.comparator = requireNonNull(comparator, "comparator is null");
         }
 
         @Override
@@ -87,26 +74,10 @@ public class TopNOperator
             checkState(!closed, "Factory is already closed");
             return new TopNOperator(
                     processorContext.getMemoryTrackingContext(),
-                    Optional.of(sourcePages),
+                    sourcePages,
                     sourceTypes,
                     n,
-                    sortChannels,
-                    sortOrders,
-                    typeOperators);
-        }
-
-        @Override
-        public AdapterWorkProcessorOperator createAdapterOperator(ProcessorContext processorContext)
-        {
-            checkState(!closed, "Factory is already closed");
-            return new TopNOperator(
-                    processorContext.getMemoryTrackingContext(),
-                    Optional.empty(),
-                    sourceTypes,
-                    n,
-                    sortChannels,
-                    sortOrders,
-                    typeOperators);
+                    comparator);
         }
 
         @Override
@@ -136,36 +107,30 @@ public class TopNOperator
         @Override
         public Factory duplicate()
         {
-            return new Factory(operatorId, planNodeId, sourceTypes, n, sortChannels, sortOrders, typeOperators);
+            return new Factory(operatorId, planNodeId, sourceTypes, n, comparator);
         }
     }
 
-    private final TopNProcessor topNProcessor;
     private final WorkProcessor<Page> pages;
-    private final PageBuffer pageBuffer = new PageBuffer();
 
     private TopNOperator(
             MemoryTrackingContext memoryTrackingContext,
-            Optional<WorkProcessor<Page>> sourcePages,
+            WorkProcessor<Page> sourcePages,
             List<Type> types,
             int n,
-            List<Integer> sortChannels,
-            List<SortOrder> sortOrders,
-            TypeOperators typeOperators)
+            PageWithPositionComparator comparator)
     {
-        this.topNProcessor = new TopNProcessor(
-                requireNonNull(memoryTrackingContext, "memoryTrackingContext is null").aggregateUserMemoryContext(),
-                types,
-                n,
-                sortChannels,
-                sortOrders,
-                typeOperators);
-
         if (n == 0) {
             pages = WorkProcessor.of();
         }
         else {
-            pages = sourcePages.orElse(pageBuffer.pages()).transform(new TopNPages());
+            pages = sourcePages.transform(
+                    new TopNPages(
+                            new TopNProcessor(
+                                    memoryTrackingContext.aggregateUserMemoryContext(),
+                                    types,
+                                    n,
+                                    comparator)));
         }
     }
 
@@ -175,37 +140,21 @@ public class TopNOperator
         return pages;
     }
 
-    @Override
-    public boolean needsInput()
-    {
-        return pageBuffer.isEmpty() && !pageBuffer.isFinished();
-    }
-
-    @Override
-    public void addInput(Page page)
-    {
-        addPage(page);
-    }
-
-    @Override
-    public void finish()
-    {
-        pageBuffer.finish();
-    }
-
-    private void addPage(Page page)
-    {
-        topNProcessor.addInput(page);
-    }
-
-    private class TopNPages
+    private static final class TopNPages
             implements WorkProcessor.Transformation<Page, Page>
     {
+        private final TopNProcessor topNProcessor;
+
+        private TopNPages(TopNProcessor topNProcessor)
+        {
+            this.topNProcessor = requireNonNull(topNProcessor, "topNProcessor is null");
+        }
+
         @Override
         public TransformationState<Page> process(Page inputPage)
         {
             if (inputPage != null) {
-                addPage(inputPage);
+                topNProcessor.addInput(inputPage);
                 return TransformationState.needsMoreData();
             }
 

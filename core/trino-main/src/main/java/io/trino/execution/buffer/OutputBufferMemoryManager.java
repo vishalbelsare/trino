@@ -15,13 +15,14 @@ package io.trino.execution.buffer;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Suppliers;
+import com.google.common.base.Ticker;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.airlift.stats.TDigest;
 import io.trino.memory.context.LocalMemoryContext;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
+import jakarta.annotation.Nullable;
 
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,32 +49,42 @@ class OutputBufferMemoryManager
 
     @GuardedBy("this")
     private boolean closed;
+    // guarded by "this" for updates
     @Nullable
-    @GuardedBy("this")
-    private SettableFuture<Void> bufferBlockedFuture;
-    @GuardedBy("this")
-    private ListenableFuture<Void> blockedOnMemory = NOT_BLOCKED;
+    private volatile SettableFuture<Void> bufferBlockedFuture;
+    // guarded by "this" for updates
+    private volatile ListenableFuture<Void> blockedOnMemory = NOT_BLOCKED;
+
+    private final Ticker ticker = Ticker.systemTicker();
 
     private final AtomicBoolean blockOnFull = new AtomicBoolean(true);
 
-    private final Supplier<LocalMemoryContext> systemMemoryContextSupplier;
+    private final Supplier<LocalMemoryContext> memoryContextSupplier;
     private final Executor notificationExecutor;
 
-    public OutputBufferMemoryManager(long maxBufferedBytes, Supplier<LocalMemoryContext> systemMemoryContextSupplier, Executor notificationExecutor)
+    @GuardedBy("this")
+    private final TDigest bufferUtilization = new TDigest();
+    @GuardedBy("this")
+    private long lastBufferUtilizationRecordTime = -1;
+    @GuardedBy("this")
+    private double lastBufferUtilization;
+
+    public OutputBufferMemoryManager(long maxBufferedBytes, Supplier<LocalMemoryContext> memoryContextSupplier, Executor notificationExecutor)
     {
-        requireNonNull(systemMemoryContextSupplier, "systemMemoryContextSupplier is null");
+        requireNonNull(memoryContextSupplier, "memoryContextSupplier is null");
         checkArgument(maxBufferedBytes > 0, "maxBufferedBytes must be > 0");
         this.maxBufferedBytes = maxBufferedBytes;
-        this.systemMemoryContextSupplier = Suppliers.memoize(systemMemoryContextSupplier::get);
+        this.memoryContextSupplier = Suppliers.memoize(memoryContextSupplier::get);
         this.notificationExecutor = requireNonNull(notificationExecutor, "notificationExecutor is null");
+        this.lastBufferUtilization = 0;
     }
 
     public void updateMemoryUsage(long bytesAdded)
     {
-        // If the systemMemoryContext doesn't exist, the task is probably already
-        // aborted, so we can just return (see the comment in getSystemMemoryContextOrNull()).
-        LocalMemoryContext systemMemoryContext = getSystemMemoryContextOrNull();
-        if (systemMemoryContext == null) {
+        // If the memoryContext doesn't exist, the task is probably already
+        // aborted, so we can just return (see the comment in getMemoryContextOrNull()).
+        LocalMemoryContext memoryContext = getMemoryContextOrNull();
+        if (memoryContext == null) {
             return;
         }
 
@@ -93,7 +104,7 @@ class OutputBufferMemoryManager
                 checkArgument(result >= 0, "bufferedBytes (%s) plus delta (%s) would be negative", bytes, bytesAdded);
                 return result;
             });
-            ListenableFuture<Void> blockedOnMemory = systemMemoryContext.setBytes(currentBufferedBytes);
+            ListenableFuture<Void> blockedOnMemory = memoryContext.setBytes(currentBufferedBytes);
             if (!blockedOnMemory.isDone()) {
                 if (this.blockedOnMemory != blockedOnMemory) {
                     this.blockedOnMemory = blockedOnMemory;
@@ -110,6 +121,7 @@ class OutputBufferMemoryManager
                     this.bufferBlockedFuture = null;
                 }
             }
+            recordBufferUtilization();
         }
         peakMemoryUsage.accumulateAndGet(currentBufferedBytes, Math::max);
         // Notify listeners outside of the critical section
@@ -119,13 +131,36 @@ class OutputBufferMemoryManager
         }
     }
 
-    public synchronized ListenableFuture<Void> getBufferBlockedFuture()
+    private synchronized void recordBufferUtilization()
     {
+        long recordTime = ticker.read();
+        if (lastBufferUtilizationRecordTime != -1) {
+            bufferUtilization.add(lastBufferUtilization, (double) recordTime - this.lastBufferUtilizationRecordTime);
+        }
+        double utilization = getUtilization();
+        // skip recording of buffer utilization until data is put into buffer
+        if (lastBufferUtilizationRecordTime != -1 || utilization != 0.0) {
+            lastBufferUtilizationRecordTime = recordTime;
+            lastBufferUtilization = utilization;
+        }
+    }
+
+    public ListenableFuture<Void> getBufferBlockedFuture()
+    {
+        ListenableFuture<Void> bufferBlockedFuture = this.bufferBlockedFuture;
         if (bufferBlockedFuture == null) {
             if (blockedOnMemory.isDone() && !isBufferFull()) {
                 return NOT_BLOCKED;
             }
-            bufferBlockedFuture = SettableFuture.create();
+            synchronized (this) {
+                if (this.bufferBlockedFuture == null) {
+                    if (blockedOnMemory.isDone() && !isBufferFull()) {
+                        return NOT_BLOCKED;
+                    }
+                    this.bufferBlockedFuture = SettableFuture.create();
+                }
+                return this.bufferBlockedFuture;
+            }
         }
         return bufferBlockedFuture;
     }
@@ -153,6 +188,13 @@ class OutputBufferMemoryManager
     public double getUtilization()
     {
         return bufferedBytes.get() / (double) maxBufferedBytes;
+    }
+
+    public synchronized TDigest getUtilizationHistogram()
+    {
+        // always get most up to date histogram
+        recordBufferUtilization();
+        return TDigest.copyOf(bufferUtilization);
     }
 
     public boolean isOverutilized()
@@ -194,7 +236,7 @@ class OutputBufferMemoryManager
     public synchronized void close()
     {
         updateMemoryUsage(-bufferedBytes.get());
-        LocalMemoryContext memoryContext = getSystemMemoryContextOrNull();
+        LocalMemoryContext memoryContext = getMemoryContextOrNull();
         if (memoryContext != null) {
             memoryContext.close();
         }
@@ -209,12 +251,12 @@ class OutputBufferMemoryManager
     }
 
     @Nullable
-    private LocalMemoryContext getSystemMemoryContextOrNull()
+    private LocalMemoryContext getMemoryContextOrNull()
     {
         try {
-            return systemMemoryContextSupplier.get();
+            return memoryContextSupplier.get();
         }
-        catch (RuntimeException ignored) {
+        catch (RuntimeException _) {
             // This is possible with races, e.g., a task is created and then immediately aborted,
             // so that the task context hasn't been created yet (as a result there's no memory context available).
             return null;

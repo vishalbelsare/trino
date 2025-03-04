@@ -13,7 +13,8 @@
  */
 package io.trino.plugin.base.authentication;
 
-import javax.annotation.concurrent.GuardedBy;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+
 import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosTicket;
 
@@ -37,11 +38,27 @@ public class CachingKerberosAuthentication
 
     public synchronized Subject getSubject()
     {
-        if (subject == null || nextRefreshTime < System.currentTimeMillis()) {
+        if (subject == null || ticketNeedsRefresh()) {
             subject = requireNonNull(kerberosAuthentication.getSubject(), "kerberosAuthentication.getSubject() is null");
             KerberosTicket tgtTicket = getTicketGrantingTicket(subject);
             nextRefreshTime = KerberosTicketUtils.getRefreshTime(tgtTicket);
         }
         return subject;
+    }
+
+    public synchronized void reauthenticateIfSoonWillBeExpired()
+    {
+        requireNonNull(subject, "subject is null, getSubject() must be called before reauthenticate()");
+        if (ticketNeedsRefresh()) {
+            kerberosAuthentication.attemptLogin(subject);
+            KerberosTicket tgtTicket = getTicketGrantingTicket(subject);
+            nextRefreshTime = KerberosTicketUtils.getRefreshTime(tgtTicket);
+        }
+    }
+
+    @GuardedBy("this")
+    private boolean ticketNeedsRefresh()
+    {
+        return nextRefreshTime < System.currentTimeMillis();
     }
 }

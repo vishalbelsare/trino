@@ -21,11 +21,9 @@ import java.util.List;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
-import static io.trino.tempto.query.QueryExecutor.query;
-import static io.trino.tests.product.TestGroups.HIVE_VIEWS;
 import static io.trino.tests.product.utils.QueryExecutors.onHive;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHivePropertiesTable
         extends HiveProductTest
@@ -39,16 +37,16 @@ public class TestHivePropertiesTable
         onTrino().executeQuery("CREATE TABLE test_trino_view_properties_base (col INT)");
         onTrino().executeQuery("CREATE VIEW test_trino_view_properties AS SELECT * FROM test_trino_view_properties_base");
 
-        assertThat(query("SHOW COLUMNS FROM \"test_trino_view_properties$properties\""))
-                .containsExactlyInOrder(
+        assertThat(onTrino().executeQuery("SHOW COLUMNS FROM \"test_trino_view_properties$properties\""))
+                .containsOnly(
                         row("comment", "varchar", "", ""),
-                        row("presto_query_id", "varchar", "", ""),
-                        row("presto_version", "varchar", "", ""),
+                        row("trino_query_id", "varchar", "", ""),
+                        row("trino_version", "varchar", "", ""),
                         row("presto_view", "varchar", "", ""),
                         row("transient_lastddltime", "varchar", "", ""),
                         row("trino_created_by", "varchar", "", ""));
 
-        assertThat(query("SELECT * FROM \"test_trino_view_properties$properties\""))
+        assertThat(onTrino().executeQuery("SELECT * FROM \"test_trino_view_properties$properties\""))
                 .hasRowsCount(1)
                 .containsExactlyInOrder(new Row(getTablePropertiesOnHive("test_trino_view_properties")));
 
@@ -56,7 +54,7 @@ public class TestHivePropertiesTable
         onTrino().executeQuery("DROP TABLE IF EXISTS test_trino_view_properties_base");
     }
 
-    @Test(groups = HIVE_VIEWS)
+    @Test
     public void testHiveViewPropertiesTable()
             throws Exception
     {
@@ -66,10 +64,10 @@ public class TestHivePropertiesTable
         onHive().executeQuery("CREATE VIEW test_hive_view_properties AS SELECT * FROM test_hive_view_properties_base");
 
         // Use "contains" method because the table properties for Hive views aren't identical among testing environments
-        assertThat(query("SHOW COLUMNS FROM \"test_hive_view_properties$properties\""))
+        assertThat(onTrino().executeQuery("SHOW COLUMNS FROM \"test_hive_view_properties$properties\""))
                 .contains(row("transient_lastddltime", "varchar", "", ""));
 
-        assertThat(query("SELECT * FROM \"test_hive_view_properties$properties\""))
+        assertThat(onTrino().executeQuery("SELECT * FROM \"test_hive_view_properties$properties\""))
                 .hasRowsCount(1)
                 .containsExactlyInOrder(new Row(getTablePropertiesOnHive("test_hive_view_properties")));
 

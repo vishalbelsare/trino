@@ -13,74 +13,37 @@
  */
 package io.trino.plugin.google.sheets;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.spi.HostAddress;
+import io.airlift.slice.SizeOf;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
+import java.util.Map;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
-public class SheetsSplit
+public record SheetsSplit(List<List<String>> values)
         implements ConnectorSplit
 {
-    private final String schemaName;
-    private final String tableName;
-    private final List<List<Object>> values;
-    private final List<HostAddress> hostAddresses;
+    private static final int INSTANCE_SIZE = instanceSize(SheetsSplit.class);
 
-    @JsonCreator
-    public SheetsSplit(
-            @JsonProperty("schemaName") String schemaName,
-            @JsonProperty("tableName") String tableName,
-            @JsonProperty("values") List<List<Object>> values)
+    public SheetsSplit
     {
-        this.schemaName = requireNonNull(schemaName, "schemaName is null");
-        this.tableName = requireNonNull(tableName, "tableName is null");
-        this.values = requireNonNull(values, "values is null");
-        this.hostAddresses = ImmutableList.of();
-    }
-
-    @JsonProperty
-    public String getSchemaName()
-    {
-        return schemaName;
-    }
-
-    @JsonProperty
-    public String getTableName()
-    {
-        return tableName;
-    }
-
-    @JsonProperty
-    public List<List<Object>> getValues()
-    {
-        return values;
+        requireNonNull(values, "values is null");
     }
 
     @Override
-    public boolean isRemotelyAccessible()
+    public Map<String, String> getSplitInfo()
     {
-        return true;
+        return ImmutableMap.of();
     }
 
     @Override
-    public List<HostAddress> getAddresses()
+    public long getRetainedSizeInBytes()
     {
-        return hostAddresses;
-    }
-
-    @Override
-    public Object getInfo()
-    {
-        return ImmutableMap.builder()
-                .put("schemaName", schemaName)
-                .put("tableName", tableName)
-                .put("hostAddresses", hostAddresses)
-                .build();
+        return INSTANCE_SIZE
+                + estimatedSizeOf(values, value -> estimatedSizeOf(value, SizeOf::estimatedSizeOf));
     }
 }

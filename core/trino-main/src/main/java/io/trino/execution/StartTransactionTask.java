@@ -14,6 +14,7 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.spi.StandardErrorCode;
@@ -25,8 +26,6 @@ import io.trino.sql.tree.StartTransaction;
 import io.trino.sql.tree.TransactionAccessMode;
 import io.trino.transaction.TransactionId;
 import io.trino.transaction.TransactionManager;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Optional;
@@ -118,16 +117,11 @@ public class StartTransactionTask
 
     private static IsolationLevel convertLevel(Isolation.Level level)
     {
-        switch (level) {
-            case SERIALIZABLE:
-                return IsolationLevel.SERIALIZABLE;
-            case REPEATABLE_READ:
-                return IsolationLevel.REPEATABLE_READ;
-            case READ_COMMITTED:
-                return IsolationLevel.READ_COMMITTED;
-            case READ_UNCOMMITTED:
-                return IsolationLevel.READ_UNCOMMITTED;
-        }
-        throw new AssertionError("Unhandled isolation level: " + level);
+        return switch (level) {
+            case SERIALIZABLE -> IsolationLevel.SERIALIZABLE;
+            case REPEATABLE_READ -> IsolationLevel.REPEATABLE_READ;
+            case READ_COMMITTED -> IsolationLevel.READ_COMMITTED;
+            case READ_UNCOMMITTED -> IsolationLevel.READ_UNCOMMITTED;
+        };
     }
 }

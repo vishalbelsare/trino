@@ -15,7 +15,7 @@ package io.trino.plugin.hive;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.plugin.hive.metastore.Database;
+import io.trino.metastore.Database;
 import io.trino.spi.session.PropertyMetadata;
 
 import java.util.List;
@@ -42,7 +42,7 @@ public final class HiveSchemaProperties
         ImmutableMap.Builder<String, Object> result = ImmutableMap.builder();
         db.getLocation().ifPresent(location -> result.put(HiveSchemaProperties.LOCATION_PROPERTY, location));
 
-        return result.build();
+        return result.buildOrThrow();
     }
 
     public static Optional<String> getLocation(Map<String, Object> schemaProperties)

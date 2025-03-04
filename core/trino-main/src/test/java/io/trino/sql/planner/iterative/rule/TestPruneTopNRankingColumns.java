@@ -16,16 +16,18 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.SortOrder;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.assertions.TopNRankingSymbolMatcher;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.plan.Assignments;
-import io.trino.sql.planner.plan.WindowNode.Specification;
-import org.testng.annotations.Test;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.strictProject;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.topNRanking;
@@ -46,7 +48,7 @@ public class TestPruneTopNRankingColumns
                     return p.project(
                             Assignments.identity(b, ranking),
                             p.topNRanking(
-                                    new Specification(
+                                    new DataOrganizationSpecification(
                                             ImmutableList.of(a),
                                             Optional.of(new OrderingScheme(ImmutableList.of(b), ImmutableMap.of(b, SortOrder.ASC_NULLS_FIRST)))),
                                     ROW_NUMBER,
@@ -68,7 +70,7 @@ public class TestPruneTopNRankingColumns
                     return p.project(
                             Assignments.identity(ranking),
                             p.topNRanking(
-                                    new Specification(
+                                    new DataOrganizationSpecification(
                                             ImmutableList.of(),
                                             Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST)))),
                                     ROW_NUMBER,
@@ -91,7 +93,7 @@ public class TestPruneTopNRankingColumns
                     return p.project(
                             Assignments.identity(a, ranking),
                             p.topNRanking(
-                                    new Specification(
+                                    new DataOrganizationSpecification(
                                             ImmutableList.of(),
                                             Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST)))),
                                     ROW_NUMBER,
@@ -114,7 +116,7 @@ public class TestPruneTopNRankingColumns
                     return p.project(
                             Assignments.identity(a, ranking),
                             p.topNRanking(
-                                    new Specification(
+                                    new DataOrganizationSpecification(
                                             ImmutableList.of(),
                                             Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST)))),
                                     ROW_NUMBER,
@@ -125,7 +127,7 @@ public class TestPruneTopNRankingColumns
                 })
                 .matches(
                         strictProject(
-                                ImmutableMap.of("a", expression("a"), "ranking", expression("ranking")),
+                                ImmutableMap.of("a", expression(new Reference(BIGINT, "a")), "ranking", expression(new Reference(BIGINT, "ranking"))),
                                 topNRanking(
                                         pattern -> pattern
                                                 .specification(
@@ -135,7 +137,7 @@ public class TestPruneTopNRankingColumns
                                                 .rankingType(ROW_NUMBER)
                                                 .maxRankingPerPartition(5),
                                         strictProject(
-                                                ImmutableMap.of("a", expression("a")),
+                                                ImmutableMap.of("a", expression(new Reference(BIGINT, "a"))),
                                                 values("a", "b")))
                                         .withAlias("ranking", new TopNRankingSymbolMatcher())));
     }
@@ -151,7 +153,7 @@ public class TestPruneTopNRankingColumns
                     return p.project(
                             Assignments.identity(a, b, ranking),
                             p.topNRanking(
-                                    new Specification(
+                                    new DataOrganizationSpecification(
                                             ImmutableList.of(),
                                             Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST)))),
                                     ROW_NUMBER,
@@ -173,7 +175,7 @@ public class TestPruneTopNRankingColumns
                     return p.project(
                             Assignments.identity(a),
                             p.topNRanking(
-                                    new Specification(
+                                    new DataOrganizationSpecification(
                                             ImmutableList.of(),
                                             Optional.of(new OrderingScheme(ImmutableList.of(a), ImmutableMap.of(a, SortOrder.ASC_NULLS_FIRST)))),
                                     ROW_NUMBER,

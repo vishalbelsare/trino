@@ -19,13 +19,14 @@ import io.trino.spi.function.Description;
 import io.trino.spi.function.LiteralParameters;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
+import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
 
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NUMERIC_VALUE_OUT_OF_RANGE;
-import static io.trino.spi.type.Decimals.encodeUnscaledValue;
 import static java.lang.Character.isDigit;
 import static java.lang.String.format;
 
@@ -37,7 +38,7 @@ public final class DataSizeFunctions
     @ScalarFunction(value = "parse_data_size", alias = "parse_presto_data_size")
     @LiteralParameters("x")
     @SqlType("decimal(38,0)")
-    public static Slice parsePrestoDataSize(@SqlType("varchar(x)") Slice input)
+    public static Int128 parsePrestoDataSize(@SqlType("varchar(x)") Slice input)
     {
         String dataSize = input.toStringUtf8();
 
@@ -60,9 +61,9 @@ public final class DataSizeFunctions
         Unit unit = Unit.parse(dataSize.substring(valueLength), dataSize);
         BigInteger bytes = value.multiply(unit.getFactor()).toBigInteger();
         try {
-            return encodeUnscaledValue(bytes);
+            return Decimals.valueOf(bytes);
         }
-        catch (ArithmeticException e) {
+        catch (TrinoException e) {
             throw new TrinoException(NUMERIC_VALUE_OUT_OF_RANGE, format("Value out of range: '%s' ('%sB')", dataSize, bytes));
         }
     }
@@ -108,28 +109,18 @@ public final class DataSizeFunctions
 
         public static Unit parse(String unitString, String dataSize)
         {
-            switch (unitString) {
-                case "B":
-                    return BYTE;
-                case "kB":
-                    return KILOBYTE;
-                case "MB":
-                    return MEGABYTE;
-                case "GB":
-                    return GIGABYTE;
-                case "TB":
-                    return TERABYTE;
-                case "PB":
-                    return PETABYTE;
-                case "EB":
-                    return EXABYTE;
-                case "ZB":
-                    return ZETTABYTE;
-                case "YB":
-                    return YOTTABYTE;
-                default:
-                    throw invalidDataSize(dataSize);
-            }
+            return switch (unitString) {
+                case "B" -> BYTE;
+                case "kB" -> KILOBYTE;
+                case "MB" -> MEGABYTE;
+                case "GB" -> GIGABYTE;
+                case "TB" -> TERABYTE;
+                case "PB" -> PETABYTE;
+                case "EB" -> EXABYTE;
+                case "ZB" -> ZETTABYTE;
+                case "YB" -> YOTTABYTE;
+                default -> throw invalidDataSize(dataSize);
+            };
         }
     }
 }

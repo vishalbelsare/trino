@@ -14,7 +14,8 @@
 package io.trino.plugin.prometheus;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
+import com.google.inject.Inject;
+import io.airlift.http.client.HttpUriBuilder;
 import io.airlift.units.Duration;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -24,24 +25,19 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
-import org.apache.http.NameValuePair;
-import org.apache.http.client.utils.URIBuilder;
-import org.apache.http.message.BasicNameValuePair;
-
-import javax.inject.Inject;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -51,6 +47,8 @@ import java.util.stream.IntStream;
 
 import static io.trino.plugin.prometheus.PrometheusClient.TIMESTAMP_COLUMN_TYPE;
 import static io.trino.plugin.prometheus.PrometheusErrorCode.PROMETHEUS_UNKNOWN_ERROR;
+import static io.trino.plugin.prometheus.PrometheusSessionProperties.getMaxQueryRange;
+import static io.trino.plugin.prometheus.PrometheusSessionProperties.getQueryChunkSize;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static java.time.Instant.ofEpochMilli;
 import static java.util.Objects.requireNonNull;
@@ -63,19 +61,13 @@ public class PrometheusSplitManager
     private final PrometheusClock prometheusClock;
 
     private final URI prometheusURI;
-    private final Duration maxQueryRangeDuration;
-    private final Duration queryChunkSizeDuration;
 
     @Inject
     public PrometheusSplitManager(PrometheusClient prometheusClient, PrometheusClock prometheusClock, PrometheusConnectorConfig config)
     {
         this.prometheusClient = requireNonNull(prometheusClient, "prometheusClient is null");
         this.prometheusClock = requireNonNull(prometheusClock, "prometheusClock is null");
-
-        requireNonNull(config, "config is null");
         this.prometheusURI = config.getPrometheusURI();
-        this.maxQueryRangeDuration = config.getMaxQueryRangeDuration();
-        this.queryChunkSizeDuration = config.getQueryChunkSizeDuration();
     }
 
     @Override
@@ -83,16 +75,20 @@ public class PrometheusSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle connectorTableHandle,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
         PrometheusTableHandle tableHandle = (PrometheusTableHandle) connectorTableHandle;
-        PrometheusTable table = prometheusClient.getTable(tableHandle.getSchemaName(), tableHandle.getTableName());
+        PrometheusTable table = prometheusClient.getTable(tableHandle.schemaName(), tableHandle.tableName());
 
         // this can happen if table is removed during a query
         if (table == null) {
             throw new TableNotFoundException(tableHandle.toSchemaTableName());
         }
+
+        Duration maxQueryRangeDuration = getMaxQueryRange(session);
+        Duration queryChunkSizeDuration = getQueryChunkSize(session);
+
         List<ConnectorSplit> splits = generateTimesForSplits(prometheusClock.now(), maxQueryRangeDuration, queryChunkSizeDuration, tableHandle)
                 .stream()
                 .map(time -> {
@@ -100,8 +96,8 @@ public class PrometheusSplitManager
                         return new PrometheusSplit(buildQuery(
                                 prometheusURI,
                                 time,
-                                table.getName(),
-                                queryChunkSizeDuration));
+                                table.name(),
+                                queryChunkSizeDuration).toString());
                     }
                     catch (URISyntaxException e) {
                         throw new TrinoException(PROMETHEUS_UNKNOWN_ERROR, "split URI invalid: " + e.getMessage());
@@ -110,32 +106,32 @@ public class PrometheusSplitManager
         return new FixedSplitSource(splits);
     }
 
-    // URIBuilder handles URI encode
+    // HttpUriBuilder handles URI encode
     private static URI buildQuery(URI baseURI, String time, String metricName, Duration queryChunkSizeDuration)
             throws URISyntaxException
     {
-        List<NameValuePair> nameValuePairs = new ArrayList<>(2);
-        nameValuePairs.add(new BasicNameValuePair("query", metricName + "[" + queryChunkSizeDuration.roundTo(queryChunkSizeDuration.getUnit()) +
-                Duration.timeUnitToString(queryChunkSizeDuration.getUnit()) + "]"));
-        nameValuePairs.add(new BasicNameValuePair("time", time));
-        return new URIBuilder(baseURI.toString())
-                .setPath("api/v1/query")
-                .setParameters(nameValuePairs)
+        return HttpUriBuilder.uriBuilderFrom(baseURI)
+                .appendPath("api/v1/query")
+                .addParameter("query", metricName + "[" + queryChunkSizeDuration.roundTo(queryChunkSizeDuration.getUnit()) + Duration.timeUnitToString(queryChunkSizeDuration.getUnit()) + "]")
+                .addParameter("time", time)
                 .build();
     }
 
     /**
      * Utility method to get the end times in decimal seconds that divide up the query into chunks
-     * The times will be used in queries to Prometheus like: `http://localhost:9090/api/v1/query?query=up[21d]&time=1568229904.000"`
-     * ** NOTE: Prometheus instant query wants the duration and end time specified.
+     * The times will be used in queries to Prometheus like: {@code http://localhost:9090/api/v1/query?query=up[21d]&time=1568229904.000"}
+     *
+     * <p>
+     * NOTE: Prometheus instant query wants the duration and end time specified.
      * We use now() for the defaultUpperBound when none is specified, for instance, from predicate push down
+     * </p>
      *
      * @return list of end times as decimal epoch seconds, like ["1568053244.143", "1568926595.321"]
      */
     protected static List<String> generateTimesForSplits(Instant defaultUpperBound, Duration maxQueryRangeDurationRequested, Duration queryChunkSizeDurationRequested,
             PrometheusTableHandle tableHandle)
     {
-        Optional<PrometheusPredicateTimeInfo> predicateRange = tableHandle.getPredicate()
+        Optional<PrometheusPredicateTimeInfo> predicateRange = tableHandle.predicate()
                 .flatMap(PrometheusSplitManager::determinePredicateTimes);
 
         EffectiveLimits effectiveLimits = new EffectiveLimits(defaultUpperBound, maxQueryRangeDurationRequested, predicateRange);
@@ -157,14 +153,15 @@ public class PrometheusSplitManager
 
         int numChunks = maxQueryRangeDecimal.divide(queryChunkSizeDecimal, 0, RoundingMode.UP).intValue();
 
-        return Lists.reverse(IntStream.range(0, numChunks)
+        return IntStream.range(0, numChunks)
                 .mapToObj(n -> {
                     long endTime = upperBound.toEpochMilli() -
                             n * queryChunkSizeDuration.toMillis() - n * OFFSET_MILLIS;
                     return endTime;
                 })
                 .map(PrometheusSplitManager::decimalSecondString)
-                .collect(Collectors.toList()));
+                .collect(Collectors.toList())
+                .reversed();
     }
 
     protected static Optional<PrometheusPredicateTimeInfo> determinePredicateTimes(TupleDomain<ColumnHandle> predicate)
@@ -176,8 +173,8 @@ public class PrometheusSplitManager
                 .collect(Collectors.toSet()));
         Optional<Set<PrometheusColumnHandle>> maybeOnlyTimeStampColumnHandles = maybeOnlyPromColHandles.map(handles -> handles.stream()
                 .map(PrometheusColumnHandle.class::cast)
-                .filter(handle -> handle.getColumnType().equals(TIMESTAMP_COLUMN_TYPE))
-                .filter(handle -> handle.getColumnName().equals("timestamp"))
+                .filter(handle -> handle.columnType().equals(TIMESTAMP_COLUMN_TYPE))
+                .filter(handle -> handle.columnName().equals("timestamp"))
                 .collect(Collectors.toSet()));
 
         // below we have a set of ColumnHandle that are all PrometheusColumnHandle AND of TimestampType wrapped in Optional: maybeOnlyTimeStampColumnHandles

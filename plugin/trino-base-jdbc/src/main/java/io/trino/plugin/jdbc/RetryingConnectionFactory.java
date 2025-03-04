@@ -13,36 +13,28 @@
  */
 package io.trino.plugin.jdbc;
 
-import com.google.common.base.Throwables;
-import io.trino.spi.TrinoException;
+import com.google.inject.Inject;
+import dev.failsafe.Failsafe;
+import dev.failsafe.FailsafeException;
+import dev.failsafe.RetryPolicy;
 import io.trino.spi.connector.ConnectorSession;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.FailsafeException;
-import net.jodah.failsafe.RetryPolicy;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.SQLRecoverableException;
 
-import static java.time.temporal.ChronoUnit.MILLIS;
-import static java.time.temporal.ChronoUnit.SECONDS;
 import static java.util.Objects.requireNonNull;
 
 public class RetryingConnectionFactory
         implements ConnectionFactory
 {
-    private static final RetryPolicy<Object> RETRY_POLICY = new RetryPolicy<>()
-            .withMaxDuration(java.time.Duration.of(30, SECONDS))
-            .withMaxAttempts(5)
-            .withBackoff(50, 5_000, MILLIS, 4)
-            .handleIf(RetryingConnectionFactory::isSqlRecoverableException)
-            .abortOn(TrinoException.class);
-
     private final ConnectionFactory delegate;
+    private final RetryPolicy<Object> retryPolicy;
 
-    public RetryingConnectionFactory(ConnectionFactory delegate)
+    @Inject
+    public RetryingConnectionFactory(@ForRetrying ConnectionFactory delegate, RetryPolicy<Object> retryPolicy)
     {
         this.delegate = requireNonNull(delegate, "delegate is null");
+        this.retryPolicy = requireNonNull(retryPolicy, "retryPolicy is null");
     }
 
     @Override
@@ -50,7 +42,7 @@ public class RetryingConnectionFactory
             throws SQLException
     {
         try {
-            return Failsafe.with(RETRY_POLICY)
+            return Failsafe.with(retryPolicy)
                     .get(() -> delegate.openConnection(session));
         }
         catch (FailsafeException ex) {
@@ -66,11 +58,5 @@ public class RetryingConnectionFactory
             throws SQLException
     {
         delegate.close();
-    }
-
-    private static boolean isSqlRecoverableException(Throwable exception)
-    {
-        return Throwables.getCausalChain(exception).stream()
-                .anyMatch(SQLRecoverableException.class::isInstance);
     }
 }

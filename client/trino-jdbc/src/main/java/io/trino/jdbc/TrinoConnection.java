@@ -14,7 +14,9 @@
 package io.trino.jdbc;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.primitives.Ints;
@@ -22,10 +24,15 @@ import io.airlift.units.Duration;
 import io.trino.client.ClientSelectedRole;
 import io.trino.client.ClientSession;
 import io.trino.client.StatementClient;
-import okhttp3.OkHttpClient;
+import jakarta.annotation.Nullable;
+import okhttp3.Call;
+import okhttp3.HttpUrl;
+import okhttp3.Request;
+import okhttp3.Response;
 
-import javax.annotation.Nullable;
-
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.ProtocolException;
 import java.net.URI;
 import java.nio.charset.CharsetEncoder;
 import java.sql.Array;
@@ -47,6 +54,7 @@ import java.sql.Statement;
 import java.sql.Struct;
 import java.time.ZoneId;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -54,21 +62,29 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.nullToEmpty;
+import static com.google.common.base.Throwables.getCausalChain;
 import static com.google.common.collect.Maps.fromProperties;
+import static io.airlift.units.Duration.nanosSince;
 import static io.trino.client.StatementClientFactory.newStatementClient;
 import static io.trino.jdbc.ClientInfoProperty.APPLICATION_NAME;
 import static io.trino.jdbc.ClientInfoProperty.CLIENT_INFO;
 import static io.trino.jdbc.ClientInfoProperty.CLIENT_TAGS;
 import static io.trino.jdbc.ClientInfoProperty.TRACE_TOKEN;
 import static java.lang.String.format;
+import static java.net.HttpURLConnection.HTTP_BAD_METHOD;
+import static java.net.HttpURLConnection.HTTP_OK;
+import static java.net.HttpURLConnection.HTTP_UNAUTHORIZED;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.util.Collections.newSetFromMap;
 import static java.util.Objects.requireNonNull;
@@ -79,24 +95,31 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 public class TrinoConnection
         implements Connection
 {
+    private static final Logger logger = Logger.getLogger(TrinoConnection.class.getPackage().getName());
+
+    private static final int CONNECTION_TIMEOUT_SECONDS = 30; // Not configurable
+
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean autoCommit = new AtomicBoolean(true);
     private final AtomicInteger isolationLevel = new AtomicInteger(TRANSACTION_READ_UNCOMMITTED);
     private final AtomicBoolean readOnly = new AtomicBoolean();
     private final AtomicReference<String> catalog = new AtomicReference<>();
     private final AtomicReference<String> schema = new AtomicReference<>();
-    private final AtomicReference<String> path = new AtomicReference<>();
+    private final AtomicReference<List<String>> path = new AtomicReference<>(ImmutableList.of());
+    private final AtomicReference<String> authorizationUser = new AtomicReference<>();
     private final AtomicReference<ZoneId> timeZoneId = new AtomicReference<>();
     private final AtomicReference<Locale> locale = new AtomicReference<>();
     private final AtomicReference<Integer> networkTimeoutMillis = new AtomicReference<>(Ints.saturatedCast(MINUTES.toMillis(2)));
     private final AtomicLong nextStatementId = new AtomicLong(1);
+    private final AtomicReference<Optional<String>> sessionUser = new AtomicReference<>();
 
     private final URI jdbcUri;
     private final URI httpUri;
-    private final String user;
-    private final Optional<String> sessionUser;
+    private final Optional<String> user;
     private final boolean compressionDisabled;
+    private final Optional<String> encoding;
     private final boolean assumeLiteralNamesInMetadataCallsForNonConformingClients;
+    private final boolean assumeLiteralUnderscoreInMetadataCallsForNonConformingClients;
     private final Map<String, String> extraCredentials;
     private final Optional<String> applicationNamePrefix;
     private final Optional<String> source;
@@ -105,33 +128,111 @@ public class TrinoConnection
     private final Map<String, String> preparedStatements = new ConcurrentHashMap<>();
     private final Map<String, ClientSelectedRole> roles = new ConcurrentHashMap<>();
     private final AtomicReference<String> transactionId = new AtomicReference<>();
-    private final OkHttpClient httpClient;
+    private final Call.Factory httpCallFactory;
+    private final Call.Factory segmentHttpCallFactory;
     private final Set<TrinoStatement> statements = newSetFromMap(new ConcurrentHashMap<>());
+    private boolean useExplicitPrepare = true;
+    private boolean assumeNullCatalogMeansCurrentCatalog;
+    private final boolean validateConnection;
 
-    TrinoConnection(TrinoDriverUri uri, OkHttpClient httpClient)
+    TrinoConnection(TrinoDriverUri uri, Call.Factory httpCallFactory, Call.Factory segmentHttpCallFactory)
             throws SQLException
     {
         requireNonNull(uri, "uri is null");
-        this.jdbcUri = uri.getJdbcUri();
+        this.jdbcUri = uri.getUri();
         this.httpUri = uri.getHttpUri();
         uri.getSchema().ifPresent(schema::set);
         uri.getCatalog().ifPresent(catalog::set);
         this.user = uri.getUser();
-        this.sessionUser = uri.getSessionUser();
+        this.sessionUser.set(uri.getSessionUser());
         this.applicationNamePrefix = uri.getApplicationNamePrefix();
         this.source = uri.getSource();
         this.extraCredentials = uri.getExtraCredentials();
         this.compressionDisabled = uri.isCompressionDisabled();
+        this.encoding = uri.getEncoding();
         this.assumeLiteralNamesInMetadataCallsForNonConformingClients = uri.isAssumeLiteralNamesInMetadataCallsForNonConformingClients();
-        this.httpClient = requireNonNull(httpClient, "httpClient is null");
+
+        if (this.assumeLiteralNamesInMetadataCallsForNonConformingClients) {
+            logger.log(Level.WARNING, "Connection config assumeLiteralNamesInMetadataCallsForNonConformingClients is deprecated, please use " +
+                    "assumeLiteralUnderscoreInMetadataCallsForNonConformingClients.");
+        }
+
+        this.assumeLiteralUnderscoreInMetadataCallsForNonConformingClients = uri.isAssumeLiteralUnderscoreInMetadataCallsForNonConformingClients();
+
+        this.httpCallFactory = requireNonNull(httpCallFactory, "httpCallFactory is null");
+        this.segmentHttpCallFactory = requireNonNull(segmentHttpCallFactory, "segmentHttpCallFactory is null");
         uri.getClientInfo().ifPresent(tags -> clientInfo.put(CLIENT_INFO, tags));
-        uri.getClientTags().ifPresent(tags -> clientInfo.put(CLIENT_TAGS, tags));
+        uri.getClientTags().ifPresent(tags -> clientInfo.put(CLIENT_TAGS, Joiner.on(",").join(tags)));
         uri.getTraceToken().ifPresent(tags -> clientInfo.put(TRACE_TOKEN, tags));
 
         roles.putAll(uri.getRoles());
-        timeZoneId.set(ZoneId.systemDefault());
+        timeZoneId.set(uri.getTimeZone());
         locale.set(Locale.getDefault());
         sessionProperties.putAll(uri.getSessionProperties());
+
+        uri.getExplicitPrepare().ifPresent(value -> this.useExplicitPrepare = value);
+        uri.getAssumeNullCatalogMeansCurrentCatalog().ifPresent(value -> this.assumeNullCatalogMeansCurrentCatalog = value);
+
+        this.validateConnection = uri.isValidateConnection();
+        if (validateConnection) {
+            try {
+                if (!isConnectionValid(CONNECTION_TIMEOUT_SECONDS)) {
+                    throw new SQLException("Invalid authentication to Trino server", "28000");
+                }
+            }
+            catch (UnsupportedOperationException | IOException e) {
+                throw new SQLException("Unable to connect to Trino server", "08001", e);
+            }
+        }
+    }
+
+    private boolean isConnectionValid(int timeout)
+            throws IOException, UnsupportedOperationException
+    {
+        HttpUrl url = HttpUrl.get(httpUri)
+                .newBuilder()
+                .encodedPath("/v1/statement")
+                .build();
+
+        Request headRequest = new Request.Builder()
+                .url(url)
+                .head()
+                .build();
+
+        Exception lastException = null;
+        Duration timeoutDuration = new Duration(timeout, TimeUnit.SECONDS);
+        long start = System.nanoTime();
+
+        while (timeoutDuration.compareTo(nanosSince(start)) > 0) {
+            try (Response response = httpCallFactory.newCall(headRequest).execute()) {
+                switch (response.code()) {
+                    case HTTP_OK:
+                        return true;
+                    case HTTP_UNAUTHORIZED:
+                        return false;
+                    case HTTP_BAD_METHOD:
+                        throw new UnsupportedOperationException("Trino server does not support HEAD /v1/statement");
+                }
+
+                try {
+                    MILLISECONDS.sleep(250);
+                }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            catch (IOException e) {
+                if (getCausalChain(e).stream().anyMatch(TrinoConnection::isTransientConnectionValidationException)) {
+                    lastException = e;
+                }
+                else {
+                    throw e;
+                }
+            }
+        }
+
+        throw new IOException(format("Connection validation timed out after %ss", timeout), lastException);
     }
 
     @Override
@@ -271,7 +372,7 @@ public class TrinoConnection
     public DatabaseMetaData getMetaData()
             throws SQLException
     {
-        return new TrinoDatabaseMetaData(this, assumeLiteralNamesInMetadataCallsForNonConformingClients);
+        return new TrinoDatabaseMetaData(this, assumeLiteralNamesInMetadataCallsForNonConformingClients, assumeLiteralUnderscoreInMetadataCallsForNonConformingClients);
     }
 
     @Override
@@ -314,7 +415,6 @@ public class TrinoConnection
         isolationLevel.set(level);
     }
 
-    @SuppressWarnings("MagicConstant")
     @Override
     public int getTransactionIsolation()
             throws SQLException
@@ -450,7 +550,7 @@ public class TrinoConnection
     public PreparedStatement prepareStatement(String sql, int autoGeneratedKeys)
             throws SQLException
     {
-        if (autoGeneratedKeys != Statement.RETURN_GENERATED_KEYS) {
+        if (autoGeneratedKeys != Statement.NO_GENERATED_KEYS) {
             throw new SQLFeatureNotSupportedException("Auto generated keys must be NO_GENERATED_KEYS");
         }
         return prepareStatement(sql);
@@ -505,7 +605,26 @@ public class TrinoConnection
         if (timeout < 0) {
             throw new SQLException("Timeout is negative");
         }
-        return !isClosed();
+
+        if (isClosed()) {
+            return false;
+        }
+
+        if (!validateConnection) {
+            return true;
+        }
+
+        try {
+            return isConnectionValid(timeout);
+        }
+        catch (UnsupportedOperationException e) {
+            logger.log(Level.FINE, "Trino server does not support connection validation", e);
+            return false;
+        }
+        catch (IOException e) {
+            logger.log(Level.FINE, "Connection validation has failed", e);
+            return false;
+        }
     }
 
     @Override
@@ -625,6 +744,17 @@ public class TrinoConnection
         sessionProperties.put(name, value);
     }
 
+    public void setSessionUser(String sessionUser)
+    {
+        requireNonNull(sessionUser, "sessionUser is null");
+        this.sessionUser.set(Optional.of(sessionUser));
+    }
+
+    public void clearSessionUser()
+    {
+        this.sessionUser.set(Optional.empty());
+    }
+
     @VisibleForTesting
     Map<String, ClientSelectedRole> getRoles()
     {
@@ -680,11 +810,6 @@ public class TrinoConnection
         return jdbcUri;
     }
 
-    String getUser()
-    {
-        return user;
-    }
-
     @VisibleForTesting
     Map<String, String> getExtraCredentials()
     {
@@ -725,44 +850,55 @@ public class TrinoConnection
         int millis = networkTimeoutMillis.get();
         Duration timeout = (millis > 0) ? new Duration(millis, MILLISECONDS) : new Duration(999, DAYS);
 
-        ClientSession session = new ClientSession(
-                httpUri,
-                user,
-                sessionUser,
-                source,
-                Optional.ofNullable(clientInfo.get(TRACE_TOKEN)),
-                ImmutableSet.copyOf(clientTags),
-                clientInfo.get(CLIENT_INFO),
-                catalog.get(),
-                schema.get(),
-                path.get(),
-                timeZoneId.get(),
-                locale.get(),
-                ImmutableMap.of(),
-                ImmutableMap.copyOf(allProperties),
-                ImmutableMap.copyOf(preparedStatements),
-                ImmutableMap.copyOf(roles),
-                extraCredentials,
-                transactionId.get(),
-                timeout,
-                compressionDisabled);
+        ClientSession session = ClientSession.builder()
+                .server(httpUri)
+                .user(user)
+                .sessionUser(sessionUser.get())
+                .authorizationUser(Optional.ofNullable(authorizationUser.get()))
+                .source(source)
+                .traceToken(Optional.ofNullable(clientInfo.get(TRACE_TOKEN)))
+                .clientTags(ImmutableSet.copyOf(clientTags))
+                .clientInfo(clientInfo.get(CLIENT_INFO))
+                .catalog(catalog.get())
+                .schema(schema.get())
+                .path(path.get())
+                .timeZone(timeZoneId.get())
+                .locale(locale.get())
+                .properties(ImmutableMap.copyOf(allProperties))
+                .preparedStatements(ImmutableMap.copyOf(preparedStatements))
+                .roles(ImmutableMap.copyOf(roles))
+                .credentials(extraCredentials)
+                .transactionId(transactionId.get())
+                .clientRequestTimeout(timeout)
+                .compressionDisabled(compressionDisabled)
+                .encoding(encoding)
+                .build();
 
-        return newStatementClient(httpClient, session, sql);
+        return newStatementClient(httpCallFactory, segmentHttpCallFactory, session, sql);
     }
 
     void updateSession(StatementClient client)
     {
-        client.getSetSessionProperties().forEach(sessionProperties::put);
+        sessionProperties.putAll(client.getSetSessionProperties());
         client.getResetSessionProperties().forEach(sessionProperties::remove);
 
-        client.getAddedPreparedStatements().forEach(preparedStatements::put);
+        preparedStatements.putAll(client.getAddedPreparedStatements());
         client.getDeallocatedPreparedStatements().forEach(preparedStatements::remove);
-
-        client.getSetRoles().forEach(roles::put);
 
         client.getSetCatalog().ifPresent(catalog::set);
         client.getSetSchema().ifPresent(schema::set);
         client.getSetPath().ifPresent(path::set);
+
+        if (client.getSetAuthorizationUser().isPresent()) {
+            authorizationUser.set(client.getSetAuthorizationUser().get());
+            roles.clear();
+        }
+        if (client.isResetAuthorizationUser()) {
+            authorizationUser.set(null);
+            roles.clear();
+        }
+
+        roles.putAll(client.getSetRoles());
 
         if (client.getStartedTransactionId() != null) {
             transactionId.set(client.getStartedTransactionId());
@@ -770,6 +906,11 @@ public class TrinoConnection
         if (client.isClearTransactionId()) {
             transactionId.set(null);
         }
+    }
+
+    void removePreparedStatement(String name)
+    {
+        preparedStatements.remove(name);
     }
 
     private void registerStatement(TrinoStatement statement)
@@ -780,6 +921,18 @@ public class TrinoConnection
     private void unregisterStatement(TrinoStatement statement)
     {
         checkState(statements.remove(statement), "Statement is not registered");
+    }
+
+    @VisibleForTesting
+    int activeStatements()
+    {
+        return statements.size();
+    }
+
+    @VisibleForTesting
+    String getAuthorizationUser()
+    {
+        return authorizationUser.get();
     }
 
     private void checkOpen()
@@ -844,6 +997,14 @@ public class TrinoConnection
         return source;
     }
 
+    private static boolean isTransientConnectionValidationException(Throwable e)
+    {
+        if (e instanceof InterruptedIOException && e.getMessage().equals("timeout")) {
+            return true;
+        }
+        return e instanceof ProtocolException;
+    }
+
     private static final class SqlExceptionHolder
     {
         @Nullable
@@ -866,5 +1027,15 @@ public class TrinoConnection
                 throw new SQLException(heldException);
             }
         }
+    }
+
+    public boolean useExplicitPrepare()
+    {
+        return this.useExplicitPrepare;
+    }
+
+    public boolean getAssumeNullCatalogMeansCurrentCatalog()
+    {
+        return this.assumeNullCatalogMeansCurrentCatalog;
     }
 }

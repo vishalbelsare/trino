@@ -13,26 +13,15 @@
  */
 package io.trino.memory;
 
-import io.trino.execution.TaskManager;
+import com.google.inject.Inject;
 import io.trino.server.security.ResourceSecurity;
-import io.trino.spi.memory.MemoryPoolInfo;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 
-import javax.inject.Inject;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.GET;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-
-import static io.trino.memory.LocalMemoryManager.GENERAL_POOL;
-import static io.trino.memory.LocalMemoryManager.RESERVED_POOL;
 import static io.trino.server.security.ResourceSecurity.AccessType.INTERNAL_ONLY;
-import static io.trino.server.security.ResourceSecurity.AccessType.MANAGEMENT_READ;
 import static java.util.Objects.requireNonNull;
-import static javax.ws.rs.core.Response.Status.NOT_FOUND;
 
 /**
  * Manages memory pools on this worker node
@@ -41,45 +30,18 @@ import static javax.ws.rs.core.Response.Status.NOT_FOUND;
 public class MemoryResource
 {
     private final LocalMemoryManager memoryManager;
-    private final TaskManager taskManager;
 
     @Inject
-    public MemoryResource(LocalMemoryManager memoryManager, TaskManager taskManager)
+    public MemoryResource(LocalMemoryManager memoryManager)
     {
         this.memoryManager = requireNonNull(memoryManager, "memoryManager is null");
-        this.taskManager = requireNonNull(taskManager, "taskManager is null");
     }
 
     @ResourceSecurity(INTERNAL_ONLY)
-    @POST
-    @Produces(MediaType.APPLICATION_JSON)
-    @Consumes(MediaType.APPLICATION_JSON)
-    public MemoryInfo getMemoryInfo(MemoryPoolAssignmentsRequest request)
-    {
-        taskManager.updateMemoryPoolAssignments(request);
-        return memoryManager.getInfo();
-    }
-
-    @ResourceSecurity(MANAGEMENT_READ)
     @GET
-    @Path("{poolId}")
-    public Response getMemoryInfo(@PathParam("poolId") String poolId)
+    @Produces(MediaType.APPLICATION_JSON)
+    public MemoryInfo getMemoryInfo()
     {
-        if (GENERAL_POOL.getId().equals(poolId)) {
-            return toSuccessfulResponse(memoryManager.getGeneralPool().getInfo());
-        }
-
-        if (RESERVED_POOL.getId().equals(poolId) && memoryManager.getReservedPool().isPresent()) {
-            return toSuccessfulResponse(memoryManager.getReservedPool().get().getInfo());
-        }
-
-        return Response.status(NOT_FOUND).build();
-    }
-
-    private Response toSuccessfulResponse(MemoryPoolInfo memoryInfo)
-    {
-        return Response.ok()
-                .entity(memoryInfo)
-                .build();
+        return memoryManager.getInfo();
     }
 }

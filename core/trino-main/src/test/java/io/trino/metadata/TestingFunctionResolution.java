@@ -13,71 +13,91 @@
  */
 package io.trino.metadata;
 
-import com.google.common.collect.ImmutableSet;
-import io.trino.FeaturesConfig;
 import io.trino.Session;
 import io.trino.operator.aggregation.TestingAggregationFunction;
 import io.trino.security.AllowAllAccessControl;
-import io.trino.spi.function.InvocationConvention;
+import io.trino.spi.Plugin;
+import io.trino.spi.function.CatalogSchemaFunctionName;
+import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.analyzer.TypeSignatureProvider;
+import io.trino.sql.gen.CursorProcessorCompiler;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.gen.PageFunctionCompiler;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.QualifiedName;
-import io.trino.testing.LocalQueryRunner;
+import io.trino.sql.gen.columnar.ColumnarFilterCompiler;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.planner.TestingPlannerContext;
+import io.trino.testing.QueryRunner;
 import io.trino.transaction.TransactionManager;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
-import java.util.Optional;
-import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.metadata.FunctionExtractor.extractFunctions;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.metadata.InternalFunctionBundle.extractFunctions;
+import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
+import static io.trino.testing.TransactionBuilder.transaction;
 import static io.trino.transaction.InMemoryTransactionManager.createTestTransactionManager;
-import static io.trino.transaction.TransactionBuilder.transaction;
 import static java.util.Objects.requireNonNull;
 
 public class TestingFunctionResolution
 {
     private final TransactionManager transactionManager;
     private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
     public TestingFunctionResolution()
     {
-        this(ImmutableSet.of());
+        this(new InternalFunctionBundle());
     }
 
-    public TestingFunctionResolution(Set<Class<?>> functions)
+    public TestingFunctionResolution(FunctionBundle functions)
     {
         transactionManager = createTestTransactionManager();
-        MetadataManager metadataManager = createTestMetadataManager(transactionManager, new FeaturesConfig());
-        metadataManager.addFunctions(extractFunctions(functions));
-        metadata = metadataManager;
+        plannerContext = plannerContextBuilder()
+                .withTransactionManager(transactionManager)
+                .addFunctions(functions)
+                .build();
+        metadata = plannerContext.getMetadata();
     }
 
-    public TestingFunctionResolution(LocalQueryRunner localQueryRunner)
+    public TestingFunctionResolution(Plugin plugin)
     {
-        this(localQueryRunner.getTransactionManager(), localQueryRunner.getMetadata());
+        transactionManager = createTestTransactionManager();
+
+        TestingPlannerContext.Builder builder = plannerContextBuilder()
+                .withTransactionManager(transactionManager)
+                .addFunctions(extractFunctions(plugin.getFunctions()));
+
+        plugin.getTypes().forEach(builder::addType);
+        plugin.getParametricTypes().forEach(builder::addParametricType);
+
+        plannerContext = builder.build();
+        metadata = plannerContext.getMetadata();
     }
 
-    public TestingFunctionResolution(TransactionManager transactionManager, Metadata metadata)
+    public TestingFunctionResolution(QueryRunner queryRunner)
+    {
+        this(queryRunner.getTransactionManager(), queryRunner.getPlannerContext());
+    }
+
+    public TestingFunctionResolution(TransactionManager transactionManager, PlannerContext plannerContext)
     {
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
+        this.metadata = plannerContext.getMetadata();
     }
 
-    public TestingFunctionResolution addFunctions(List<? extends SqlFunction> functions)
+    public PlannerContext getPlannerContext()
     {
-        metadata.addFunctions(functions);
-        return this;
+        return plannerContext;
     }
 
     public Metadata getMetadata()
@@ -87,7 +107,12 @@ public class TestingFunctionResolution
 
     public ExpressionCompiler getExpressionCompiler()
     {
-        return new ExpressionCompiler(metadata, getPageFunctionCompiler());
+        return new ExpressionCompiler(getCursorProcessorCompiler(), getPageFunctionCompiler(), getColumnarFilterCompiler());
+    }
+
+    public CursorProcessorCompiler getCursorProcessorCompiler()
+    {
+        return new CursorProcessorCompiler(plannerContext.getFunctionManager());
     }
 
     public PageFunctionCompiler getPageFunctionCompiler()
@@ -97,26 +122,41 @@ public class TestingFunctionResolution
 
     public PageFunctionCompiler getPageFunctionCompiler(int expressionCacheSize)
     {
-        return new PageFunctionCompiler(metadata, expressionCacheSize);
+        return new PageFunctionCompiler(plannerContext.getFunctionManager(), expressionCacheSize);
+    }
+
+    public Collection<FunctionMetadata> listGlobalFunctions()
+    {
+        return inTransaction(metadata::listGlobalFunctions);
+    }
+
+    public ColumnarFilterCompiler getColumnarFilterCompiler()
+    {
+        return getColumnarFilterCompiler(0);
+    }
+
+    public ColumnarFilterCompiler getColumnarFilterCompiler(int expressionCacheSize)
+    {
+        return new ColumnarFilterCompiler(plannerContext.getFunctionManager(), expressionCacheSize);
     }
 
     public ResolvedFunction resolveOperator(OperatorType operatorType, List<? extends Type> argumentTypes)
             throws OperatorNotFoundException
     {
-        return inTransaction(session -> metadata.resolveOperator(session, operatorType, argumentTypes));
+        return inTransaction(session -> metadata.resolveOperator(operatorType, argumentTypes));
     }
 
     public ResolvedFunction getCoercion(Type fromType, Type toType)
     {
-        return inTransaction(session -> metadata.getCoercion(session, fromType, toType));
+        return inTransaction(session -> metadata.getCoercion(fromType, toType));
     }
 
-    public ResolvedFunction getCoercion(QualifiedName name, Type fromType, Type toType)
+    public ResolvedFunction getCoercion(CatalogSchemaFunctionName name, Type fromType, Type toType)
     {
-        return inTransaction(session -> metadata.getCoercion(session, name, fromType, toType));
+        return inTransaction(session -> metadata.getCoercion(name, fromType, toType));
     }
 
-    public TestingFunctionCallBuilder functionCallBuilder(QualifiedName name)
+    public TestingFunctionCallBuilder functionCallBuilder(String name)
     {
         return new TestingFunctionCallBuilder(name);
     }
@@ -126,30 +166,25 @@ public class TestingFunctionResolution
     // legal, but works for tests
     //
 
-    public ResolvedFunction resolveFunction(QualifiedName name, List<TypeSignatureProvider> parameterTypes)
+    public ResolvedFunction resolveFunction(String name, List<TypeSignatureProvider> parameterTypes)
     {
-        return inTransaction(session -> metadata.resolveFunction(session, name, parameterTypes));
+        return metadata.resolveBuiltinFunction(name, parameterTypes);
     }
 
-    public FunctionInvoker getScalarFunctionInvoker(QualifiedName name, List<TypeSignatureProvider> parameterTypes, InvocationConvention invocationConvention)
-    {
-        return inTransaction(session -> metadata.getScalarFunctionInvoker(metadata.resolveFunction(session, name, parameterTypes), invocationConvention));
-    }
-
-    public TestingAggregationFunction getAggregateFunction(QualifiedName name, List<TypeSignatureProvider> parameterTypes)
+    public TestingAggregationFunction getAggregateFunction(String name, List<TypeSignatureProvider> parameterTypes)
     {
         return inTransaction(session -> {
-            ResolvedFunction resolvedFunction = metadata.resolveFunction(session, name, parameterTypes);
+            ResolvedFunction resolvedFunction = metadata.resolveBuiltinFunction(name, parameterTypes);
             return new TestingAggregationFunction(
-                    resolvedFunction.getSignature(),
-                    metadata.getAggregationFunctionMetadata(resolvedFunction),
-                    metadata.getAggregateFunctionImplementation(resolvedFunction));
+                    resolvedFunction.signature(),
+                    resolvedFunction.functionNullability(),
+                    plannerContext.getFunctionManager().getAggregationImplementation(resolvedFunction));
         });
     }
 
     private <T> T inTransaction(Function<Session, T> transactionSessionConsumer)
     {
-        return transaction(transactionManager, new AllowAllAccessControl())
+        return transaction(transactionManager, metadata, new AllowAllAccessControl())
                 .singleStatement()
                 .execute(TEST_SESSION, session -> {
                     // metadata.getCatalogHandle() registers the catalog for the transaction
@@ -160,11 +195,11 @@ public class TestingFunctionResolution
 
     public class TestingFunctionCallBuilder
     {
-        private final QualifiedName name;
+        private final String name;
         private List<TypeSignature> argumentTypes = new ArrayList<>();
         private List<Expression> argumentValues = new ArrayList<>();
 
-        public TestingFunctionCallBuilder(QualifiedName name)
+        public TestingFunctionCallBuilder(String name)
         {
             this.name = name;
         }
@@ -195,17 +230,10 @@ public class TestingFunctionResolution
             return this;
         }
 
-        public FunctionCall build()
+        public Call build()
         {
-            return new FunctionCall(
-                    Optional.empty(),
-                    resolveFunction(name, TypeSignatureProvider.fromTypeSignatures(argumentTypes)).toQualifiedName(),
-                    Optional.empty(),
-                    Optional.empty(),
-                    Optional.empty(),
-                    false,
-                    Optional.empty(),
-                    Optional.empty(),
+            return new Call(
+                    resolveFunction(name, TypeSignatureProvider.fromTypeSignatures(argumentTypes)),
                     argumentValues);
         }
     }

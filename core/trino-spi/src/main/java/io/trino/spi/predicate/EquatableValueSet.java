@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.function.Consumer;
@@ -33,9 +34,11 @@ import java.util.function.Function;
 import java.util.stream.Collector;
 import java.util.stream.Stream;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.DEFAULT_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
-import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
 import static io.trino.spi.predicate.Utils.TUPLE_DOMAIN_TYPE_OPERATORS;
 import static io.trino.spi.predicate.Utils.handleThrowable;
@@ -54,6 +57,8 @@ import static java.util.stream.Collectors.toUnmodifiableList;
 public class EquatableValueSet
         implements ValueSet
 {
+    private static final int INSTANCE_SIZE = instanceSize(EquatableValueSet.class);
+
     private final Type type;
     private final boolean inclusive;
     private final Set<ValueEntry> entries;
@@ -238,15 +243,13 @@ public class EquatableValueSet
         if (inclusive && otherValueSet.inclusive()) {
             return new EquatableValueSet(type, true, intersect(entries, otherValueSet.entries));
         }
-        else if (inclusive) {
+        if (inclusive) {
             return new EquatableValueSet(type, true, subtract(entries, otherValueSet.entries));
         }
-        else if (otherValueSet.inclusive()) {
+        if (otherValueSet.inclusive()) {
             return new EquatableValueSet(type, true, subtract(otherValueSet.entries, entries));
         }
-        else {
-            return new EquatableValueSet(type, false, union(otherValueSet.entries, entries));
-        }
+        return new EquatableValueSet(type, false, union(otherValueSet.entries, entries));
     }
 
     @Override
@@ -257,15 +260,13 @@ public class EquatableValueSet
         if (inclusive && otherValueSet.inclusive()) {
             return setsOverlap(entries, otherValueSet.entries);
         }
-        else if (inclusive) {
+        if (inclusive) {
             return !otherValueSet.entries.containsAll(entries);
         }
-        else if (otherValueSet.inclusive()) {
+        if (otherValueSet.inclusive()) {
             return !entries.containsAll(otherValueSet.entries);
         }
-        else {
-            return true;
-        }
+        return true;
     }
 
     @Override
@@ -276,15 +277,13 @@ public class EquatableValueSet
         if (inclusive && otherValueSet.inclusive()) {
             return new EquatableValueSet(type, true, union(entries, otherValueSet.entries));
         }
-        else if (inclusive) {
+        if (inclusive) {
             return new EquatableValueSet(type, false, subtract(otherValueSet.entries, entries));
         }
-        else if (otherValueSet.inclusive()) {
+        if (otherValueSet.inclusive()) {
             return new EquatableValueSet(type, false, subtract(entries, otherValueSet.entries));
         }
-        else {
-            return new EquatableValueSet(type, false, intersect(otherValueSet.entries, entries));
-        }
+        return new EquatableValueSet(type, false, intersect(otherValueSet.entries, entries));
     }
 
     @Override
@@ -336,6 +335,22 @@ public class EquatableValueSet
                 .add("values=" + getValuesCount())
                 .add(formatValues(session, limit))
                 .toString();
+    }
+
+    @Override
+    public Optional<Collection<Object>> tryExpandRanges(int valuesLimit)
+    {
+        if (inclusive() && getValuesCount() <= valuesLimit) {
+            return Optional.of(getValues());
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        // type is not accounted for as the instances are cached (by TypeRegistry) and shared
+        return INSTANCE_SIZE + estimatedSizeOf(entries, ValueEntry::getRetainedSizeInBytes);
     }
 
     private String formatValues(ConnectorSession session, int limit)
@@ -418,6 +433,8 @@ public class EquatableValueSet
 
     public static class ValueEntry
     {
+        private static final int INSTANCE_SIZE = instanceSize(ValueEntry.class);
+
         private final Type type;
         private final Block block;
         private final MethodHandle equalOperator;
@@ -434,7 +451,7 @@ public class EquatableValueSet
             if (block.getPositionCount() != 1) {
                 throw new IllegalArgumentException("Block should only have one position");
             }
-            this.equalOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getEqualOperator(type, simpleConvention(NULLABLE_RETURN, BLOCK_POSITION, BLOCK_POSITION));
+            this.equalOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getEqualOperator(type, simpleConvention(DEFAULT_ON_NULL, BLOCK_POSITION, BLOCK_POSITION));
             this.hashCodeOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getHashCodeOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION));
         }
 
@@ -485,14 +502,20 @@ public class EquatableValueSet
                 return false;
             }
 
-            Boolean result;
+            boolean result;
             try {
-                result = (Boolean) equalOperator.invokeExact(this.block, 0, other.block, 0);
+                result = (boolean) equalOperator.invokeExact(this.block, 0, other.block, 0);
             }
             catch (Throwable throwable) {
                 throw handleThrowable(throwable);
             }
-            return Boolean.TRUE.equals(result);
+            return result;
+        }
+
+        public long getRetainedSizeInBytes()
+        {
+            // type is not accounted for as the instances are cached (by TypeRegistry) and shared
+            return INSTANCE_SIZE + block.getRetainedSizeInBytes();
         }
     }
 

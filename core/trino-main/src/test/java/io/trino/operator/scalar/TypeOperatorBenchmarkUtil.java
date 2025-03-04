@@ -24,7 +24,7 @@ import java.lang.invoke.MethodHandle;
 import java.util.Base64;
 import java.util.Random;
 
-import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
@@ -55,29 +55,24 @@ final class TypeOperatorBenchmarkUtil
 
     public static Type toType(String type)
     {
-        switch (type) {
-            case "BIGINT":
-                return BIGINT;
-            case "VARCHAR":
-                return VARCHAR;
-            case "DOUBLE":
-                return DOUBLE;
-            case "BOOLEAN":
-                return BOOLEAN;
-            default:
-                throw new UnsupportedOperationException();
-        }
+        return switch (type) {
+            case "BIGINT" -> BIGINT;
+            case "VARCHAR" -> VARCHAR;
+            case "DOUBLE" -> DOUBLE;
+            case "BOOLEAN" -> BOOLEAN;
+            default -> throw new UnsupportedOperationException();
+        };
     }
 
     public static MethodHandle getEqualBlockMethod(Type type)
     {
-        MethodHandle equalOperator = TYPE_OPERATORS.getEqualOperator(type, simpleConvention(NULLABLE_RETURN, BLOCK_POSITION, BLOCK_POSITION));
+        MethodHandle equalOperator = TYPE_OPERATORS.getEqualOperator(type, simpleConvention(NULLABLE_RETURN, BLOCK_POSITION_NOT_NULL, BLOCK_POSITION_NOT_NULL));
         return EQUAL_BLOCK.bindTo(equalOperator);
     }
 
     public static MethodHandle getHashCodeBlockMethod(Type type)
     {
-        MethodHandle hashCodeOperator = TYPE_OPERATORS.getHashCodeOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION));
+        MethodHandle hashCodeOperator = TYPE_OPERATORS.getHashCodeOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION_NOT_NULL));
         return HASH_CODE_BLOCK.bindTo(hashCodeOperator);
     }
 

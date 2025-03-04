@@ -26,9 +26,9 @@ import java.io.IOException;
 import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.UUID;
 
+import static io.trino.plugin.base.util.JsonUtils.jsonFactory;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.Decimals.rescale;
 import static java.lang.String.format;
@@ -38,7 +38,7 @@ public class PartitionData
         implements StructLike
 {
     private static final String PARTITION_VALUES_FIELD = "partitionValues";
-    private static final JsonFactory FACTORY = new JsonFactory();
+    private static final JsonFactory FACTORY = jsonFactory();
     private static final ObjectMapper MAPPER = new ObjectMapper(FACTORY)
             .configure(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS, true);
 
@@ -77,15 +77,15 @@ public class PartitionData
         partitionValues[pos] = value;
     }
 
-    public String toJson()
+    public static String toJson(StructLike structLike)
     {
         try {
             StringWriter writer = new StringWriter();
             JsonGenerator generator = FACTORY.createGenerator(writer);
             generator.writeStartObject();
             generator.writeArrayFieldStart(PARTITION_VALUES_FIELD);
-            for (Object value : partitionValues) {
-                generator.writeObject(value);
+            for (int i = 0; i < structLike.size(); i++) {
+                generator.writeObject(structLike.get(i, Object.class));
             }
             generator.writeEndArray();
             generator.writeEndObject();
@@ -93,7 +93,7 @@ public class PartitionData
             return writer.toString();
         }
         catch (IOException e) {
-            throw new UncheckedIOException("JSON conversion failed for PartitionData: " + Arrays.toString(partitionValues), e);
+            throw new UncheckedIOException("JSON conversion failed for: " + structLike, e);
         }
     }
 
@@ -140,8 +140,14 @@ public class PartitionData
             case TIME:
                 return partitionValue.asLong();
             case FLOAT:
+                if (partitionValue.asText().equalsIgnoreCase("NaN")) {
+                    return Float.NaN;
+                }
                 return partitionValue.floatValue();
             case DOUBLE:
+                if (partitionValue.asText().equalsIgnoreCase("NaN")) {
+                    return Double.NaN;
+                }
                 return partitionValue.doubleValue();
             case STRING:
                 return partitionValue.asText();
@@ -160,6 +166,11 @@ public class PartitionData
                 return rescale(
                         partitionValue.decimalValue(),
                         createDecimalType(decimalType.precision(), decimalType.scale()));
+            // TODO https://github.com/trinodb/trino/issues/19753 Support Iceberg timestamp types with nanosecond precision
+            case TIMESTAMP_NANO:
+            // TODO https://github.com/trinodb/trino/issues/24538 Support variant type
+            case VARIANT:
+            case UNKNOWN:
             case LIST:
             case MAP:
             case STRUCT:

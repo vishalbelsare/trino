@@ -14,10 +14,12 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Module;
 import io.trino.Session;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.QueryRunner;
 import io.trino.tpch.TpchTable;
 
 import java.sql.Connection;
@@ -37,40 +39,52 @@ public final class H2QueryRunner
 
     private static final String TPCH_SCHEMA = "tpch";
 
-    public static DistributedQueryRunner createH2QueryRunner(TpchTable<?>... tables)
+    public static QueryRunner createH2QueryRunner(TpchTable<?>... tables)
             throws Exception
     {
         return createH2QueryRunner(ImmutableList.copyOf(tables));
     }
 
-    public static DistributedQueryRunner createH2QueryRunner(Iterable<TpchTable<?>> tables)
+    public static QueryRunner createH2QueryRunner(Iterable<TpchTable<?>> tables)
             throws Exception
     {
         return createH2QueryRunner(tables, TestingH2JdbcModule.createProperties());
     }
 
-    public static DistributedQueryRunner createH2QueryRunner(Iterable<TpchTable<?>> tables, Map<String, String> properties)
+    public static QueryRunner createH2QueryRunner(Iterable<TpchTable<?>> tables, Map<String, String> properties)
             throws Exception
     {
         return createH2QueryRunner(tables, properties, new TestingH2JdbcModule());
     }
 
-    public static DistributedQueryRunner createH2QueryRunner(Iterable<TpchTable<?>> tables, Map<String, String> properties, Module module)
+    public static QueryRunner createH2QueryRunner(Iterable<TpchTable<?>> tables, Map<String, String> properties, Module module)
             throws Exception
     {
-        DistributedQueryRunner queryRunner = null;
+        return createH2QueryRunner(tables, properties, ImmutableMap.of(), module);
+    }
+
+    public static QueryRunner createH2QueryRunner(
+            Iterable<TpchTable<?>> tables,
+            Map<String, String> properties,
+            Map<String, String> coordinatorProperties,
+            Module module)
+            throws Exception
+    {
+        QueryRunner queryRunner = null;
         try {
-            queryRunner = DistributedQueryRunner.builder(createSession()).build();
+            queryRunner = DistributedQueryRunner.builder(createSession())
+                    .setCoordinatorProperties(coordinatorProperties)
+                    .build();
 
             queryRunner.installPlugin(new TpchPlugin());
             queryRunner.createCatalog("tpch", "tpch");
 
             createSchema(properties, "tpch");
 
-            queryRunner.installPlugin(new JdbcPlugin("base-jdbc", module));
-            queryRunner.createCatalog("jdbc", "base-jdbc", properties);
+            queryRunner.installPlugin(new JdbcPlugin("base_jdbc", () -> module));
+            queryRunner.createCatalog("jdbc", "base_jdbc", properties);
 
-            copyTpchTables(queryRunner, "tpch", TINY_SCHEMA_NAME, createSession(), tables);
+            copyTpchTables(queryRunner, "tpch", TINY_SCHEMA_NAME, tables);
 
             return queryRunner;
         }

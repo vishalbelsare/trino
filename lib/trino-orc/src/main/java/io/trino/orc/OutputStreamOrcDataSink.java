@@ -14,25 +14,37 @@
 package io.trino.orc;
 
 import io.airlift.slice.OutputStreamSliceOutput;
+import io.trino.filesystem.TrinoOutputFile;
+import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.orc.stream.OrcDataOutput;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static java.util.Objects.requireNonNull;
 
 public class OutputStreamOrcDataSink
         implements OrcDataSink
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(OutputStreamOrcDataSink.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(OutputStreamOrcDataSink.class);
 
     private final OutputStreamSliceOutput output;
+    private final AggregatedMemoryContext memoryContext;
 
-    public OutputStreamOrcDataSink(OutputStream outputStream)
+    public static OutputStreamOrcDataSink create(TrinoOutputFile outputFile)
+            throws IOException
+    {
+        AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
+        return new OutputStreamOrcDataSink(outputFile.create(memoryContext), memoryContext);
+    }
+
+    private OutputStreamOrcDataSink(OutputStream outputStream, AggregatedMemoryContext memoryContext)
     {
         this.output = new OutputStreamSliceOutput(requireNonNull(outputStream, "outputStream is null"));
+        this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
     }
 
     @Override
@@ -44,7 +56,7 @@ public class OutputStreamOrcDataSink
     @Override
     public long getRetainedSizeInBytes()
     {
-        return INSTANCE_SIZE + output.getRetainedSize();
+        return INSTANCE_SIZE + output.getRetainedSize() + memoryContext.getBytes();
     }
 
     @Override

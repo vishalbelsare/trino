@@ -15,58 +15,70 @@ package io.trino.parquet.writer;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
-import io.trino.parquet.writer.repdef.DefLevelIterable;
-import io.trino.parquet.writer.repdef.DefLevelIterables;
-import io.trino.parquet.writer.repdef.RepLevelIterable;
-import io.trino.parquet.writer.repdef.RepLevelIterables;
+import io.trino.parquet.ParquetMetadataConverter;
+import io.trino.parquet.writer.repdef.DefLevelWriterProvider;
+import io.trino.parquet.writer.repdef.DefLevelWriterProviders;
+import io.trino.parquet.writer.repdef.RepLevelWriterProvider;
+import io.trino.parquet.writer.repdef.RepLevelWriterProviders;
+import io.trino.parquet.writer.valuewriter.ColumnDescriptorValuesWriter;
 import io.trino.parquet.writer.valuewriter.PrimitiveValueWriter;
+import io.trino.plugin.base.io.ChunkedSliceOutput;
+import jakarta.annotation.Nullable;
 import org.apache.parquet.bytes.BytesInput;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.Encoding;
+import org.apache.parquet.column.EncodingStats;
 import org.apache.parquet.column.page.DictionaryPage;
 import org.apache.parquet.column.statistics.Statistics;
-import org.apache.parquet.column.values.ValuesWriter;
+import org.apache.parquet.column.values.bloomfilter.BloomFilter;
 import org.apache.parquet.format.ColumnMetaData;
+import org.apache.parquet.format.CompressionCodec;
+import org.apache.parquet.format.DataPageHeader;
+import org.apache.parquet.format.DictionaryPageHeader;
 import org.apache.parquet.format.PageEncodingStats;
+import org.apache.parquet.format.PageHeader;
 import org.apache.parquet.format.PageType;
-import org.apache.parquet.format.converter.ParquetMetadataConverter;
-import org.apache.parquet.hadoop.metadata.CompressionCodecName;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.Nullable;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.trino.parquet.ParquetMetadataConverter.convertEncodingStats;
+import static io.trino.parquet.ParquetMetadataConverter.getEncoding;
 import static io.trino.parquet.writer.ParquetCompressor.getCompressor;
 import static io.trino.parquet.writer.ParquetDataOutput.createDataOutput;
-import static io.trino.parquet.writer.repdef.RepLevelIterables.getIterator;
-import static java.lang.Math.toIntExact;
+import static io.trino.parquet.writer.repdef.DefLevelWriterProvider.DefinitionLevelWriter;
+import static io.trino.parquet.writer.repdef.DefLevelWriterProvider.getRootDefinitionLevelWriter;
+import static io.trino.parquet.writer.repdef.RepLevelWriterProvider.RepetitionLevelWriter;
+import static io.trino.parquet.writer.repdef.RepLevelWriterProvider.getRootRepetitionLevelWriter;
 import static java.util.Objects.requireNonNull;
-import static org.apache.parquet.bytes.BytesInput.copy;
+import static org.apache.parquet.format.Util.writePageHeader;
 
 public class PrimitiveColumnWriter
         implements ColumnWriter
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(PrimitiveColumnWriter.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(PrimitiveColumnWriter.class);
+    private static final int MINIMUM_OUTPUT_BUFFER_CHUNK_SIZE = 8 * 1024;
+    private static final int MAXIMUM_OUTPUT_BUFFER_CHUNK_SIZE = 2 * 1024 * 1024;
+    // ParquetMetadataConverter.MAX_STATS_SIZE is 4096, we need a value which would guarantee that min and max
+    // don't add up to 4096 (so less than 2048). Using 1K as that is big enough for most use cases.
+    private static final int MAX_STATISTICS_LENGTH_IN_BYTES = 1024;
 
     private final ColumnDescriptor columnDescriptor;
-    private final CompressionCodecName compressionCodec;
+    private final CompressionCodec compressionCodec;
 
     private final PrimitiveValueWriter primitiveValueWriter;
-    private final ValuesWriter definitionLevelWriter;
-    private final ValuesWriter repetitionLevelWriter;
-
-    private final ParquetMetadataConverter parquetMetadataConverter = new ParquetMetadataConverter();
+    private final ColumnDescriptorValuesWriter definitionLevelWriter;
+    private final ColumnDescriptorValuesWriter repetitionLevelWriter;
 
     private boolean closed;
     private boolean getDataStreamsCalled;
@@ -79,31 +91,49 @@ public class PrimitiveColumnWriter
     private final Set<Encoding> encodings = new HashSet<>();
     private final Map<org.apache.parquet.format.Encoding, Integer> dataPagesWithEncoding = new HashMap<>();
     private final Map<org.apache.parquet.format.Encoding, Integer> dictionaryPagesWithEncoding = new HashMap<>();
+    private final Statistics<?> columnStatistics;
+    private final Optional<BloomFilter> bloomFilter;
     private long totalCompressedSize;
     private long totalUnCompressedSize;
     private long totalValues;
-    private Statistics<?> columnStatistics;
 
     private final int maxDefinitionLevel;
 
-    private final List<ParquetDataOutput> pageBuffer = new ArrayList<>();
+    private final ChunkedSliceOutput compressedOutputStream;
 
     @Nullable
     private final ParquetCompressor compressor;
 
     private final int pageSizeThreshold;
+    private final int pageValueCountLimit;
 
-    public PrimitiveColumnWriter(ColumnDescriptor columnDescriptor, PrimitiveValueWriter primitiveValueWriter, ValuesWriter definitionLevelWriter, ValuesWriter repetitionLevelWriter, CompressionCodecName compressionCodecName, int pageSizeThreshold)
+    // Total size of compressed parquet pages and the current uncompressed page buffered in memory
+    // Used by ParquetWriter to decide when a row group is big enough to flush
+    private long bufferedBytes;
+    private long pageBufferedBytes;
+
+    public PrimitiveColumnWriter(
+            ColumnDescriptor columnDescriptor,
+            PrimitiveValueWriter primitiveValueWriter,
+            ColumnDescriptorValuesWriter definitionLevelWriter,
+            ColumnDescriptorValuesWriter repetitionLevelWriter,
+            CompressionCodec compressionCodec,
+            int pageSizeThreshold,
+            int pageValueCountLimit,
+            Optional<BloomFilter> bloomFilter)
     {
         this.columnDescriptor = requireNonNull(columnDescriptor, "columnDescriptor is null");
         this.maxDefinitionLevel = columnDescriptor.getMaxDefinitionLevel();
         this.definitionLevelWriter = requireNonNull(definitionLevelWriter, "definitionLevelWriter is null");
         this.repetitionLevelWriter = requireNonNull(repetitionLevelWriter, "repetitionLevelWriter is null");
         this.primitiveValueWriter = requireNonNull(primitiveValueWriter, "primitiveValueWriter is null");
-        this.compressionCodec = requireNonNull(compressionCodecName, "compressionCodecName is null");
-        this.compressor = getCompressor(compressionCodecName);
+        this.compressionCodec = requireNonNull(compressionCodec, "compressionCodec is null");
+        this.compressor = getCompressor(compressionCodec);
         this.pageSizeThreshold = pageSizeThreshold;
+        this.pageValueCountLimit = pageValueCountLimit;
         this.columnStatistics = Statistics.createStats(columnDescriptor.getPrimitiveType());
+        this.compressedOutputStream = new ChunkedSliceOutput(MINIMUM_OUTPUT_BUFFER_CHUNK_SIZE, MAXIMUM_OUTPUT_BUFFER_CHUNK_SIZE);
+        this.bloomFilter = requireNonNull(bloomFilter, "bloomFilter is null");
     }
 
     @Override
@@ -111,40 +141,35 @@ public class PrimitiveColumnWriter
             throws IOException
     {
         checkState(!closed);
-
-        ColumnChunk current = new ColumnChunk(columnChunk.getBlock(),
-                ImmutableList.<DefLevelIterable>builder()
-                        .addAll(columnChunk.getDefLevelIterables())
-                        .add(DefLevelIterables.of(columnChunk.getBlock(), maxDefinitionLevel))
-                        .build(),
-                ImmutableList.<RepLevelIterable>builder()
-                        .addAll(columnChunk.getRepLevelIterables())
-                        .add(RepLevelIterables.of(columnChunk.getBlock()))
-                        .build());
-
         // write values
         primitiveValueWriter.write(columnChunk.getBlock());
 
-        // write definition levels
-        Iterator<Integer> defIterator = DefLevelIterables.getIterator(current.getDefLevelIterables());
-        while (defIterator.hasNext()) {
-            int next = defIterator.next();
-            definitionLevelWriter.writeInteger(next);
-            if (next != maxDefinitionLevel) {
-                currentPageNullCounts++;
-            }
-            valueCount++;
+        List<DefLevelWriterProvider> defLevelWriterProviders = ImmutableList.<DefLevelWriterProvider>builder()
+                .addAll(columnChunk.getDefLevelWriterProviders())
+                .add(DefLevelWriterProviders.of(columnChunk.getBlock(), maxDefinitionLevel))
+                .build();
+        DefinitionLevelWriter rootDefinitionLevelWriter = getRootDefinitionLevelWriter(defLevelWriterProviders, definitionLevelWriter);
+
+        DefLevelWriterProvider.ValuesCount valuesCount = rootDefinitionLevelWriter.writeDefinitionLevels();
+        currentPageNullCounts += valuesCount.totalValuesCount() - valuesCount.maxDefinitionLevelValuesCount();
+        valueCount += valuesCount.totalValuesCount();
+
+        if (columnDescriptor.getMaxRepetitionLevel() > 0) {
+            // write repetition levels for nested types
+            List<RepLevelWriterProvider> repLevelWriterProviders = ImmutableList.<RepLevelWriterProvider>builder()
+                    .addAll(columnChunk.getRepLevelWriterProviders())
+                    .add(RepLevelWriterProviders.of(columnChunk.getBlock()))
+                    .build();
+            RepetitionLevelWriter rootRepetitionLevelWriter = getRootRepetitionLevelWriter(repLevelWriterProviders, repetitionLevelWriter);
+            rootRepetitionLevelWriter.writeRepetitionLevels(0);
         }
 
-        // write repetition levels
-        Iterator<Integer> repIterator = getIterator(current.getRepLevelIterables());
-        while (repIterator.hasNext()) {
-            int next = repIterator.next();
-            repetitionLevelWriter.writeInteger(next);
-        }
-
-        if (getBufferedBytes() >= pageSizeThreshold) {
+        long currentPageBufferedBytes = getCurrentPageBufferedBytes();
+        if (valueCount >= pageValueCountLimit || currentPageBufferedBytes >= pageSizeThreshold) {
             flushCurrentPageToBuffer();
+        }
+        else {
+            updateBufferedBytes(currentPageBufferedBytes);
         }
     }
 
@@ -159,7 +184,17 @@ public class PrimitiveColumnWriter
             throws IOException
     {
         checkState(closed);
-        return ImmutableList.of(new BufferData(getDataStreams(), getColumnMetaData()));
+        DataStreams dataStreams = getDataStreams();
+        ColumnMetaData columnMetaData = getColumnMetaData();
+
+        EncodingStats stats = convertEncodingStats(columnMetaData.getEncoding_stats());
+        boolean isOnlyDictionaryEncodingPages = stats.hasDictionaryPages() && !stats.hasNonDictionaryEncodedPages();
+
+        return ImmutableList.of(new BufferData(
+                dataStreams.data(),
+                dataStreams.dictionaryPageSize(),
+                isOnlyDictionaryEncodingPages ? Optional.empty() : dataStreams.bloomFilter(),
+                columnMetaData));
     }
 
     // Returns ColumnMetaData that offset is invalid
@@ -169,14 +204,14 @@ public class PrimitiveColumnWriter
 
         ColumnMetaData columnMetaData = new ColumnMetaData(
                 ParquetTypeConverter.getType(columnDescriptor.getPrimitiveType().getPrimitiveTypeName()),
-                encodings.stream().map(parquetMetadataConverter::getEncoding).collect(toImmutableList()),
+                encodings.stream().map(ParquetMetadataConverter::getEncoding).collect(toImmutableList()),
                 ImmutableList.copyOf(columnDescriptor.getPath()),
-                compressionCodec.getParquetCompressionCodec(),
+                compressionCodec,
                 totalValues,
                 totalUnCompressedSize,
                 totalCompressedSize,
                 -1);
-        columnMetaData.setStatistics(ParquetMetadataConverter.toParquetStatistics(columnStatistics));
+        columnMetaData.setStatistics(ParquetMetadataConverter.toParquetStatistics(columnStatistics, MAX_STATISTICS_LENGTH_IN_BYTES));
         ImmutableList.Builder<PageEncodingStats> pageEncodingStats = ImmutableList.builder();
         dataPagesWithEncoding.entrySet().stream()
                 .map(encodingAndCount -> new PageEncodingStats(PageType.DATA_PAGE, encodingAndCount.getKey(), encodingAndCount.getValue()))
@@ -195,43 +230,42 @@ public class PrimitiveColumnWriter
     private void flushCurrentPageToBuffer()
             throws IOException
     {
-        ImmutableList.Builder<ParquetDataOutput> outputDataStreams = ImmutableList.builder();
-
-        BytesInput bytesInput = BytesInput.concat(copy(repetitionLevelWriter.getBytes()),
-                copy(definitionLevelWriter.getBytes()),
-                copy(primitiveValueWriter.getBytes()));
-        ParquetDataOutput pageData = (compressor != null) ? compressor.compress(bytesInput) : createDataOutput(bytesInput);
-        long uncompressedSize = bytesInput.size();
-        long compressedSize = pageData.size();
-
-        ByteArrayOutputStream pageHeaderOutputStream = new ByteArrayOutputStream();
+        byte[] pageDataBytes = BytesInput.concat(
+                repetitionLevelWriter.getBytes(),
+                definitionLevelWriter.getBytes(),
+                primitiveValueWriter.getBytes())
+                .toByteArray();
+        int uncompressedSize = pageDataBytes.length;
+        ParquetDataOutput pageData = (compressor != null)
+                ? compressor.compress(pageDataBytes)
+                : createDataOutput(Slices.wrappedBuffer(pageDataBytes));
+        int compressedSize = pageData.size();
 
         Statistics<?> statistics = primitiveValueWriter.getStatistics();
         statistics.incrementNumNulls(currentPageNullCounts);
         columnStatistics.mergeStatistics(statistics);
 
-        parquetMetadataConverter.writeDataPageV1Header((int) uncompressedSize,
-                (int) compressedSize,
+        int writtenBytesSoFar = compressedOutputStream.size();
+        PageHeader header = dataPageV1Header(
+                uncompressedSize,
+                compressedSize,
                 valueCount,
                 repetitionLevelWriter.getEncoding(),
                 definitionLevelWriter.getEncoding(),
-                primitiveValueWriter.getEncoding(),
-                pageHeaderOutputStream);
+                primitiveValueWriter.getEncoding());
+        writePageHeader(header, compressedOutputStream);
+        int pageHeaderSize = compressedOutputStream.size() - writtenBytesSoFar;
 
-        ParquetDataOutput pageHeader = createDataOutput(Slices.wrappedBuffer(pageHeaderOutputStream.toByteArray()));
-        outputDataStreams.add(pageHeader);
-        outputDataStreams.add(pageData);
-
-        List<ParquetDataOutput> dataOutputs = outputDataStreams.build();
-
-        dataPagesWithEncoding.merge(parquetMetadataConverter.getEncoding(primitiveValueWriter.getEncoding()), 1, Integer::sum);
+        dataPagesWithEncoding.merge(getEncoding(primitiveValueWriter.getEncoding()), 1, Integer::sum);
 
         // update total stats
-        totalUnCompressedSize += pageHeader.size() + uncompressedSize;
-        totalCompressedSize += pageHeader.size() + compressedSize;
+        totalUnCompressedSize += pageHeaderSize + uncompressedSize;
+        int pageCompressedSize = pageHeaderSize + compressedSize;
+        totalCompressedSize += pageCompressedSize;
         totalValues += valueCount;
 
-        pageBuffer.addAll(dataOutputs);
+        pageData.writeData(compressedOutputStream);
+        pageBufferedBytes += pageCompressedSize;
 
         // Add encoding should be called after ValuesWriter#getBytes() and before ValuesWriter#reset()
         encodings.add(repetitionLevelWriter.getEncoding());
@@ -245,85 +279,105 @@ public class PrimitiveColumnWriter
         repetitionLevelWriter.reset();
         definitionLevelWriter.reset();
         primitiveValueWriter.reset();
+        updateBufferedBytes(getCurrentPageBufferedBytes());
     }
 
-    private List<ParquetDataOutput> getDataStreams()
+    private DataStreams getDataStreams()
             throws IOException
     {
-        List<ParquetDataOutput> dictPage = new ArrayList<>();
+        ImmutableList.Builder<ParquetDataOutput> outputs = ImmutableList.builder();
         if (valueCount > 0) {
             flushCurrentPageToBuffer();
         }
         // write dict page if possible
         DictionaryPage dictionaryPage = primitiveValueWriter.toDictPageAndClose();
+        OptionalInt dictionaryPageSize = OptionalInt.empty();
         if (dictionaryPage != null) {
-            BytesInput pageBytes = copy(dictionaryPage.getBytes());
-            long uncompressedSize = dictionaryPage.getUncompressedSize();
-
-            ParquetDataOutput pageData = createDataOutput(pageBytes);
-            if (compressor != null) {
-                pageData = compressor.compress(pageBytes);
-            }
-            long compressedSize = pageData.size();
+            int uncompressedSize = dictionaryPage.getUncompressedSize();
+            byte[] pageBytes = dictionaryPage.getBytes().toByteArray();
+            ParquetDataOutput pageData = compressor != null
+                    ? compressor.compress(pageBytes)
+                    : createDataOutput(Slices.wrappedBuffer(pageBytes));
+            int compressedSize = pageData.size();
 
             ByteArrayOutputStream dictStream = new ByteArrayOutputStream();
-            parquetMetadataConverter.writeDictionaryPageHeader(toIntExact(uncompressedSize),
-                    toIntExact(compressedSize),
+            PageHeader header = dictionaryPageHeader(
+                    uncompressedSize,
+                    compressedSize,
                     dictionaryPage.getDictionarySize(),
-                    dictionaryPage.getEncoding(),
-                    dictStream);
-            ParquetDataOutput pageHeader = createDataOutput(Slices.wrappedBuffer(dictStream.toByteArray()));
-            dictPage.add(pageHeader);
-            dictPage.add(pageData);
+                    dictionaryPage.getEncoding());
+            writePageHeader(header, dictStream);
+            ParquetDataOutput pageHeader = createDataOutput(dictStream);
+            outputs.add(pageHeader);
+            outputs.add(pageData);
             totalCompressedSize += pageHeader.size() + compressedSize;
             totalUnCompressedSize += pageHeader.size() + uncompressedSize;
-            dictionaryPagesWithEncoding.merge(new ParquetMetadataConverter().getEncoding(dictionaryPage.getEncoding()), 1, Integer::sum);
+            dictionaryPagesWithEncoding.merge(getEncoding(dictionaryPage.getEncoding()), 1, Integer::sum);
+            dictionaryPageSize = OptionalInt.of(pageHeader.size() + compressedSize);
 
             primitiveValueWriter.resetDictionary();
         }
         getDataStreamsCalled = true;
 
-        return ImmutableList.<ParquetDataOutput>builder()
-                .addAll(dictPage)
-                .addAll(pageBuffer)
-                .build();
+        outputs.add(createDataOutput(compressedOutputStream));
+        return new DataStreams(outputs.build(), dictionaryPageSize, bloomFilter);
     }
 
     @Override
     public long getBufferedBytes()
     {
-        return pageBuffer.stream().mapToLong(ParquetDataOutput::size).sum() +
-                definitionLevelWriter.getBufferedSize() +
-                repetitionLevelWriter.getBufferedSize() +
-                primitiveValueWriter.getBufferedSize();
+        return bufferedBytes;
     }
 
     @Override
     public long getRetainedBytes()
     {
         return INSTANCE_SIZE +
+                compressedOutputStream.getRetainedSize() +
                 primitiveValueWriter.getAllocatedSize() +
                 definitionLevelWriter.getAllocatedSize() +
                 repetitionLevelWriter.getAllocatedSize();
     }
 
-    @Override
-    public void reset()
+    private void updateBufferedBytes(long currentPageBufferedBytes)
     {
-        definitionLevelWriter.reset();
-        repetitionLevelWriter.reset();
-        primitiveValueWriter.reset();
-        pageBuffer.clear();
-        closed = false;
-
-        totalCompressedSize = 0;
-        totalUnCompressedSize = 0;
-        totalValues = 0;
-        encodings.clear();
-        dataPagesWithEncoding.clear();
-        dictionaryPagesWithEncoding.clear();
-        this.columnStatistics = Statistics.createStats(columnDescriptor.getPrimitiveType());
-
-        getDataStreamsCalled = false;
+        bufferedBytes = pageBufferedBytes + currentPageBufferedBytes;
     }
+
+    private long getCurrentPageBufferedBytes()
+    {
+        return definitionLevelWriter.getBufferedSize() +
+                repetitionLevelWriter.getBufferedSize() +
+                primitiveValueWriter.getBufferedSize();
+    }
+
+    private static PageHeader dataPageV1Header(
+            int uncompressedSize,
+            int compressedSize,
+            int valueCount,
+            org.apache.parquet.column.Encoding rlEncoding,
+            org.apache.parquet.column.Encoding dlEncoding,
+            org.apache.parquet.column.Encoding valuesEncoding)
+    {
+        PageHeader header = new PageHeader(PageType.DATA_PAGE, uncompressedSize, compressedSize);
+        header.setData_page_header(new DataPageHeader(
+                valueCount,
+                getEncoding(valuesEncoding),
+                getEncoding(dlEncoding),
+                getEncoding(rlEncoding)));
+        return header;
+    }
+
+    private static PageHeader dictionaryPageHeader(
+            int uncompressedSize,
+            int compressedSize,
+            int valueCount,
+            org.apache.parquet.column.Encoding valuesEncoding)
+    {
+        PageHeader header = new PageHeader(PageType.DICTIONARY_PAGE, uncompressedSize, compressedSize);
+        header.setDictionary_page_header(new DictionaryPageHeader(valueCount, getEncoding(valuesEncoding)));
+        return header;
+    }
+
+    private record DataStreams(List<ParquetDataOutput> data, OptionalInt dictionaryPageSize, Optional<BloomFilter> bloomFilter) {}
 }

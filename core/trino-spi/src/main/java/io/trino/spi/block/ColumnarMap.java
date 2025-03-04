@@ -27,28 +27,27 @@ public class ColumnarMap
     {
         requireNonNull(block, "block is null");
 
-        if (block instanceof LazyBlock) {
-            block = ((LazyBlock) block).getBlock();
+        if (block instanceof LazyBlock lazyBlock) {
+            block = lazyBlock.getBlock();
         }
-        if (block instanceof DictionaryBlock) {
-            return toColumnarMap((DictionaryBlock) block);
+        if (block instanceof DictionaryBlock dictionaryBlock) {
+            return toColumnarMap(dictionaryBlock);
         }
-        if (block instanceof RunLengthEncodedBlock) {
-            return toColumnarMap((RunLengthEncodedBlock) block);
+        if (block instanceof RunLengthEncodedBlock runLengthEncodedBlock) {
+            return toColumnarMap(runLengthEncodedBlock);
         }
 
-        if (!(block instanceof AbstractMapBlock)) {
+        if (!(block instanceof MapBlock mapBlock)) {
             throw new IllegalArgumentException("Invalid map block: " + block.getClass().getName());
         }
-
-        AbstractMapBlock mapBlock = (AbstractMapBlock) block;
 
         int offsetBase = mapBlock.getOffsetBase();
         int[] offsets = mapBlock.getOffsets();
 
         // get the keys and values for visible region
-        int firstEntryPosition = mapBlock.getOffset(0);
-        int totalEntryCount = mapBlock.getOffset(block.getPositionCount()) - firstEntryPosition;
+        int firstEntryPosition = offsets[offsetBase];
+        int position = block.getPositionCount();
+        int totalEntryCount = offsets[position + offsetBase] - firstEntryPosition;
         Block keysBlock = mapBlock.getRawKeyBlock().getRegion(firstEntryPosition, totalEntryCount);
         Block valuesBlock = mapBlock.getRawValueBlock().getRegion(firstEntryPosition, totalEntryCount);
 
@@ -84,8 +83,8 @@ public class ColumnarMap
                 dictionaryBlock,
                 0,
                 offsets,
-                new DictionaryBlock(dictionaryIds.length, columnarMap.getKeysBlock(), dictionaryIds),
-                new DictionaryBlock(dictionaryIds.length, columnarMap.getValuesBlock(), dictionaryIds));
+                DictionaryBlock.create(dictionaryIds.length, columnarMap.getKeysBlock(), dictionaryIds),
+                DictionaryBlock.create(dictionaryIds.length, columnarMap.getValuesBlock(), dictionaryIds));
     }
 
     private static ColumnarMap toColumnarMap(RunLengthEncodedBlock rleBlock)
@@ -113,13 +112,13 @@ public class ColumnarMap
                 rleBlock,
                 0,
                 offsets,
-                new DictionaryBlock(dictionaryIds.length, columnarMap.getKeysBlock(), dictionaryIds),
-                new DictionaryBlock(dictionaryIds.length, columnarMap.getValuesBlock(), dictionaryIds));
+                DictionaryBlock.create(dictionaryIds.length, columnarMap.getKeysBlock(), dictionaryIds),
+                DictionaryBlock.create(dictionaryIds.length, columnarMap.getValuesBlock(), dictionaryIds));
     }
 
     private ColumnarMap(Block nullCheckBlock, int offsetsOffset, int[] offsets, Block keysBlock, Block valuesBlock)
     {
-        this.nullCheckBlock = nullCheckBlock;
+        this.nullCheckBlock = requireNonNull(nullCheckBlock, "nullCheckBlock is null");
         this.offsetsOffset = offsetsOffset;
         this.offsets = offsets;
         this.keysBlock = keysBlock;
@@ -129,6 +128,11 @@ public class ColumnarMap
     public int getPositionCount()
     {
         return nullCheckBlock.getPositionCount();
+    }
+
+    public boolean mayHaveNull()
+    {
+        return nullCheckBlock.mayHaveNull();
     }
 
     public boolean isNull(int position)

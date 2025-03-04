@@ -13,7 +13,6 @@
  */
 package io.trino.operator.scalar;
 
-import io.trino.operator.aggregation.TypedSet;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.Convention;
@@ -23,19 +22,18 @@ import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
 import io.trino.spi.type.Type;
-import io.trino.type.BlockTypeOperators.BlockPositionEqual;
 import io.trino.type.BlockTypeOperators.BlockPositionHashCode;
+import io.trino.type.BlockTypeOperators.BlockPositionIsIdentical;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static io.trino.operator.aggregation.TypedSet.createEqualityTypedSet;
+import static io.trino.operator.scalar.BlockSet.MAX_FUNCTION_MEMORY;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
-import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
-import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.type.BigintType.BIGINT;
 
 @ScalarFunction("array_union")
@@ -49,9 +47,9 @@ public final class ArrayUnionFunction
     public static Block union(
             @TypeParameter("E") Type type,
             @OperatorDependency(
-                    operator = EQUAL,
+                    operator = IDENTICAL,
                     argumentTypes = {"E", "E"},
-                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = NULLABLE_RETURN)) BlockPositionEqual elementEqual,
+                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = FAIL_ON_NULL)) BlockPositionIsIdentical elementIdentical,
             @OperatorDependency(
                     operator = HASH_CODE,
                     argumentTypes = "E",
@@ -59,26 +57,23 @@ public final class ArrayUnionFunction
             @SqlType("array(E)") Block leftArray,
             @SqlType("array(E)") Block rightArray)
     {
-        int leftArrayCount = leftArray.getPositionCount();
-        int rightArrayCount = rightArray.getPositionCount();
-        BlockBuilder distinctElementBlockBuilder = type.createBlockBuilder(null, leftArrayCount + rightArrayCount);
-        TypedSet typedSet = createEqualityTypedSet(
+        BlockSet set = new BlockSet(
                 type,
-                elementEqual,
+                elementIdentical,
                 elementHashCode,
-                distinctElementBlockBuilder,
-                leftArrayCount + rightArrayCount,
-                "array_union");
+                leftArray.getPositionCount() + rightArray.getPositionCount());
 
         for (int i = 0; i < leftArray.getPositionCount(); i++) {
-            typedSet.add(leftArray, i);
+            set.add(leftArray, i);
         }
 
         for (int i = 0; i < rightArray.getPositionCount(); i++) {
-            typedSet.add(rightArray, i);
+            set.add(rightArray, i);
         }
 
-        return distinctElementBlockBuilder.build();
+        BlockBuilder blockBuilder = type.createBlockBuilder(null, set.size());
+        set.getAllWithSizeLimit(blockBuilder, "array_union", MAX_FUNCTION_MEMORY);
+        return blockBuilder.build();
     }
 
     @SqlType("array(bigint)")
@@ -87,7 +82,7 @@ public final class ArrayUnionFunction
         int leftArrayCount = leftArray.getPositionCount();
         int rightArrayCount = rightArray.getPositionCount();
         LongSet set = new LongOpenHashSet(leftArrayCount + rightArrayCount);
-        BlockBuilder distinctElementBlockBuilder = BIGINT.createBlockBuilder(null, leftArrayCount + rightArrayCount);
+        BlockBuilder distinctElementBlockBuilder = BIGINT.createFixedSizeBlockBuilder(leftArrayCount + rightArrayCount);
         AtomicBoolean containsNull = new AtomicBoolean(false);
         appendBigintArray(leftArray, containsNull, set, distinctElementBlockBuilder);
         appendBigintArray(rightArray, containsNull, set, distinctElementBlockBuilder);

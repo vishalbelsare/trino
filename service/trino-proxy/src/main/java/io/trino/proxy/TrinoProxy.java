@@ -16,7 +16,6 @@ package io.trino.proxy;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Module;
 import io.airlift.bootstrap.Bootstrap;
-import io.airlift.event.client.EventModule;
 import io.airlift.http.server.HttpServerModule;
 import io.airlift.jaxrs.JaxrsModule;
 import io.airlift.jmx.JmxModule;
@@ -24,11 +23,15 @@ import io.airlift.json.JsonModule;
 import io.airlift.log.LogJmxModule;
 import io.airlift.log.Logger;
 import io.airlift.node.NodeModule;
-import io.airlift.tracetoken.TraceTokenModule;
+import io.airlift.tracing.TracingModule;
 import org.weakref.jmx.guice.MBeanModule;
+
+import static com.google.common.base.MoreObjects.firstNonNull;
 
 public final class TrinoProxy
 {
+    private static final String VERSION = firstNonNull(TrinoProxy.class.getPackage().getImplementationVersion(), "unknown");
+
     private TrinoProxy() {}
 
     public static void start(Module... extraModules)
@@ -41,8 +44,7 @@ public final class TrinoProxy
                 .add(new MBeanModule())
                 .add(new JmxModule())
                 .add(new LogJmxModule())
-                .add(new TraceTokenModule())
-                .add(new EventModule())
+                .add(new TracingModule("trino-proxy", VERSION))
                 .add(new ProxyModule())
                 .add(extraModules)
                 .build());

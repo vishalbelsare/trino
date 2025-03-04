@@ -16,6 +16,7 @@ package io.trino.spi.predicate;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.errorprone.annotations.DoNotCall;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.Type;
 
@@ -34,8 +35,13 @@ import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 import java.util.stream.Collector;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.lang.String.format;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.unmodifiableList;
@@ -49,6 +55,8 @@ import static java.util.stream.Collectors.toUnmodifiableList;
  */
 public final class TupleDomain<T>
 {
+    private static final int INSTANCE_SIZE = instanceSize(TupleDomain.class);
+
     private static final TupleDomain<?> NONE = new TupleDomain<>(Optional.empty());
     private static final TupleDomain<?> ALL = new TupleDomain<>(Optional.of(emptyMap()));
 
@@ -160,12 +168,9 @@ public final class TupleDomain<T>
                         })));
     }
 
-    /*
-     * This method is for JSON serialization only. Do not use.
-     * It's marked as @Deprecated to help avoid usage, and not because we plan to remove it.
-     */
-    @Deprecated
     @JsonCreator
+    @DoNotCall // For JSON deserialization only
+    @Deprecated // Discourage usages in SPI consumers
     public static <T> TupleDomain<T> fromColumnDomains(@JsonProperty("columnDomains") Optional<List<ColumnDomain<T>>> columnDomains)
     {
         if (columnDomains.isEmpty()) {
@@ -175,12 +180,9 @@ public final class TupleDomain<T>
                 .collect(toLinkedMap(ColumnDomain::getColumn, ColumnDomain::getDomain)));
     }
 
-    /*
-     * This method is for JSON serialization only. Do not use.
-     * It's marked as @Deprecated to help avoid usage, and not because we plan to remove it.
-     */
-    @Deprecated
     @JsonProperty
+    @DoNotCall // For JSON serialization only
+    @Deprecated // Discourage usages in SPI consumers
     public Optional<List<ColumnDomain<T>>> getColumnDomains()
     {
         return domains.map(map -> map.entrySet().stream()
@@ -228,20 +230,39 @@ public final class TupleDomain<T>
         return domains;
     }
 
+    public Domain getDomain(T column, Type type)
+    {
+        if (domains.isEmpty()) {
+            return Domain.none(type);
+        }
+        Domain domain = domains.get().get(column);
+        if (domain != null && !domain.getType().equals(type)) {
+            throw new IllegalArgumentException("Provided type %s does not match domain type %s for column %s".formatted(type, domain.getType(), column));
+        }
+        if (domain == null) {
+            return Domain.all(type);
+        }
+        return domain;
+    }
+
     /**
      * Returns the strict intersection of the TupleDomains.
      * The resulting TupleDomain represents the set of tuples that would be valid
      * in both TupleDomains.
      */
-    public TupleDomain<T> intersect(TupleDomain<T> other)
+    public <U extends T> TupleDomain<T> intersect(TupleDomain<U> other)
     {
         return intersect(List.of(this, other));
     }
 
-    public static <T> TupleDomain<T> intersect(List<TupleDomain<T>> domains)
+    public static <T> TupleDomain<T> intersect(List<? extends TupleDomain<? extends T>> domains)
     {
-        if (domains.size() < 2) {
-            throw new IllegalArgumentException("Expected at least 2 elements");
+        if (domains.isEmpty()) {
+            return all();
+        }
+
+        if (domains.size() == 1) {
+            return upcast(domains.get(0));
         }
 
         if (domains.stream().anyMatch(TupleDomain::isNone)) {
@@ -249,10 +270,10 @@ public final class TupleDomain<T>
         }
 
         if (domains.stream().allMatch(domain -> domain.equals(domains.get(0)))) {
-            return domains.get(0);
+            return upcast(domains.get(0));
         }
 
-        List<TupleDomain<T>> candidates = domains.stream()
+        List<TupleDomain<? extends T>> candidates = domains.stream()
                 .filter(domain -> !domain.isAll())
                 .collect(toList());
 
@@ -261,12 +282,12 @@ public final class TupleDomain<T>
         }
 
         if (candidates.size() == 1) {
-            return candidates.get(0);
+            return upcast(candidates.get(0));
         }
 
         Map<T, Domain> intersected = new LinkedHashMap<>(candidates.get(0).getDomains().get());
         for (int i = 1; i < candidates.size(); i++) {
-            for (Map.Entry<T, Domain> entry : candidates.get(i).getDomains().get().entrySet()) {
+            for (Map.Entry<? extends T, Domain> entry : candidates.get(i).getDomains().get().entrySet()) {
                 Domain intersectionDomain = intersected.get(entry.getKey());
                 if (intersectionDomain == null) {
                     intersected.put(entry.getKey(), entry.getValue());
@@ -282,6 +303,13 @@ public final class TupleDomain<T>
         }
 
         return withColumnDomains(intersected);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> TupleDomain<T> upcast(TupleDomain<? extends T> domain)
+    {
+        // TupleDomain<T> is covariant with respect to T (because it's immutable), so it's a safe operation
+        return (TupleDomain<T>) domain;
     }
 
     @SafeVarargs
@@ -326,7 +354,6 @@ public final class TupleDomain<T>
      * Note that this is NOT equivalent to a strict union as the final result may allow tuples
      * that do not exist in either TupleDomain.
      * Example 1:
-     * <p>
      * <ul>
      * <li>TupleDomain X: a => 1, b => 2
      * <li>TupleDomain Y: a => 2, b => 3
@@ -339,11 +366,10 @@ public final class TupleDomain<T>
      * <p>
      * Let a be of type DOUBLE
      * <ul>
-     * <li>TupleDomain X: (a < 5)
-     * <li>TupleDomain Y: (a > 0)
-     * <li>Column-wise unioned TupleDomain: (a IS NOT NULL)
+     * <li>TupleDomain X: {@code (a < 5)}
+     * <li>TupleDomain Y: {@code (a > 0)}
+     * <li>Column-wise unioned TupleDomain: {@code (a IS NOT NULL)}
      * </ul>
-     * </p>
      * In the above resulting TupleDomain, tuple (a => NaN) would be considered valid but would
      * not be valid for either TupleDomain X or TupleDomain Y.
      * However, this result is guaranteed to be a superset of the strict union.
@@ -395,11 +421,7 @@ public final class TupleDomain<T>
             if (!domain.isNone()) {
                 for (Map.Entry<T, Domain> entry : domain.getDomains().get().entrySet()) {
                     if (commonColumns.contains(entry.getKey())) {
-                        List<Domain> domainForColumn = domainsByColumn.get(entry.getKey());
-                        if (domainForColumn == null) {
-                            domainForColumn = new ArrayList<>();
-                            domainsByColumn.put(entry.getKey(), domainForColumn);
-                        }
+                        List<Domain> domainForColumn = domainsByColumn.computeIfAbsent(entry.getKey(), _ -> new ArrayList<>());
                         domainForColumn.add(entry.getValue());
                     }
                 }
@@ -566,6 +588,23 @@ public final class TupleDomain<T>
                         })));
     }
 
+    public Predicate<Map<T, NullableValue>> asPredicate()
+    {
+        if (isNone()) {
+            return bindings -> false;
+        }
+        Map<T, Domain> domains = this.domains.orElseThrow();
+        return bindings -> {
+            for (Map.Entry<T, NullableValue> entry : bindings.entrySet()) {
+                Domain domain = domains.get(entry.getKey());
+                if (domain != null && !domain.includesNullableValue(entry.getValue().getValue())) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    }
+
     // Available for Jackson serialization only!
     public static class ColumnDomain<C>
     {
@@ -601,5 +640,11 @@ public final class TupleDomain<T>
                 valueMapper,
                 (u, v) -> { throw new IllegalStateException(format("Duplicate values for a key: %s and %s", u, v)); },
                 LinkedHashMap::new);
+    }
+
+    public long getRetainedSizeInBytes(ToLongFunction<T> keySize)
+    {
+        return INSTANCE_SIZE
+                + sizeOf(domains, value -> estimatedSizeOf(value, keySize, Domain::getRetainedSizeInBytes));
     }
 }

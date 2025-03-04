@@ -13,11 +13,23 @@
  */
 package io.trino.spi.security;
 
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Tracer;
+
 import java.util.Map;
 
 public interface SystemAccessControlFactory
 {
     String getName();
 
-    SystemAccessControl create(Map<String, String> config);
+    SystemAccessControl create(Map<String, String> config, SystemAccessControlContext context);
+
+    interface SystemAccessControlContext
+    {
+        String getVersion();
+
+        OpenTelemetry getOpenTelemetry();
+
+        Tracer getTracer();
+    }
 }

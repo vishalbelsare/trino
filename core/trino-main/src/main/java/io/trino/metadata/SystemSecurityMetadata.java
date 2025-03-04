@@ -16,6 +16,9 @@ package io.trino.metadata;
 import io.trino.Session;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.CatalogSchemaTableName;
+import io.trino.spi.connector.EntityKindAndName;
+import io.trino.spi.connector.EntityPrivilege;
+import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.Privilege;
@@ -23,7 +26,6 @@ import io.trino.spi.security.RoleGrant;
 import io.trino.spi.security.TrinoPrincipal;
 
 import java.util.Optional;
-import java.util.OptionalLong;
 import java.util.Set;
 
 public interface SystemSecurityMetadata
@@ -49,12 +51,6 @@ public interface SystemSecurityMetadata
      * List available roles.
      */
     Set<String> listRoles(Session session);
-
-    /**
-     * List all role grants,
-     * optionally filtered by passed role, grantee, and limit predicates.
-     */
-    Set<RoleGrant> listAllRoleGrants(Session session, Optional<Set<String>> roles, Optional<Set<String>> grantees, OptionalLong limit);
 
     /**
      * List roles grants for a given principal, not recursively.
@@ -91,6 +87,11 @@ public interface SystemSecurityMetadata
     void grantSchemaPrivileges(Session session, CatalogSchemaName schemaName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
 
     /**
+     * Denys the specified privilege to the specified user on the specified schema.
+     */
+    void denySchemaPrivileges(Session session, CatalogSchemaName schemaName, Set<Privilege> privileges, TrinoPrincipal grantee);
+
+    /**
      * Revokes the specified privilege on the specified schema from the specified user.
      */
     void revokeSchemaPrivileges(Session session, CatalogSchemaName schemaName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
@@ -101,6 +102,11 @@ public interface SystemSecurityMetadata
     void grantTablePrivileges(Session session, QualifiedObjectName tableName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
 
     /**
+     * Denys the specified privilege to the specified user on the specified table
+     */
+    void denyTablePrivileges(Session session, QualifiedObjectName tableName, Set<Privilege> privileges, TrinoPrincipal grantee);
+
+    /**
      * Revokes the specified privilege on the specified table from the specified user
      */
     void revokeTablePrivileges(Session session, QualifiedObjectName tableName, Set<Privilege> privileges, TrinoPrincipal grantee, boolean grantOption);
@@ -109,6 +115,44 @@ public interface SystemSecurityMetadata
      * Gets the privileges for the specified table available to the given grantee considering the selected session role
      */
     Set<GrantInfo> listTablePrivileges(Session session, QualifiedTablePrefix prefix);
+
+    default Set<EntityPrivilege> getAllEntityKindPrivileges(String entityKind)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Grants the specified privilege to the specified user on the specified entity
+     */
+    default void grantEntityPrivileges(Session session, EntityKindAndName entity, Set<EntityPrivilege> privileges, TrinoPrincipal grantee, boolean grantOption)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Deny the specified privilege to the specified principal on the specified entity
+     */
+    default void denyEntityPrivileges(Session session, EntityKindAndName entity, Set<EntityPrivilege> privileges, TrinoPrincipal grantee)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Revokes the specified privilege on the specified entity from the specified user
+     */
+    default void revokeEntityPrivileges(Session session, EntityKindAndName entity, Set<EntityPrivilege> privileges, TrinoPrincipal grantee, boolean grantOption)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Throws an exception if the entityKind is not supported, or if the privileges
+     * are not supported for the entityKind
+     */
+    default void validateEntityKindAndPrivileges(Session session, String entityKind, Set<String> privileges)
+    {
+        throw new UnsupportedOperationException();
+    }
 
     /**
      * Set the owner of the specified schema
@@ -134,6 +178,21 @@ public interface SystemSecurityMetadata
      * Set the owner of the specified view
      */
     void setViewOwner(Session session, CatalogSchemaTableName view, TrinoPrincipal principal);
+
+    /**
+     * Get the identity to run the function as
+     */
+    Optional<Identity> getFunctionRunAsIdentity(Session session, CatalogSchemaFunctionName functionName);
+
+    /**
+     * A function is created
+     */
+    void functionCreated(Session session, CatalogSchemaFunctionName function);
+
+    /**
+     * A function is dropped
+     */
+    void functionDropped(Session session, CatalogSchemaFunctionName function);
 
     /**
      * A schema was created
@@ -164,4 +223,29 @@ public interface SystemSecurityMetadata
      * A table or view was dropped
      */
     void tableDropped(Session session, CatalogSchemaTableName table);
+
+    /**
+     * A column was created
+     */
+    void columnCreated(Session session, CatalogSchemaTableName table, String column);
+
+    /**
+     * A column was renamed
+     */
+    void columnRenamed(Session session, CatalogSchemaTableName table, String oldName, String newName);
+
+    /**
+     * A column was dropped
+     */
+    void columnDropped(Session session, CatalogSchemaTableName table, String column);
+
+    /**
+     * Column type was changed
+     */
+    void columnTypeChanged(Session session, CatalogSchemaTableName table, String column, String oldType, String newType);
+
+    /**
+     * Column's NOT NULL constraint was dropped
+     */
+    void columnNotNullConstraintDropped(Session session, CatalogSchemaTableName table, String column);
 }

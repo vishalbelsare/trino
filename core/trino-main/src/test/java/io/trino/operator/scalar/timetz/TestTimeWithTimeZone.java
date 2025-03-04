@@ -18,30 +18,39 @@ import io.trino.spi.type.SqlTimeWithTimeZone;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.sql.query.QueryAssertions;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
-import java.time.Instant;
 import java.time.ZonedDateTime;
+import java.util.List;
 import java.util.function.BiFunction;
 
+import static io.trino.server.testing.TestingTrinoServer.SESSION_START_TIME_PROPERTY;
+import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.TimeWithTimeZoneType.createTimeWithTimeZoneType;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static io.trino.type.DateTimes.PICOSECONDS_PER_SECOND;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestTimeWithTimeZone
 {
     protected QueryAssertions assertions;
 
-    @BeforeClass
+    @BeforeAll
     public void init()
     {
         assertions = new QueryAssertions();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
@@ -257,35 +266,35 @@ public class TestTimeWithTimeZone
                 .hasType(createTimeWithTimeZoneType(12))
                 .isEqualTo(timeWithTimeZone(12, 12, 34, 56, 123_456_789_123L, -14 * 60));
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:34:56.1234567891234+08:35'"))
-                .hasMessage("line 1:8: TIME WITH TIME ZONE precision must be in range [0, 12]: 13");
+        assertThatThrownBy(assertions.expression("TIME '12:34:56.1234567891234+08:35'")::evaluate)
+                .hasMessage("line 1:12: TIME WITH TIME ZONE precision must be in range [0, 12]: 13");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '25:00:00+08:35'"))
-                .hasMessage("line 1:8: '25:00:00+08:35' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '25:00:00+08:35'")::evaluate)
+                .hasMessage("line 1:12: '25:00:00+08:35' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:65:00+08:35'"))
-                .hasMessage("line 1:8: '12:65:00+08:35' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:65:00+08:35'")::evaluate)
+                .hasMessage("line 1:12: '12:65:00+08:35' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:00:65+08:35'"))
-                .hasMessage("line 1:8: '12:00:65+08:35' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:00:65+08:35'")::evaluate)
+                .hasMessage("line 1:12: '12:00:65+08:35' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:00:00+15:00'"))
-                .hasMessage("line 1:8: '12:00:00+15:00' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:00:00+15:00'")::evaluate)
+                .hasMessage("line 1:12: '12:00:00+15:00' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:00:00-15:00'"))
-                .hasMessage("line 1:8: '12:00:00-15:00' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:00:00-15:00'")::evaluate)
+                .hasMessage("line 1:12: '12:00:00-15:00' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:00:00+14:01'"))
-                .hasMessage("line 1:8: '12:00:00+14:01' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:00:00+14:01'")::evaluate)
+                .hasMessage("line 1:12: '12:00:00+14:01' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:00:00-14:01'"))
-                .hasMessage("line 1:8: '12:00:00-14:01' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:00:00-14:01'")::evaluate)
+                .hasMessage("line 1:12: '12:00:00-14:01' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:00:00+13:60'"))
-                .hasMessage("line 1:8: '12:00:00+13:60' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:00:00+13:60'")::evaluate)
+                .hasMessage("line 1:12: '12:00:00+13:60' is not a valid TIME literal");
 
-        assertThatThrownBy(() -> assertions.expression("TIME '12:00:00-13:60'"))
-                .hasMessage("line 1:8: '12:00:00-13:60' is not a valid time literal");
+        assertThatThrownBy(assertions.expression("TIME '12:00:00-13:60'")::evaluate)
+                .hasMessage("line 1:12: '12:00:00-13:60' is not a valid TIME literal");
     }
 
     @Test
@@ -599,7 +608,7 @@ public class TestTimeWithTimeZone
     {
         // round down
         Session session = assertions.sessionBuilder()
-                .setStart(Instant.from(ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId())))
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId()).toInstant().toString())
                 .build();
 
         assertThat(assertions.expression("current_time(0)", session)).matches("TIME '12:34:56 +13:00'");
@@ -618,7 +627,7 @@ public class TestTimeWithTimeZone
 
         // round up
         session = assertions.sessionBuilder()
-                .setStart(Instant.from(ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 555555555, assertions.getDefaultSession().getTimeZoneKey().getZoneId())))
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 555555555, assertions.getDefaultSession().getTimeZoneKey().getZoneId()).toInstant().toString())
                 .build();
 
         assertThat(assertions.expression("current_time(0)", session)).matches("TIME '12:34:57 +13:00'");
@@ -637,7 +646,7 @@ public class TestTimeWithTimeZone
 
         // round up at the boundary
         session = assertions.sessionBuilder()
-                .setStart(Instant.from(ZonedDateTime.of(2020, 5, 1, 23, 59, 59, 999999999, assertions.getDefaultSession().getTimeZoneKey().getZoneId())))
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, ZonedDateTime.of(2020, 5, 1, 23, 59, 59, 999999999, assertions.getDefaultSession().getTimeZoneKey().getZoneId()).toInstant().toString())
                 .build();
 
         assertThat(assertions.expression("current_time(0)", session)).matches("TIME '00:00:00 +13:00'");
@@ -965,7 +974,7 @@ public class TestTimeWithTimeZone
     public void testCastToTimestampWithTimeZone()
     {
         Session session = assertions.sessionBuilder()
-                .setStart(Instant.from(ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId())))
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId()).toInstant().toString())
                 .build();
 
         // source = target
@@ -1296,7 +1305,7 @@ public class TestTimeWithTimeZone
     public void testCastToTimestamp()
     {
         Session session = assertions.sessionBuilder()
-                .setStart(Instant.from(ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId())))
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId()).toInstant().toString())
                 .build();
 
         // source = target
@@ -1694,7 +1703,7 @@ public class TestTimeWithTimeZone
     public void testCastFromVarcharWithoutTimeZone()
     {
         Session session = assertions.sessionBuilder()
-                .setStart(Instant.from(ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId())))
+                .setSystemProperty(SESSION_START_TIME_PROPERTY, ZonedDateTime.of(2020, 5, 1, 12, 34, 56, 111111111, assertions.getDefaultSession().getTimeZoneKey().getZoneId()).toInstant().toString())
                 .build();
 
         // round down
@@ -2093,6 +2102,18 @@ public class TestTimeWithTimeZone
         assertThat(assertions.expression("date_diff('second', TIME '00:00:00.1234567891+14:00', TIME '00:00:00.1234567891-10:00')")).matches("BIGINT '0'");
         assertThat(assertions.expression("date_diff('second', TIME '00:00:00.12345678912+14:00', TIME '00:00:00.12345678912-10:00')")).matches("BIGINT '0'");
         assertThat(assertions.expression("date_diff('second', TIME '00:00:00.123456789123+14:00', TIME '00:00:00.123456789123-10:00')")).matches("BIGINT '0'");
+
+        // Units not supported on TIME WITH TIME ZONE, but supported on some other types
+        for (String unit : List.of("day", "week", "month", "quarter", "year")) {
+            // Short TIME WITH TIME ZONE
+            assertTrinoExceptionThrownBy(assertions.expression("date_diff('%s', TIME '00:00:00+00:00', TIME '01:00:00+00:00')".formatted(unit))::evaluate)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                    .hasMessage("'%s' is not a valid TIME field".formatted(unit));
+            // Long TIME WITH TIME ZONE
+            assertTrinoExceptionThrownBy(assertions.expression("date_diff('%s', TIME '00:00:00.123456789012+00:00', TIME '01:00:00.123456789012+00:00')".formatted(unit))::evaluate)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                    .hasMessage("'%s' is not a valid TIME field".formatted(unit));
+        }
     }
 
     @Test
@@ -2150,6 +2171,18 @@ public class TestTimeWithTimeZone
         assertThat(assertions.expression("date_add('millisecond', 900, TIME '23:59:59.1+08:35')")).matches("TIME '00:00:00.0+08:35'");
         assertThat(assertions.expression("date_add('millisecond', 890, TIME '23:59:59.11+08:35')")).matches("TIME '00:00:00.00+08:35'");
         assertThat(assertions.expression("date_add('millisecond', 889, TIME '23:59:59.111+08:35')")).matches("TIME '00:00:00.000+08:35'");
+
+        // Units not supported on TIME WITH TIME ZONE, but supported on some other types
+        for (String unit : List.of("day", "week", "month", "quarter", "year")) {
+            // Short TIME WITH TIME ZONE
+            assertTrinoExceptionThrownBy(assertions.expression("date_add('%s', 1, TIME '00:00:00+00:00')".formatted(unit))::evaluate)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                    .hasMessage("'%s' is not a valid TIME field".formatted(unit));
+            // Long TIME WITH TIME ZONE
+            assertTrinoExceptionThrownBy(assertions.expression("date_add('%s', 1, TIME '00:00:00.123456789012+00:00')".formatted(unit))::evaluate)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                    .hasMessage("'%s' is not a valid TIME field".formatted(unit));
+        }
     }
 
     @Test
@@ -2266,6 +2299,18 @@ public class TestTimeWithTimeZone
         assertThat(assertions.expression("date_trunc('hour', TIME '12:34:56.5555555555+08:35')")).matches("TIME '12:00:00.0000000000+08:35'");
         assertThat(assertions.expression("date_trunc('hour', TIME '12:34:56.55555555555+08:35')")).matches("TIME '12:00:00.00000000000+08:35'");
         assertThat(assertions.expression("date_trunc('hour', TIME '12:34:56.555555555555+08:35')")).matches("TIME '12:00:00.000000000000+08:35'");
+
+        // Units not supported on TIME WITH TIME ZONE, but supported on some other types
+        for (String unit : List.of("day", "week", "month", "quarter", "year")) {
+            // Short TIME WITH TIME ZONE
+            assertTrinoExceptionThrownBy(assertions.expression("date_trunc('%s', TIME '00:00:00+00:00')".formatted(unit))::evaluate)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                    .hasMessage("'%s' is not a valid TIME field".formatted(unit));
+            // Long TIME WITH TIME ZONE
+            assertTrinoExceptionThrownBy(assertions.expression("date_trunc('%s', TIME '00:00:00.123456789012+00:00')".formatted(unit))::evaluate)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                    .hasMessage("'%s' is not a valid TIME field".formatted(unit));
+        }
     }
 
     @Test

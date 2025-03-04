@@ -14,7 +14,7 @@
 package io.trino.server;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -34,9 +34,7 @@ public class TestEmbeddedDiscoveryConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("discovery-server.enabled", "false")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("discovery-server.enabled", "false");
 
         EmbeddedDiscoveryConfig expected = new EmbeddedDiscoveryConfig()
                 .setEnabled(false);

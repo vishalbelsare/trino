@@ -13,26 +13,28 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.Nullable;
+import io.trino.spi.type.Int128;
+import jakarta.annotation.Nullable;
 
 import java.util.Optional;
-import java.util.function.BiConsumer;
+import java.util.OptionalInt;
+import java.util.function.ObjLongConsumer;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
+import static io.trino.spi.block.BlockUtil.checkReadablePosition;
 import static io.trino.spi.block.BlockUtil.checkValidRegion;
 import static io.trino.spi.block.BlockUtil.compactArray;
-import static io.trino.spi.block.BlockUtil.countUsedPositions;
+import static io.trino.spi.block.BlockUtil.copyIsNullAndAppendNull;
+import static io.trino.spi.block.BlockUtil.ensureCapacity;
 
-public class Int128ArrayBlock
-        implements Block
+public final class Int128ArrayBlock
+        implements ValueBlock
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(Int128ArrayBlock.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(Int128ArrayBlock.class);
     public static final int INT128_BYTES = Long.BYTES + Long.BYTES;
+    public static final int SIZE_IN_BYTES_PER_POSITION = INT128_BYTES + Byte.BYTES;
 
     private final int positionOffset;
     private final int positionCount;
@@ -40,7 +42,6 @@ public class Int128ArrayBlock
     private final boolean[] valueIsNull;
     private final long[] values;
 
-    private final long sizeInBytes;
     private final long retainedSizeInBytes;
 
     public Int128ArrayBlock(int positionCount, Optional<boolean[]> valueIsNull, long[] values)
@@ -69,32 +70,31 @@ public class Int128ArrayBlock
         }
         this.valueIsNull = valueIsNull;
 
-        sizeInBytes = (INT128_BYTES + Byte.BYTES) * (long) positionCount;
         retainedSizeInBytes = INSTANCE_SIZE + sizeOf(valueIsNull) + sizeOf(values);
+    }
+
+    @Override
+    public OptionalInt fixedSizeInBytesPerPosition()
+    {
+        return OptionalInt.of(SIZE_IN_BYTES_PER_POSITION);
     }
 
     @Override
     public long getSizeInBytes()
     {
-        return sizeInBytes;
+        return SIZE_IN_BYTES_PER_POSITION * (long) positionCount;
     }
 
     @Override
     public long getRegionSizeInBytes(int position, int length)
     {
-        return (INT128_BYTES + Byte.BYTES) * (long) length;
-    }
-
-    @Override
-    public long getPositionsSizeInBytes(boolean[] positions)
-    {
-        return getPositionsSizeInBytes(positions, countUsedPositions(positions));
+        return SIZE_IN_BYTES_PER_POSITION * (long) length;
     }
 
     @Override
     public long getPositionsSizeInBytes(boolean[] positions, int selectedPositionsCount)
     {
-        return (long) (INT128_BYTES + Byte.BYTES) * selectedPositionsCount;
+        return (long) SIZE_IN_BYTES_PER_POSITION * selectedPositionsCount;
     }
 
     @Override
@@ -110,13 +110,13 @@ public class Int128ArrayBlock
     }
 
     @Override
-    public void retainedBytesForEachPart(BiConsumer<Object, Long> consumer)
+    public void retainedBytesForEachPart(ObjLongConsumer<Object> consumer)
     {
         consumer.accept(values, sizeOf(values));
         if (valueIsNull != null) {
             consumer.accept(valueIsNull, sizeOf(valueIsNull));
         }
-        consumer.accept(this, (long) INSTANCE_SIZE);
+        consumer.accept(this, INSTANCE_SIZE);
     }
 
     @Override
@@ -125,17 +125,23 @@ public class Int128ArrayBlock
         return positionCount;
     }
 
-    @Override
-    public long getLong(int position, int offset)
+    public Int128 getInt128(int position)
     {
-        checkReadablePosition(position);
-        if (offset == 0) {
-            return values[(position + positionOffset) * 2];
-        }
-        if (offset == 8) {
-            return values[((position + positionOffset) * 2) + 1];
-        }
-        throw new IllegalArgumentException("offset must be 0 or 8");
+        checkReadablePosition(this, position);
+        int offset = (position + positionOffset) * 2;
+        return Int128.valueOf(values[offset], values[offset + 1]);
+    }
+
+    public long getInt128High(int position)
+    {
+        checkReadablePosition(this, position);
+        return values[(position + positionOffset) * 2];
+    }
+
+    public long getInt128Low(int position)
+    {
+        checkReadablePosition(this, position);
+        return values[((position + positionOffset) * 2) + 1];
     }
 
     @Override
@@ -145,25 +151,30 @@ public class Int128ArrayBlock
     }
 
     @Override
+    public boolean hasNull()
+    {
+        if (valueIsNull == null) {
+            return false;
+        }
+        for (int i = 0; i < positionCount; i++) {
+            if (valueIsNull[i + positionOffset]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
     public boolean isNull(int position)
     {
-        checkReadablePosition(position);
+        checkReadablePosition(this, position);
         return valueIsNull != null && valueIsNull[position + positionOffset];
     }
 
     @Override
-    public void writePositionTo(int position, BlockBuilder blockBuilder)
+    public Int128ArrayBlock getSingleValueBlock(int position)
     {
-        checkReadablePosition(position);
-        blockBuilder.writeLong(values[(position + positionOffset) * 2]);
-        blockBuilder.writeLong(values[((position + positionOffset) * 2) + 1]);
-        blockBuilder.closeEntry();
-    }
-
-    @Override
-    public Block getSingleValueBlock(int position)
-    {
-        checkReadablePosition(position);
+        checkReadablePosition(this, position);
         return new Int128ArrayBlock(
                 0,
                 1,
@@ -174,7 +185,7 @@ public class Int128ArrayBlock
     }
 
     @Override
-    public Block copyPositions(int[] positions, int offset, int length)
+    public Int128ArrayBlock copyPositions(int[] positions, int offset, int length)
     {
         checkArrayRange(positions, offset, length);
 
@@ -185,7 +196,7 @@ public class Int128ArrayBlock
         long[] newValues = new long[length * 2];
         for (int i = 0; i < length; i++) {
             int position = positions[offset + i];
-            checkReadablePosition(position);
+            checkReadablePosition(this, position);
             if (valueIsNull != null) {
                 newValueIsNull[i] = valueIsNull[position + positionOffset];
             }
@@ -196,7 +207,7 @@ public class Int128ArrayBlock
     }
 
     @Override
-    public Block getRegion(int positionOffset, int length)
+    public Int128ArrayBlock getRegion(int positionOffset, int length)
     {
         checkValidRegion(getPositionCount(), positionOffset, length);
 
@@ -204,7 +215,7 @@ public class Int128ArrayBlock
     }
 
     @Override
-    public Block copyRegion(int positionOffset, int length)
+    public Int128ArrayBlock copyRegion(int positionOffset, int length)
     {
         checkValidRegion(getPositionCount(), positionOffset, length);
 
@@ -219,29 +230,44 @@ public class Int128ArrayBlock
     }
 
     @Override
-    public String getEncodingName()
+    public Int128ArrayBlock copyWithAppendedNull()
     {
-        return Int128ArrayBlockEncoding.NAME;
+        boolean[] newValueIsNull = copyIsNullAndAppendNull(valueIsNull, positionOffset, positionCount);
+        long[] newValues = ensureCapacity(values, (positionOffset + positionCount + 1) * 2);
+        return new Int128ArrayBlock(positionOffset, positionCount + 1, newValueIsNull, newValues);
+    }
+
+    @Override
+    public Int128ArrayBlock getUnderlyingValueBlock()
+    {
+        return this;
     }
 
     @Override
     public String toString()
     {
-        StringBuilder sb = new StringBuilder("Int128ArrayBlock{");
-        sb.append("positionCount=").append(getPositionCount());
-        sb.append('}');
-        return sb.toString();
+        return "Int128ArrayBlock{positionCount=" + getPositionCount() + '}';
     }
 
-    Slice getValuesSlice()
+    @Override
+    public Optional<ByteArrayBlock> getNulls()
     {
-        return Slices.wrappedLongArray(values, positionOffset * 2, positionCount * 2);
+        return BlockUtil.getNulls(valueIsNull, positionOffset, positionCount);
     }
 
-    private void checkReadablePosition(int position)
+    int getRawOffset()
     {
-        if (position < 0 || position >= getPositionCount()) {
-            throw new IllegalArgumentException("position is not valid");
-        }
+        return positionOffset;
+    }
+
+    @Nullable
+    boolean[] getRawValueIsNull()
+    {
+        return valueIsNull;
+    }
+
+    long[] getRawValues()
+    {
+        return values;
     }
 }

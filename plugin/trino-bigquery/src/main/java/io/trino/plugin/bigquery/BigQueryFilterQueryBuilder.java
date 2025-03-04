@@ -26,13 +26,14 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.plugin.bigquery.BigQueryTypeManager.convertToString;
+import static io.trino.plugin.bigquery.BigQueryUtil.quote;
+import static io.trino.plugin.bigquery.BigQueryUtil.toBigQueryColumnName;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
 public class BigQueryFilterQueryBuilder
 {
-    private static final String QUOTE = "`";
-    private static final String ESCAPED_QUOTE = "``";
     private final TupleDomain<ColumnHandle> tupleDomain;
 
     public static Optional<String> buildFilter(TupleDomain<ColumnHandle> tupleDomain)
@@ -72,7 +73,7 @@ public class BigQueryFilterQueryBuilder
         for (BigQueryColumnHandle column : columns) {
             Domain domain = tupleDomain.getDomains().get().get(column);
             if (domain != null) {
-                toPredicate(column.getName(), domain, column).ifPresent(clauses::add);
+                toPredicate(toBigQueryColumnName(column.name()), domain, column).ifPresent(clauses::add);
             }
         }
         return clauses.build();
@@ -95,27 +96,18 @@ public class BigQueryFilterQueryBuilder
         for (Range range : domain.getValues().getRanges().getOrderedRanges()) {
             checkState(!range.isAll()); // Already checked
             if (range.isSingleValue()) {
-                Optional<String> value = column.getBigQueryType().convertToString(column.getTrinoType(), range.getSingleValue());
-                if (value.isEmpty()) {
-                    return Optional.empty();
-                }
-                singleValues.add(value.get());
+                String value = convertToString(column.trinoType(), column.bigqueryType(), range.getSingleValue());
+                singleValues.add(value);
             }
             else {
                 List<String> rangeConjuncts = new ArrayList<>();
                 if (!range.isLowUnbounded()) {
-                    Optional<String> predicate = toPredicate(columnName, range.isLowInclusive() ? ">=" : ">", range.getLowBoundedValue(), column);
-                    if (predicate.isEmpty()) {
-                        return Optional.empty();
-                    }
-                    rangeConjuncts.add(predicate.get());
+                    String predicate = toPredicate(columnName, range.isLowInclusive() ? ">=" : ">", range.getLowBoundedValue(), column);
+                    rangeConjuncts.add(predicate);
                 }
                 if (!range.isHighUnbounded()) {
-                    Optional<String> predicate = toPredicate(columnName, range.isHighInclusive() ? "<=" : "<", range.getHighBoundedValue(), column);
-                    if (predicate.isEmpty()) {
-                        return Optional.empty();
-                    }
-                    rangeConjuncts.add(predicate.get());
+                    String predicate = toPredicate(columnName, range.isHighInclusive() ? "<=" : "<", range.getHighBoundedValue(), column);
+                    rangeConjuncts.add(predicate);
                 }
                 // If rangeConjuncts is null, then the range was ALL, which should already have been checked for
                 checkState(!rangeConjuncts.isEmpty());
@@ -142,17 +134,9 @@ public class BigQueryFilterQueryBuilder
         return Optional.of("(" + String.join(" OR ", disjuncts) + ")");
     }
 
-    private Optional<String> toPredicate(String columnName, String operator, Object value, BigQueryColumnHandle column)
+    private String toPredicate(String columnName, String operator, Object value, BigQueryColumnHandle column)
     {
-        Optional<String> valueAsString = column.getBigQueryType().convertToString(column.getTrinoType(), value);
-        if (valueAsString.isEmpty()) {
-            return Optional.empty();
-        }
-        return Optional.of(quote(columnName) + " " + operator + " " + valueAsString.get());
-    }
-
-    private String quote(String name)
-    {
-        return QUOTE + name.replace(QUOTE, ESCAPED_QUOTE) + QUOTE;
+        String valueAsString = convertToString(column.trinoType(), column.bigqueryType(), value);
+        return quote(columnName) + " " + operator + " " + valueAsString;
     }
 }

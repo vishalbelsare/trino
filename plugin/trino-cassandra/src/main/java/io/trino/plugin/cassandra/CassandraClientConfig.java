@@ -13,39 +13,52 @@
  */
 package io.trino.plugin.cassandra;
 
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.ProtocolVersion;
-import com.datastax.driver.core.SocketOptions;
-import com.google.common.base.Splitter;
+import com.datastax.oss.driver.api.core.ConsistencyLevel;
+import com.datastax.oss.driver.api.core.DefaultConsistencyLevel;
+import com.datastax.oss.driver.api.core.DefaultProtocolVersion;
+import com.datastax.oss.driver.api.core.ProtocolVersion;
 import com.google.common.collect.ImmutableList;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
-import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.DefunctConfig;
-import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.Duration;
 import io.airlift.units.MaxDuration;
 import io.airlift.units.MinDuration;
+import jakarta.annotation.Nullable;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
-import javax.annotation.Nullable;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
-import javax.validation.constraints.Size;
-
-import java.io.File;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
+import static io.trino.plugin.cassandra.CassandraClientConfig.CassandraAuthenticationType.NONE;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 
-@DefunctConfig({"cassandra.thrift-port", "cassandra.partitioner", "cassandra.thrift-connection-factory-class", "cassandra.transport-factory-options",
-        "cassandra.no-host-available-retry-count", "cassandra.max-schema-refresh-threads", "cassandra.schema-cache-ttl",
-        "cassandra.schema-refresh-interval", "cassandra.load-policy.use-white-list", "cassandra.load-policy.white-list.addresses"})
+@DefunctConfig({
+        "cassandra.thrift-port",
+        "cassandra.partitioner",
+        "cassandra.thrift-connection-factory-class",
+        "cassandra.transport-factory-options",
+        "cassandra.no-host-available-retry-count",
+        "cassandra.max-schema-refresh-threads",
+        "cassandra.schema-cache-ttl",
+        "cassandra.schema-refresh-interval",
+        "cassandra.load-policy.use-white-list",
+        "cassandra.load-policy.white-list.addresses",
+        "cassandra.load-policy.use-token-aware",
+        "cassandra.load-policy.token-aware.shuffle-replicas",
+        "cassandra.load-policy.allowed-addresses",
+})
 public class CassandraClientConfig
 {
-    private static final Splitter SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
+    public enum CassandraAuthenticationType
+    {
+        NONE,
+        PASSWORD,
+        /**/
+    }
 
     private ConsistencyLevel consistencyLevel = ConsistencyLevel.ONE;
     private int fetchSize = 5_000;
@@ -56,28 +69,20 @@ public class CassandraClientConfig
     private int batchSize = 100;
     private Long splitsPerNode;
     private boolean allowDropTable;
-    private String username;
-    private String password;
-    private Duration clientReadTimeout = new Duration(SocketOptions.DEFAULT_READ_TIMEOUT_MILLIS, MILLISECONDS);
-    private Duration clientConnectTimeout = new Duration(SocketOptions.DEFAULT_CONNECT_TIMEOUT_MILLIS, MILLISECONDS);
+    private Duration clientReadTimeout = new Duration(12_000, MILLISECONDS);
+    private Duration clientConnectTimeout = new Duration(5_000, MILLISECONDS);
     private Integer clientSoLinger;
     private RetryPolicyType retryPolicy = RetryPolicyType.DEFAULT;
-    private boolean useDCAware;
+    private boolean useDCAware = true;
     private String dcAwareLocalDC;
     private int dcAwareUsedHostsPerRemoteDc;
     private boolean dcAwareAllowRemoteDCsForLocal;
-    private boolean useTokenAware;
-    private boolean tokenAwareShuffleReplicas;
-    private List<String> allowedAddresses = ImmutableList.of();
     private Duration noHostAvailableRetryTimeout = new Duration(1, MINUTES);
     private Optional<Integer> speculativeExecutionLimit = Optional.empty();
     private Duration speculativeExecutionDelay = new Duration(500, MILLISECONDS);
     private ProtocolVersion protocolVersion;
     private boolean tlsEnabled;
-    private File keystorePath;
-    private String keystorePassword;
-    private File truststorePath;
-    private String truststorePassword;
+    private CassandraAuthenticationType authenticationType = NONE;
 
     @NotNull
     @Size(min = 1)
@@ -87,15 +92,9 @@ public class CassandraClientConfig
     }
 
     @Config("cassandra.contact-points")
-    public CassandraClientConfig setContactPoints(String commaSeparatedList)
+    public CassandraClientConfig setContactPoints(List<String> contactPoints)
     {
-        this.contactPoints = SPLITTER.splitToList(commaSeparatedList);
-        return this;
-    }
-
-    public CassandraClientConfig setContactPoints(String... contactPoints)
-    {
-        this.contactPoints = Arrays.asList(contactPoints);
+        this.contactPoints = ImmutableList.copyOf(contactPoints);
         return this;
     }
 
@@ -105,7 +104,7 @@ public class CassandraClientConfig
         return nativeProtocolPort;
     }
 
-    @Config(("cassandra.native-protocol-port"))
+    @Config("cassandra.native-protocol-port")
     public CassandraClientConfig setNativeProtocolPort(int nativeProtocolPort)
     {
         this.nativeProtocolPort = nativeProtocolPort;
@@ -119,7 +118,7 @@ public class CassandraClientConfig
     }
 
     @Config("cassandra.consistency-level")
-    public CassandraClientConfig setConsistencyLevel(ConsistencyLevel level)
+    public CassandraClientConfig setConsistencyLevel(DefaultConsistencyLevel level)
     {
         this.consistencyLevel = level;
         return this;
@@ -199,31 +198,6 @@ public class CassandraClientConfig
     public CassandraClientConfig setAllowDropTable(boolean allowDropTable)
     {
         this.allowDropTable = allowDropTable;
-        return this;
-    }
-
-    public String getUsername()
-    {
-        return username;
-    }
-
-    @Config("cassandra.username")
-    public CassandraClientConfig setUsername(String username)
-    {
-        this.username = username;
-        return this;
-    }
-
-    public String getPassword()
-    {
-        return password;
-    }
-
-    @Config("cassandra.password")
-    @ConfigSecuritySensitive
-    public CassandraClientConfig setPassword(String password)
-    {
-        this.password = password;
         return this;
     }
 
@@ -330,42 +304,6 @@ public class CassandraClientConfig
         return this;
     }
 
-    public boolean isUseTokenAware()
-    {
-        return this.useTokenAware;
-    }
-
-    @Config("cassandra.load-policy.use-token-aware")
-    public CassandraClientConfig setUseTokenAware(boolean useTokenAware)
-    {
-        this.useTokenAware = useTokenAware;
-        return this;
-    }
-
-    public boolean isTokenAwareShuffleReplicas()
-    {
-        return this.tokenAwareShuffleReplicas;
-    }
-
-    @Config("cassandra.load-policy.token-aware.shuffle-replicas")
-    public CassandraClientConfig setTokenAwareShuffleReplicas(boolean tokenAwareShuffleReplicas)
-    {
-        this.tokenAwareShuffleReplicas = tokenAwareShuffleReplicas;
-        return this;
-    }
-
-    @Config("cassandra.load-policy.allowed-addresses")
-    public CassandraClientConfig setAllowedAddresses(String allowedAddresses)
-    {
-        this.allowedAddresses = SPLITTER.splitToList(allowedAddresses);
-        return this;
-    }
-
-    public List<String> getAllowedAddresses()
-    {
-        return allowedAddresses;
-    }
-
     @NotNull
     public Duration getNoHostAvailableRetryTimeout()
     {
@@ -411,7 +349,7 @@ public class CassandraClientConfig
     }
 
     @Config("cassandra.protocol-version")
-    public CassandraClientConfig setProtocolVersion(ProtocolVersion version)
+    public CassandraClientConfig setProtocolVersion(DefaultProtocolVersion version)
     {
         this.protocolVersion = version;
         return this;
@@ -429,53 +367,15 @@ public class CassandraClientConfig
         return this;
     }
 
-    public Optional<@FileExists File> getKeystorePath()
+    public CassandraAuthenticationType getAuthenticationType()
     {
-        return Optional.ofNullable(keystorePath);
+        return authenticationType;
     }
 
-    @Config("cassandra.tls.keystore-path")
-    public CassandraClientConfig setKeystorePath(File keystorePath)
+    @Config("cassandra.security")
+    public CassandraClientConfig setAuthenticationType(CassandraAuthenticationType authenticationType)
     {
-        this.keystorePath = keystorePath;
-        return this;
-    }
-
-    public Optional<String> getKeystorePassword()
-    {
-        return Optional.ofNullable(keystorePassword);
-    }
-
-    @Config("cassandra.tls.keystore-password")
-    @ConfigSecuritySensitive
-    public CassandraClientConfig setKeystorePassword(String keystorePassword)
-    {
-        this.keystorePassword = keystorePassword;
-        return this;
-    }
-
-    public Optional<@FileExists File> getTruststorePath()
-    {
-        return Optional.ofNullable(truststorePath);
-    }
-
-    @Config("cassandra.tls.truststore-path")
-    public CassandraClientConfig setTruststorePath(File truststorePath)
-    {
-        this.truststorePath = truststorePath;
-        return this;
-    }
-
-    public Optional<String> getTruststorePassword()
-    {
-        return Optional.ofNullable(truststorePassword);
-    }
-
-    @Config("cassandra.tls.truststore-password")
-    @ConfigSecuritySensitive
-    public CassandraClientConfig setTruststorePassword(String truststorePassword)
-    {
-        this.truststorePassword = truststorePassword;
+        this.authenticationType = authenticationType;
         return this;
     }
 }

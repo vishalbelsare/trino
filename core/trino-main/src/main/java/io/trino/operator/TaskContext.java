@@ -18,6 +18,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.AtomicDouble;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.stats.CounterStat;
 import io.airlift.stats.GcMonitor;
 import io.airlift.units.DataSize;
@@ -25,13 +27,13 @@ import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.execution.DynamicFiltersCollector;
 import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
-import io.trino.execution.Lifespan;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskState;
 import io.trino.execution.TaskStateMachine;
 import io.trino.execution.buffer.LazyOutputBuffer;
 import io.trino.memory.QueryContext;
 import io.trino.memory.QueryContextVisitor;
+import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.spi.predicate.Domain;
@@ -39,21 +41,18 @@ import io.trino.sql.planner.LocalDynamicFiltersCollector;
 import io.trino.sql.planner.plan.DynamicFilterId;
 import org.joda.time.DateTime;
 
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
-
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.transform;
-import static com.google.common.collect.Sets.newConcurrentHashSet;
 import static io.airlift.units.DataSize.succinctBytes;
 import static java.lang.Math.max;
 import static java.lang.Math.toIntExact;
@@ -70,6 +69,7 @@ public class TaskContext
     private final GcMonitor gcMonitor;
     private final Executor notificationExecutor;
     private final ScheduledExecutorService yieldExecutor;
+    private final ScheduledExecutorService timeoutExecutor;
     private final Session session;
 
     private final long createNanos = System.nanoTime();
@@ -81,11 +81,12 @@ public class TaskContext
     private final AtomicLong endFullGcCount = new AtomicLong(-1);
     private final AtomicLong endFullGcTimeNanos = new AtomicLong(-1);
 
+    private final AtomicLong currentPeakUserMemoryReservation = new AtomicLong(0);
+
     private final AtomicReference<DateTime> executionStartTime = new AtomicReference<>();
     private final AtomicReference<DateTime> lastExecutionStartTime = new AtomicReference<>();
+    private final AtomicReference<DateTime> terminatingStartTime = new AtomicReference<>();
     private final AtomicReference<DateTime> executionEndTime = new AtomicReference<>();
-
-    private final Set<Lifespan> completedDriverGroups = newConcurrentHashSet();
 
     private final List<PipelineContext> pipelineContexts = new CopyOnWriteArrayList<>();
 
@@ -94,13 +95,11 @@ public class TaskContext
 
     private final Object cumulativeMemoryLock = new Object();
     private final AtomicDouble cumulativeUserMemory = new AtomicDouble(0.0);
-    private final AtomicDouble cumulativeSystemMemory = new AtomicDouble(0.0);
+
+    private final AtomicInteger maxWriterCount = new AtomicInteger(-1);
 
     @GuardedBy("cumulativeMemoryLock")
     private long lastUserMemoryReservation;
-
-    @GuardedBy("cumulativeMemoryLock")
-    private long lastSystemMemoryReservation;
 
     @GuardedBy("cumulativeMemoryLock")
     private long lastTaskStatCallNanos;
@@ -109,7 +108,7 @@ public class TaskContext
     private final DynamicFiltersCollector dynamicFiltersCollector;
 
     // The collector is shared for dynamic filters collected from coordinator
-    // as well as from local build-side of replicated joins. It is also shared with
+    // as well as from local build-side of replicated joins. It is also shared
     // with multiple table scans (e.g. co-located joins).
     private final LocalDynamicFiltersCollector localDynamicFiltersCollector;
 
@@ -119,6 +118,7 @@ public class TaskContext
             GcMonitor gcMonitor,
             Executor notificationExecutor,
             ScheduledExecutorService yieldExecutor,
+            ScheduledExecutorService timeoutExecutor,
             Session session,
             MemoryTrackingContext taskMemoryContext,
             Runnable notifyStatusChanged,
@@ -131,6 +131,7 @@ public class TaskContext
                 gcMonitor,
                 notificationExecutor,
                 yieldExecutor,
+                timeoutExecutor,
                 session,
                 taskMemoryContext,
                 notifyStatusChanged,
@@ -146,6 +147,7 @@ public class TaskContext
             GcMonitor gcMonitor,
             Executor notificationExecutor,
             ScheduledExecutorService yieldExecutor,
+            ScheduledExecutorService timeoutExecutor,
             Session session,
             MemoryTrackingContext taskMemoryContext,
             Runnable notifyStatusChanged,
@@ -157,10 +159,12 @@ public class TaskContext
         this.queryContext = requireNonNull(queryContext, "queryContext is null");
         this.notificationExecutor = requireNonNull(notificationExecutor, "notificationExecutor is null");
         this.yieldExecutor = requireNonNull(yieldExecutor, "yieldExecutor is null");
+        this.timeoutExecutor = requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         this.session = session;
         this.taskMemoryContext = requireNonNull(taskMemoryContext, "taskMemoryContext is null");
+
         // Initialize the local memory contexts with the LazyOutputBuffer tag as LazyOutputBuffer will do the local memory allocations
-        taskMemoryContext.initializeLocalMemoryContexts(LazyOutputBuffer.class.getSimpleName());
+        this.taskMemoryContext.initializeLocalMemoryContexts(LazyOutputBuffer.class.getSimpleName());
         this.dynamicFiltersCollector = new DynamicFiltersCollector(notifyStatusChanged);
         this.localDynamicFiltersCollector = new LocalDynamicFiltersCollector(session);
         this.perOperatorCpuTimerEnabled = perOperatorCpuTimerEnabled;
@@ -187,6 +191,7 @@ public class TaskContext
                 this,
                 notificationExecutor,
                 yieldExecutor,
+                timeoutExecutor,
                 taskMemoryContext.newMemoryTrackingContext(),
                 inputPipeline,
                 outputPipeline,
@@ -214,14 +219,19 @@ public class TaskContext
 
     private void updateStatsIfDone(TaskState newState)
     {
-        if (newState.isDone()) {
+        if (newState.isTerminating()) {
+            terminatingStartTime.compareAndSet(null, DateTime.now());
+        }
+        else if (newState.isDone()) {
             DateTime now = DateTime.now();
             long majorGcCount = gcMonitor.getMajorGcCount();
             long majorGcTime = gcMonitor.getMajorGcTime().roundTo(NANOSECONDS);
 
+            long nanoTimeNow = System.nanoTime();
+
             // before setting the end times, make sure a start has been recorded
             executionStartTime.compareAndSet(null, now);
-            startNanos.compareAndSet(0, System.nanoTime());
+            startNanos.compareAndSet(0, nanoTimeNow);
             startFullGcCount.compareAndSet(-1, majorGcCount);
             startFullGcTimeNanos.compareAndSet(-1, majorGcTime);
 
@@ -231,7 +241,7 @@ public class TaskContext
             // use compare and set from initial value to avoid overwriting if there
             // were a duplicate notification, which shouldn't happen
             executionEndTime.compareAndSet(null, now);
-            endNanos.compareAndSet(0, System.nanoTime());
+            endNanos.compareAndSet(0, nanoTimeNow);
             endFullGcCount.compareAndSet(-1, majorGcCount);
             endFullGcTimeNanos.compareAndSet(-1, majorGcTime);
         }
@@ -242,9 +252,9 @@ public class TaskContext
         taskStateMachine.failed(cause);
     }
 
-    public boolean isDone()
+    public boolean isTerminatingOrDone()
     {
-        return taskStateMachine.getState().isDone();
+        return taskStateMachine.getState().isTerminatingOrDone();
     }
 
     public TaskState getState()
@@ -257,30 +267,16 @@ public class TaskContext
         return DataSize.ofBytes(taskMemoryContext.getUserMemory());
     }
 
-    public DataSize getSystemMemoryReservation()
+    public DataSize getPeakMemoryReservation()
     {
-        return DataSize.ofBytes(taskMemoryContext.getSystemMemory());
+        long userMemory = taskMemoryContext.getUserMemory();
+        currentPeakUserMemoryReservation.updateAndGet(oldValue -> max(oldValue, userMemory));
+        return DataSize.ofBytes(currentPeakUserMemoryReservation.get());
     }
 
     public DataSize getRevocableMemoryReservation()
     {
         return DataSize.ofBytes(taskMemoryContext.getRevocableMemory());
-    }
-
-    /**
-     * Returns the completed driver groups (excluding taskWide).
-     * A driver group is considered complete if all drivers associated with it
-     * has completed, and no new drivers associated with it will be created.
-     */
-    public Set<Lifespan> getCompletedDriverGroups()
-    {
-        return completedDriverGroups;
-    }
-
-    public void addCompletedDriverGroup(Lifespan driverGroup)
-    {
-        checkArgument(!driverGroup.isTaskWide(), "driverGroup is task-wide, not a driver group.");
-        completedDriverGroups.add(driverGroup);
     }
 
     public List<PipelineContext> getPipelineContexts()
@@ -300,14 +296,14 @@ public class TaskContext
         queryContext.freeSpill(bytes);
     }
 
-    public LocalMemoryContext localSystemMemoryContext()
+    public LocalMemoryContext localMemoryContext()
     {
-        return taskMemoryContext.localSystemMemoryContext();
+        return taskMemoryContext.localUserMemoryContext();
     }
 
-    public void moreMemoryAvailable()
+    public AggregatedMemoryContext newAggregateMemoryContext()
     {
-        pipelineContexts.forEach(PipelineContext::moreMemoryAvailable);
+        return taskMemoryContext.newAggregateUserMemoryContext();
     }
 
     public boolean isPerOperatorCpuTimerEnabled()
@@ -364,6 +360,40 @@ public class TaskContext
         return stat;
     }
 
+    public long getWriterInputDataSize()
+    {
+        // Avoid using stream api due to performance reasons
+        long writerInputDataSize = 0;
+        for (PipelineContext context : pipelineContexts) {
+            writerInputDataSize += context.getWriterInputDataSize();
+        }
+        return writerInputDataSize;
+    }
+
+    public long getPhysicalWrittenDataSize()
+    {
+        // Avoid using stream api for performance reasons
+        long physicalWrittenBytes = 0;
+        for (PipelineContext context : pipelineContexts) {
+            physicalWrittenBytes += context.getPhysicalWrittenDataSize();
+        }
+        return physicalWrittenBytes;
+    }
+
+    public void setMaxWriterCount(int maxWriterCount)
+    {
+        checkArgument(maxWriterCount > 0, "maxWriterCount must be > 0");
+
+        int oldMaxWriterCount = this.maxWriterCount.getAndSet(maxWriterCount);
+        checkArgument(oldMaxWriterCount == -1 || oldMaxWriterCount == maxWriterCount, "maxWriterCount already set to %s", oldMaxWriterCount);
+    }
+
+    public Optional<Integer> getMaxWriterCount()
+    {
+        int value = maxWriterCount.get();
+        return value == -1 ? Optional.empty() : Optional.of(value);
+    }
+
     public Duration getFullGcTime()
     {
         long startFullGcTimeNanos = this.startFullGcTimeNanos.get();
@@ -407,6 +437,11 @@ public class TaskContext
         return dynamicFiltersCollector.acknowledgeAndGetNewDomains(callersCurrentVersion);
     }
 
+    public VersionedDynamicFilterDomains getCurrentDynamicFilterDomains()
+    {
+        return dynamicFiltersCollector.getCurrentDynamicFilterDomains();
+    }
+
     public TaskStats getTaskStats()
     {
         // check for end state to avoid callback ordering problems
@@ -443,8 +478,12 @@ public class TaskContext
         long processedInputDataSize = 0;
         long processedInputPositions = 0;
 
+        long inputBlockedTime = 0;
+
         long outputDataSize = 0;
         long outputPositions = 0;
+
+        long outputBlockedTime = 0;
 
         long physicalWrittenDataSize = 0;
 
@@ -490,11 +529,15 @@ public class TaskContext
 
                 processedInputDataSize += pipeline.getProcessedInputDataSize().toBytes();
                 processedInputPositions += pipeline.getProcessedInputPositions();
+
+                inputBlockedTime += pipeline.getInputBlockedTime().roundTo(NANOSECONDS);
             }
 
             if (pipeline.isOutputPipeline()) {
                 outputDataSize += pipeline.getOutputDataSize().toBytes();
                 outputPositions += pipeline.getOutputPositions();
+
+                outputBlockedTime += pipeline.getOutputBlockedTime().roundTo(NANOSECONDS);
             }
 
             physicalWrittenDataSize += pipeline.getPhysicalWrittenDataSize().toBytes();
@@ -519,19 +562,18 @@ public class TaskContext
         Duration fullGcTime = getFullGcTime();
 
         long userMemory = taskMemoryContext.getUserMemory();
-        long systemMemory = taskMemoryContext.getSystemMemory();
 
         synchronized (cumulativeMemoryLock) {
             long currentTimeNanos = System.nanoTime();
-            double sinceLastPeriodMillis = (currentTimeNanos - lastTaskStatCallNanos) / 1_000_000.0;
-            long averageUserMemoryForLastPeriod = (userMemory + lastUserMemoryReservation) / 2;
-            cumulativeUserMemory.addAndGet(averageUserMemoryForLastPeriod * sinceLastPeriodMillis);
-            long averageSystemMemoryForLastPeriod = (systemMemory + lastSystemMemoryReservation) / 2;
-            cumulativeSystemMemory.addAndGet(averageSystemMemoryForLastPeriod * sinceLastPeriodMillis);
+
+            if (lastTaskStatCallNanos != 0) {
+                double sinceLastPeriodMillis = (currentTimeNanos - lastTaskStatCallNanos) / 1_000_000.0;
+                long averageUserMemoryForLastPeriod = (userMemory + lastUserMemoryReservation) / 2;
+                cumulativeUserMemory.addAndGet(averageUserMemoryForLastPeriod * sinceLastPeriodMillis);
+            }
 
             lastTaskStatCallNanos = currentTimeNanos;
             lastUserMemoryReservation = userMemory;
-            lastSystemMemoryReservation = systemMemory;
         }
 
         boolean fullyBlocked = hasRunningPipelines && runningPipelinesFullyBlocked;
@@ -540,6 +582,7 @@ public class TaskContext
                 taskStateMachine.getCreatedTime(),
                 executionStartTime.get(),
                 lastExecutionStartTime.get(),
+                terminatingStartTime.get(),
                 lastExecutionEndTime == 0 ? null : new DateTime(lastExecutionEndTime),
                 executionEndTime.get(),
                 elapsedTime.convertToMostSuccinctTimeUnit(),
@@ -554,10 +597,9 @@ public class TaskContext
                 blockedDrivers,
                 completedDrivers,
                 cumulativeUserMemory.get(),
-                cumulativeSystemMemory.get(),
                 succinctBytes(userMemory),
+                getPeakMemoryReservation().succinct(),
                 succinctBytes(taskMemoryContext.getRevocableMemory()),
-                succinctBytes(systemMemory),
                 new Duration(totalScheduledTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(totalCpuTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 new Duration(totalBlockedTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
@@ -572,9 +614,13 @@ public class TaskContext
                 rawInputPositions,
                 succinctBytes(processedInputDataSize),
                 processedInputPositions,
+                new Duration(inputBlockedTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
                 succinctBytes(outputDataSize),
                 outputPositions,
+                new Duration(outputBlockedTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
+                succinctBytes(getWriterInputDataSize()),
                 succinctBytes(physicalWrittenDataSize),
+                getMaxWriterCount(),
                 fullGcCount,
                 fullGcTime,
                 pipelineStats);
@@ -604,6 +650,11 @@ public class TaskContext
         return queryContext;
     }
 
+    public DataSize getQueryMemoryReservation()
+    {
+        return DataSize.ofBytes(queryContext.getUserMemoryReservation());
+    }
+
     public LocalDynamicFiltersCollector getLocalDynamicFiltersCollector()
     {
         return localDynamicFiltersCollector;
@@ -612,5 +663,10 @@ public class TaskContext
     public void addDynamicFilter(Map<DynamicFilterId, Domain> dynamicFilterDomains)
     {
         localDynamicFiltersCollector.collectDynamicFilterDomains(dynamicFilterDomains);
+    }
+
+    public void sourceTaskFailed(TaskId taskId, Throwable failure)
+    {
+        taskStateMachine.sourceTaskFailed(taskId, failure);
     }
 }

@@ -13,7 +13,8 @@
  */
 package io.trino.plugin.bigquery;
 
-import org.testng.annotations.Test;
+import io.trino.spi.type.TimeZoneKey;
+import org.junit.jupiter.api.Test;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -24,7 +25,7 @@ import static java.math.BigDecimal.ONE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Use TestBigQueryTypeMapping
+ * @deprecated Use {@link BaseBigQueryTypeMapping}.
  */
 @Deprecated
 public class TestBigQueryType
@@ -32,35 +33,38 @@ public class TestBigQueryType
     @Test
     public void testTimeToStringConverter()
     {
-        assertThat(BigQueryType.timeToStringConverter(
-                Long.valueOf(303497217825L)))
+        assertThat(BigQueryTypeManager.timeToStringConverter(
+                303497217825L))
                 .isEqualTo("'00:00:00.303497'");
     }
 
     @Test
     public void testTimestampToStringConverter()
     {
-        assertThat(BigQueryType.timestampToStringConverter(
+        assertThat(BigQueryTypeManager.timestampToStringConverter(
                 fromEpochSecondsAndFraction(1585658096, 123_456_000_000L, UTC_KEY)))
-                .isEqualTo("'2020-03-31 12:34:56.123456'");
+                .isEqualTo("2020-03-31 12:34:56.123456");
+        assertThat(BigQueryTypeManager.timestampToStringConverter(
+                fromEpochSecondsAndFraction(1585658096, 123_456_000_000L, TimeZoneKey.getTimeZoneKey("Asia/Kathmandu"))))
+                .isEqualTo("2020-03-31 12:34:56.123456");
     }
 
     @Test
     public void testDateToStringConverter()
     {
-        assertThat(BigQueryType.dateToStringConverter(
-                Long.valueOf(18352)))
+        assertThat(BigQueryTypeManager.dateToStringConverter(
+                18352L))
                 .isEqualTo("'2020-03-31'");
     }
 
     @Test
     public void testStringToStringConverter()
     {
-        assertThat(BigQueryType.stringToStringConverter(
+        assertThat(BigQueryTypeManager.stringToStringConverter(
                 utf8Slice("test")))
                 .isEqualTo("'test'");
 
-        assertThat(BigQueryType.stringToStringConverter(
+        assertThat(BigQueryTypeManager.stringToStringConverter(
                 utf8Slice("test's test")))
                 .isEqualTo("'test\\'s test'");
     }
@@ -68,7 +72,7 @@ public class TestBigQueryType
     @Test
     public void testNumericToStringConverter()
     {
-        assertThat(BigQueryType.numericToStringConverter(
+        assertThat(BigQueryTypeManager.numericToStringConverter(
                 encodeScaledValue(ONE, 9)))
                 .isEqualTo("1.000000000");
     }
@@ -76,7 +80,7 @@ public class TestBigQueryType
     @Test
     public void testBytesToStringConverter()
     {
-        assertThat(BigQueryType.bytesToStringConverter(
+        assertThat(BigQueryTypeManager.bytesToStringConverter(
                 wrappedBuffer((byte) 1, (byte) 2, (byte) 3, (byte) 4)))
                 .isEqualTo("FROM_BASE64('AQIDBA==')");
     }

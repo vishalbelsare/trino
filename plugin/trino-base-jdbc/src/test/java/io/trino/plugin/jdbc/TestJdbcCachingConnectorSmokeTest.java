@@ -17,8 +17,6 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 
-import java.util.Map;
-
 import static io.trino.plugin.jdbc.H2QueryRunner.createH2QueryRunner;
 
 public class TestJdbcCachingConnectorSmokeTest
@@ -28,21 +26,20 @@ public class TestJdbcCachingConnectorSmokeTest
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        Map<String, String> properties = ImmutableMap.<String, String>builder()
+        return createH2QueryRunner(REQUIRED_TPCH_TABLES, ImmutableMap.<String, String>builder()
                 .putAll(TestingH2JdbcModule.createProperties())
                 .put("metadata.cache-ttl", "10m")
                 .put("metadata.cache-missing", "true")
-                .put("allow-drop-table", "true")
-                .build();
-        return createH2QueryRunner(REQUIRED_TPCH_TABLES, properties);
+                .put("case-insensitive-name-matching", "true")
+                .buildOrThrow());
     }
 
     @Override
+    @SuppressWarnings("SwitchStatementWithTooFewBranches")
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         switch (connectorBehavior) {
             case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
-            case SUPPORTS_RENAME_SCHEMA:
                 return false;
 
             default:

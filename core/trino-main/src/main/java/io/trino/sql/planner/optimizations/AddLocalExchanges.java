@@ -17,24 +17,24 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import io.trino.Session;
-import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
 import io.trino.spi.connector.ConstantProperty;
 import io.trino.spi.connector.GroupingProperty;
 import io.trino.spi.connector.LocalProperty;
-import io.trino.spi.type.TypeOperators;
+import io.trino.spi.connector.WriterScalingOptions;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Partitioning;
+import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.SystemPartitioningHandle;
-import io.trino.sql.planner.TypeAnalyzer;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.optimizations.StreamPropertyDerivations.StreamProperties;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.DistinctLimitNode;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
 import io.trino.sql.planner.plan.ExchangeNode;
@@ -43,6 +43,7 @@ import io.trino.sql.planner.plan.IndexJoinNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.MarkDistinctNode;
+import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.PatternRecognitionNode;
 import io.trino.sql.planner.plan.PlanNode;
@@ -50,18 +51,19 @@ import io.trino.sql.planner.plan.PlanVisitor;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
+import io.trino.sql.planner.plan.SimpleTableExecuteNode;
 import io.trino.sql.planner.plan.SortNode;
 import io.trino.sql.planner.plan.SpatialJoinNode;
 import io.trino.sql.planner.plan.StatisticsWriterNode;
 import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
+import io.trino.sql.planner.plan.TableFunctionNode;
+import io.trino.sql.planner.plan.TableFunctionProcessorNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.UnionNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.Literal;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -75,11 +77,15 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.SystemSessionProperties.getTaskConcurrency;
-import static io.trino.SystemSessionProperties.getTaskWriterCount;
+import static io.trino.SystemSessionProperties.getTaskMaxWriterCount;
+import static io.trino.SystemSessionProperties.getTaskMinWriterCount;
 import static io.trino.SystemSessionProperties.isDistributedSortEnabled;
 import static io.trino.SystemSessionProperties.isSpillEnabled;
+import static io.trino.SystemSessionProperties.isTaskScaleWritersEnabled;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_HASH_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.optimizations.StreamPreferredProperties.any;
 import static io.trino.sql.planner.optimizations.StreamPreferredProperties.defaultParallelism;
@@ -97,27 +103,25 @@ import static io.trino.sql.planner.plan.ExchangeNode.Type.REPARTITION;
 import static io.trino.sql.planner.plan.ExchangeNode.gatheringExchange;
 import static io.trino.sql.planner.plan.ExchangeNode.mergingExchange;
 import static io.trino.sql.planner.plan.ExchangeNode.partitionedExchange;
+import static io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 
 public class AddLocalExchanges
         implements PlanOptimizer
 {
-    private final Metadata metadata;
-    private final TypeOperators typeOperators;
-    private final TypeAnalyzer typeAnalyzer;
+    private final PlannerContext plannerContext;
 
-    public AddLocalExchanges(Metadata metadata, TypeOperators typeOperators, TypeAnalyzer typeAnalyzer)
+    public AddLocalExchanges(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanNode optimize(PlanNode plan, Context context)
     {
-        PlanWithProperties result = plan.accept(new Rewriter(symbolAllocator, idAllocator, session), any());
+        PlanWithProperties result = plan.accept(new Rewriter(context.idAllocator(), context.session()), any());
         return result.getNode();
     }
 
@@ -126,11 +130,9 @@ public class AddLocalExchanges
     {
         private final PlanNodeIdAllocator idAllocator;
         private final Session session;
-        private final TypeProvider types;
 
-        public Rewriter(SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, Session session)
+        public Rewriter(PlanNodeIdAllocator idAllocator, Session session)
         {
-            this.types = symbolAllocator.getTypes();
             this.idAllocator = idAllocator;
             this.session = session;
         }
@@ -181,7 +183,7 @@ public class AddLocalExchanges
         {
             // Special handling for trivial projections. Applies to identity and renaming projections, and constants
             // It might be extended to handle other low-cost projections.
-            if (node.getAssignments().getExpressions().stream().allMatch(expression -> expression instanceof SymbolReference || expression instanceof Literal)) {
+            if (node.getAssignments().getExpressions().stream().allMatch(expression -> expression instanceof Reference || expression instanceof Constant constant && constant.value() != null)) {
                 if (parentPreferences.isSingleStreamPreferred()) {
                     // Do not enforce gathering exchange below project:
                     // - if project's source is single stream, no exchanges will be added around project,
@@ -335,13 +337,13 @@ public class AddLocalExchanges
         {
             checkState(node.getStep() == AggregationNode.Step.SINGLE, "step of aggregation is expected to be SINGLE, but it is %s", node.getStep());
 
-            if (node.hasSingleNodeExecutionPreference(metadata)) {
+            if (node.hasSingleNodeExecutionPreference(session, plannerContext.getMetadata())) {
                 return planAndEnforceChildren(node, singleStream(), defaultParallelism(session));
             }
 
             List<Symbol> groupingKeys = node.getGroupingKeys();
             if (node.hasDefaultOutput()) {
-                checkState(node.isDecomposable(metadata));
+                checkState(node.isDecomposable(session, plannerContext.getMetadata()));
 
                 // Put fixed local exchange directly below final aggregation to ensure that final and partial aggregations are separated by exchange (in a local runner mode)
                 // This is required so that default outputs from multiple instances of partial aggregations are passed to a single final aggregation.
@@ -370,15 +372,10 @@ public class AddLocalExchanges
                 preGroupedSymbols = groupingKeys;
             }
 
-            AggregationNode result = new AggregationNode(
-                    node.getId(),
-                    child.getNode(),
-                    node.getAggregations(),
-                    node.getGroupingSets(),
-                    preGroupedSymbols,
-                    node.getStep(),
-                    node.getHashSymbol(),
-                    node.getGroupIdSymbol());
+            AggregationNode result = AggregationNode.builderFrom(node)
+                    .setSource(child.getNode())
+                    .setPreGroupedSymbols(preGroupedSymbols)
+                    .build();
 
             return deriveProperties(result, child.getProperties());
         }
@@ -472,12 +469,87 @@ public class AddLocalExchanges
                     node.getMeasures(),
                     node.getCommonBaseFrame(),
                     node.getRowsPerMatch(),
-                    node.getSkipToLabel(),
+                    node.getSkipToLabels(),
                     node.getSkipToPosition(),
                     node.isInitial(),
                     node.getPattern(),
-                    node.getSubsets(),
                     node.getVariableDefinitions());
+
+            return deriveProperties(result, child.getProperties());
+        }
+
+        @Override
+        public PlanWithProperties visitTableFunction(TableFunctionNode node, StreamPreferredProperties parentPreferences)
+        {
+            throw new IllegalStateException(format("Unexpected node: TableFunctionNode (%s)", node.getName()));
+        }
+
+        @Override
+        public PlanWithProperties visitTableFunctionProcessor(TableFunctionProcessorNode node, StreamPreferredProperties parentPreferences)
+        {
+            if (node.getSource().isEmpty()) {
+                return deriveProperties(node, ImmutableList.of());
+            }
+
+            if (node.getSpecification().isEmpty()) {
+                // node.getSpecification.isEmpty() indicates that there were no sources or a single source with row semantics.
+                // The case of no sources was addressed above.
+                // The case of a single source with row semantics is addressed here. Source's properties do not hold after the TableFunctionProcessorNode
+                PlanWithProperties child = planAndEnforce(node.getSource().orElseThrow(), StreamPreferredProperties.any(), StreamPreferredProperties.any());
+                return rebaseAndDeriveProperties(node, ImmutableList.of(child));
+            }
+
+            List<Symbol> partitionBy = node.getSpecification().orElseThrow().partitionBy();
+            StreamPreferredProperties childRequirements;
+            if (!node.isPruneWhenEmpty()) {
+                childRequirements = singleStream();
+            }
+            else {
+                childRequirements = parentPreferences
+                        .constrainTo(node.getSource().orElseThrow().getOutputSymbols())
+                        .withDefaultParallelism(session)
+                        .withPartitioning(partitionBy);
+            }
+
+            PlanWithProperties child = planAndEnforce(node.getSource().orElseThrow(), childRequirements, childRequirements);
+
+            List<LocalProperty<Symbol>> desiredProperties = new ArrayList<>();
+            if (!partitionBy.isEmpty()) {
+                desiredProperties.add(new GroupingProperty<>(partitionBy));
+            }
+            node.getSpecification().flatMap(DataOrganizationSpecification::orderingScheme).ifPresent(orderingScheme -> desiredProperties.addAll(orderingScheme.toLocalProperties()));
+            Iterator<Optional<LocalProperty<Symbol>>> matchIterator = LocalProperties.match(child.getProperties().getLocalProperties(), desiredProperties).iterator();
+
+            Set<Symbol> prePartitionedInputs = ImmutableSet.of();
+            if (!partitionBy.isEmpty()) {
+                Optional<LocalProperty<Symbol>> groupingRequirement = matchIterator.next();
+                Set<Symbol> unPartitionedInputs = groupingRequirement.map(LocalProperty::getColumns).orElse(ImmutableSet.of());
+                prePartitionedInputs = partitionBy.stream()
+                        .filter(symbol -> !unPartitionedInputs.contains(symbol))
+                        .collect(toImmutableSet());
+            }
+
+            int preSortedOrderPrefix = 0;
+            if (prePartitionedInputs.equals(ImmutableSet.copyOf(partitionBy))) {
+                while (matchIterator.hasNext() && matchIterator.next().isEmpty()) {
+                    preSortedOrderPrefix++;
+                }
+            }
+
+            TableFunctionProcessorNode result = new TableFunctionProcessorNode(
+                    node.getId(),
+                    node.getName(),
+                    node.getProperOutputs(),
+                    Optional.of(child.getNode()),
+                    node.isPruneWhenEmpty(),
+                    node.getPassThroughSpecifications(),
+                    node.getRequiredSymbols(),
+                    node.getMarkerSymbols(),
+                    node.getSpecification(),
+                    prePartitionedInputs,
+                    preSortedOrderPrefix,
+                    node.getHashSymbol(),
+                    node.getHandle());
 
             return deriveProperties(result, child.getProperties());
         }
@@ -583,6 +655,12 @@ public class AddLocalExchanges
             return planAndEnforceChildren(node, requiredProperties, requiredProperties);
         }
 
+        @Override
+        public PlanWithProperties visitSimpleTableExecuteNode(SimpleTableExecuteNode node, StreamPreferredProperties context)
+        {
+            return planAndEnforceChildren(node, singleStream(), singleStream());
+        }
+
         //
         // Table Writer and Table Execute
         //
@@ -590,25 +668,77 @@ public class AddLocalExchanges
         @Override
         public PlanWithProperties visitTableWriter(TableWriterNode node, StreamPreferredProperties parentPreferences)
         {
-            return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), parentPreferences);
+            WriterScalingOptions scalingOptions = node.getTarget().getWriterScalingOptions(plannerContext.getMetadata(), session);
+            return visitTableWriter(
+                    node,
+                    node.getPartitioningScheme(),
+                    node.getSource(),
+                    parentPreferences,
+                    node.getTarget(),
+                    isTaskScaleWritersEnabled(session) && scalingOptions.isPerTaskWriterScalingEnabled());
         }
 
         @Override
         public PlanWithProperties visitTableExecute(TableExecuteNode node, StreamPreferredProperties parentPreferences)
         {
-            return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), parentPreferences);
+            return visitTableWriter(
+                    node,
+                    node.getPartitioningScheme(),
+                    node.getSource(),
+                    parentPreferences,
+                    node.getTarget(),
+                    // Disable task writer scaling for TableExecute since it can result in smaller files than
+                    // file_size_threshold, which can be undesirable behaviour.
+                    false);
         }
 
-        private PlanWithProperties visitTableWriter(PlanNode node, Optional<PartitioningScheme> partitioningSchemeOptional, PlanNode source, StreamPreferredProperties parentPreferences)
+        private PlanWithProperties visitTableWriter(
+                PlanNode node,
+                Optional<PartitioningScheme> partitioningScheme,
+                PlanNode source,
+                StreamPreferredProperties parentPreferences,
+                WriterTarget writerTarget,
+                boolean isTaskScaleWritersEnabled)
         {
-            if (getTaskWriterCount(session) == 1) {
-                return planAndEnforceChildren(node, singleStream(), defaultParallelism(session));
-            }
-            if (partitioningSchemeOptional.isEmpty()) {
-                return planAndEnforceChildren(node, fixedParallelism(), fixedParallelism());
+            if (isTaskScaleWritersEnabled
+                    && writerTarget.supportsMultipleWritersPerPartition(plannerContext.getMetadata(), session)
+                    && partitioningScheme.isPresent()) {
+                return visitScalePartitionedWriter(node, partitioningScheme.get(), source);
             }
 
-            PartitioningScheme partitioningScheme = partitioningSchemeOptional.get();
+            return partitioningScheme
+                    .map(scheme -> visitPartitionedWriter(node, scheme, source, parentPreferences))
+                    .orElseGet(() -> visitUnpartitionedWriter(node, source, isTaskScaleWritersEnabled));
+        }
+
+        private PlanWithProperties visitUnpartitionedWriter(PlanNode node, PlanNode source, boolean isTaskScaleWritersEnabled)
+        {
+            if (isTaskScaleWritersEnabled) {
+                PlanWithProperties newSource = source.accept(this, defaultParallelism(session));
+                PlanWithProperties exchange = deriveProperties(
+                        partitionedExchange(
+                                idAllocator.getNextId(),
+                                LOCAL,
+                                newSource.getNode(),
+                                new PartitioningScheme(
+                                        Partitioning.create(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION, ImmutableList.of()),
+                                        newSource.getNode().getOutputSymbols())),
+                        newSource.getProperties());
+                return rebaseAndDeriveProperties(node, ImmutableList.of(exchange));
+            }
+
+            if (getTaskMinWriterCount(session) == 1) {
+                return planAndEnforceChildren(node, singleStream(), defaultParallelism(session));
+            }
+
+            return planAndEnforceChildren(node, fixedParallelism(), fixedParallelism());
+        }
+
+        private PlanWithProperties visitPartitionedWriter(PlanNode node, PartitioningScheme partitioningScheme, PlanNode source, StreamPreferredProperties parentPreferences)
+        {
+            if (getTaskMaxWriterCount(session) == 1) {
+                return planAndEnforceChildren(node, singleStream(), defaultParallelism(session));
+            }
 
             if (partitioningScheme.getPartitioning().getHandle().equals(FIXED_HASH_DISTRIBUTION)) {
                 // arbitrary hash function on predefined set of partition columns
@@ -631,6 +761,60 @@ public class AddLocalExchanges
                     newSource.getProperties());
 
             return rebaseAndDeriveProperties(node, ImmutableList.of(exchange));
+        }
+
+        private PlanWithProperties visitScalePartitionedWriter(PlanNode node, PartitioningScheme partitioningScheme, PlanNode source)
+        {
+            if (getTaskMaxWriterCount(session) == 1) {
+                return planAndEnforceChildren(node, singleStream(), defaultParallelism(session));
+            }
+
+            if (partitioningScheme.getPartitioning().getHandle().equals(FIXED_HASH_DISTRIBUTION)) {
+                // arbitrary hash function on predefined set of partition columns
+                PlanWithProperties newSource = source.accept(this, defaultParallelism(session));
+                PlanWithProperties exchange = deriveProperties(
+                        partitionedExchange(
+                                idAllocator.getNextId(),
+                                LOCAL,
+                                newSource.getNode(),
+                                partitioningScheme.withPartitioningHandle(SCALED_WRITER_HASH_DISTRIBUTION)),
+                        newSource.getProperties());
+                return rebaseAndDeriveProperties(node, ImmutableList.of(exchange));
+            }
+
+            // connector provided hash function
+            verify(!(partitioningScheme.getPartitioning().getHandle().getConnectorHandle() instanceof SystemPartitioningHandle));
+            verify(
+                    partitioningScheme.getPartitioning().getArguments().stream().noneMatch(Partitioning.ArgumentBinding::isConstant),
+                    "Table writer partitioning has constant arguments");
+
+            PlanWithProperties newSource = source.accept(this, defaultParallelism(session));
+            PartitioningHandle partitioningHandle = partitioningScheme.getPartitioning().getHandle();
+            PlanWithProperties exchange = deriveProperties(
+                    partitionedExchange(
+                            idAllocator.getNextId(),
+                            LOCAL,
+                            newSource.getNode(),
+                            partitioningScheme
+                                    .withPartitioningHandle(
+                                            new PartitioningHandle(
+                                                    partitioningHandle.getCatalogHandle(),
+                                                    partitioningHandle.getTransactionHandle(),
+                                                    partitioningHandle.getConnectorHandle(),
+                                                    true))),
+                    newSource.getProperties());
+
+            return rebaseAndDeriveProperties(node, ImmutableList.of(exchange));
+        }
+
+        //
+        // Merge
+        //
+
+        @Override
+        public PlanWithProperties visitMergeWriter(MergeWriterNode node, StreamPreferredProperties parentPreferences)
+        {
+            return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), parentPreferences, node.getTarget(), false);
         }
 
         //
@@ -788,7 +972,7 @@ public class AddLocalExchanges
                     parentPreferences.constrainTo(node.getProbeSource().getOutputSymbols()).withDefaultParallelism(session));
 
             // index source does not support local parallel and must produce a single stream
-            StreamProperties indexStreamProperties = derivePropertiesRecursively(node.getIndexSource(), metadata, typeOperators, session, types, typeAnalyzer);
+            StreamProperties indexStreamProperties = derivePropertiesRecursively(node.getIndexSource(), plannerContext, session);
             checkArgument(indexStreamProperties.getDistribution() == SINGLE, "index source must be single stream");
             PlanWithProperties index = new PlanWithProperties(node.getIndexSource(), indexStreamProperties);
 
@@ -889,12 +1073,12 @@ public class AddLocalExchanges
 
         private PlanWithProperties deriveProperties(PlanNode result, StreamProperties inputProperties)
         {
-            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, metadata, typeOperators, session, types, typeAnalyzer));
+            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session));
         }
 
         private PlanWithProperties deriveProperties(PlanNode result, List<StreamProperties> inputProperties)
         {
-            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, metadata, typeOperators, session, types, typeAnalyzer));
+            return new PlanWithProperties(result, StreamPropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session));
         }
     }
 

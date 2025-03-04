@@ -13,141 +13,15 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
-
-import java.util.Collections;
-import java.util.List;
-import java.util.function.BiConsumer;
+import java.util.OptionalInt;
+import java.util.function.ObjLongConsumer;
 
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
 import static io.trino.spi.block.DictionaryId.randomDictionaryId;
 
-public interface Block
+public sealed interface Block
+        permits DictionaryBlock, RunLengthEncodedBlock, LazyBlock, ValueBlock
 {
-    /**
-     * Gets the length of the value at the {@code position}.
-     * This method must be implemented if @{code getSlice} is implemented.
-     */
-    default int getSliceLength(int position)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
-     * Gets a byte at {@code offset} in the value at {@code position}.
-     */
-    default byte getByte(int position, int offset)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Gets a little endian short at {@code offset} in the value at {@code position}.
-     */
-    default short getShort(int position, int offset)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Gets a little endian int at {@code offset} in the value at {@code position}.
-     */
-    default int getInt(int position, int offset)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Gets a little endian long at {@code offset} in the value at {@code position}.
-     */
-    default long getLong(int position, int offset)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Gets a slice at {@code offset} in the value at {@code position}.
-     */
-    default Slice getSlice(int position, int offset, int length)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Gets an object in the value at {@code position}.
-     */
-    default <T> T getObject(int position, Class<T> clazz)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Is the byte sequences at {@code offset} in the value at {@code position} equal
-     * to the byte sequence at {@code otherOffset} in {@code otherSlice}.
-     * This method must be implemented if @{code getSlice} is implemented.
-     */
-    default boolean bytesEqual(int position, int offset, Slice otherSlice, int otherOffset, int length)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Compares the byte sequences at {@code offset} in the value at {@code position}
-     * to the byte sequence at {@code otherOffset} in {@code otherSlice}.
-     * This method must be implemented if @{code getSlice} is implemented.
-     */
-    default int bytesCompare(int position, int offset, int length, Slice otherSlice, int otherOffset, int otherLength)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Appends the byte sequences at {@code offset} in the value at {@code position}
-     * to {@code blockBuilder}.
-     * This method must be implemented if @{code getSlice} is implemented.
-     */
-    default void writeBytesTo(int position, int offset, int length, BlockBuilder blockBuilder)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Appends the value at {@code position} to {@code blockBuilder} and close the entry.
-     */
-    void writePositionTo(int position, BlockBuilder blockBuilder);
-
-    /**
-     * Is the byte sequences at {@code offset} in the value at {@code position} equal
-     * to the byte sequence at {@code otherOffset} in the value at {@code otherPosition}
-     * in {@code otherBlock}.
-     * This method must be implemented if @{code getSlice} is implemented.
-     */
-    default boolean equals(int position, int offset, Block otherBlock, int otherPosition, int otherOffset, int length)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Calculates the hash code the byte sequences at {@code offset} in the
-     * value at {@code position}.
-     * This method must be implemented if @{code getSlice} is implemented.
-     */
-    default long hash(int position, int offset, int length)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Compares the byte sequences at {@code offset} in the value at {@code position}
-     * to the byte sequence at {@code otherOffset} in the value at {@code otherPosition}
-     * in {@code otherBlock}.
-     * This method must be implemented if @{code getSlice} is implemented.
-     */
-    default int compareTo(int leftPosition, int leftOffset, int leftLength, Block rightBlock, int rightPosition, int rightOffset, int rightLength)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
     /**
      * Gets the value at the specified position as a single element block.  The method
      * must copy the data into a new block.
@@ -157,7 +31,7 @@ public interface Block
      *
      * @throws IllegalArgumentException if this position is not valid
      */
-    Block getSingleValueBlock(int position);
+    ValueBlock getSingleValueBlock(int position);
 
     /**
      * Returns the number of positions in this block.
@@ -173,41 +47,30 @@ public interface Block
     long getSizeInBytes();
 
     /**
-     * Returns the size of the block contents, regardless of internal representation.
-     * The same logical data values should always have the same size, no matter
-     * what block type is used or how they are represented within a specific block.
-     * <p>
-     * This can differ substantially from {@link #getSizeInBytes} for certain block
-     * types. For RLE, it will be {@code N} times larger. For dictionary, it will be
-     * larger based on how many times dictionary entries are reused.
-     */
-    default long getLogicalSizeInBytes()
-    {
-        return getSizeInBytes();
-    }
-
-    /**
      * Returns the size of {@code block.getRegion(position, length)}.
      * The method can be expensive. Do not use it outside an implementation of Block.
      */
     long getRegionSizeInBytes(int position, int length);
 
     /**
-     * Returns the size of all positions marked true in the positions array.
-     * This is equivalent to multiple calls of {@code block.getRegionSizeInBytes(position, length)}
-     * where you mark all positions for the regions first.
+     * Returns the number of bytes (in terms of {@link Block#getSizeInBytes()}) required per position
+     * that this block contains, assuming that the number of bytes required is a known static quantity
+     * and not dependent on any particular specific position. This allows for some complex block wrappings
+     * to potentially avoid having to call {@link Block#getPositionsSizeInBytes(boolean[], int)}  which
+     * would require computing the specific positions selected
+     *
+     * @return The size in bytes, per position, if this block type does not require specific position information to compute its size
      */
-    long getPositionsSizeInBytes(boolean[] positions);
+    OptionalInt fixedSizeInBytesPerPosition();
 
     /**
      * Returns the size of all positions marked true in the positions array.
+     * This is equivalent to multiple calls of {@code block.getRegionSizeInBytes(position, length)}
+     * where you mark all positions for the regions first.
      * The 'selectedPositionsCount' variable may be used to skip iterating through
      * the positions array in case this is a fixed-width block
      */
-    default long getPositionsSizeInBytes(boolean[] positions, int selectedPositionsCount)
-    {
-        return getPositionsSizeInBytes(positions);
-    }
+    long getPositionsSizeInBytes(boolean[] positions, int selectedPositionsCount);
 
     /**
      * Returns the retained size of this block in memory, including over-allocations.
@@ -229,12 +92,7 @@ public interface Block
      * {@code consumer} should be called at least once with the current block and
      * must include the instance size of the current block
      */
-    void retainedBytesForEachPart(BiConsumer<Object, Long> consumer);
-
-    /**
-     * Get the encoding for this block.
-     */
-    String getEncodingName();
+    void retainedBytesForEachPart(ObjLongConsumer<Object> consumer);
 
     /**
      * Create a new block from the current block by keeping the same elements only with respect
@@ -246,7 +104,7 @@ public interface Block
     {
         checkArrayRange(positions, offset, length);
 
-        return new DictionaryBlock(offset, length, this, positions, false, randomDictionaryId());
+        return DictionaryBlock.createInternal(offset, length, this, positions, randomDictionaryId());
     }
 
     /**
@@ -292,9 +150,23 @@ public interface Block
     }
 
     /**
+     * Does this block have a null value? This method is expected to be O(N).
+     */
+    default boolean hasNull()
+    {
+        for (int i = 0; i < getPositionCount(); i++) {
+            if (isNull(i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Is the specified position null?
      *
-     * @throws IllegalArgumentException if this position is not valid
+     * @throws IllegalArgumentException if this position is not valid. The method may return false
+     * without throwing exception when there are no nulls in the block, even if the position is invalid
      */
     boolean isNull(int position);
 
@@ -321,10 +193,21 @@ public interface Block
     }
 
     /**
-     * Gets the direct child blocks of this block.
+     * Returns a block that contains a copy of the contents of the current block, and an appended null at the end. The
+     * original block will not be modified. The purpose of this method is to leverage the contents of a block and the
+     * structure of the implementation to efficiently produce a copy of the block with a NULL element inserted - so that
+     * it can be used as a dictionary. This method is expected to be invoked on completely built {@link Block} instances
+     * i.e. not on in-progress block builders.
      */
-    default List<Block> getChildren()
-    {
-        return Collections.emptyList();
-    }
+    Block copyWithAppendedNull();
+
+    /**
+     * Returns the underlying value block underlying this block.
+     */
+    ValueBlock getUnderlyingValueBlock();
+
+    /**
+     * Returns the position in the underlying value block corresponding to the specified position in this block.
+     */
+    int getUnderlyingValuePosition(int position);
 }

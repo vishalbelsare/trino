@@ -38,9 +38,9 @@ import io.trino.orc.stream.PresentOutputStream;
 import io.trino.orc.stream.StreamDataOutput;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.DictionaryBlock;
+import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.type.Type;
 import it.unimi.dsi.fastutil.ints.IntArrays;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -54,6 +54,7 @@ import java.util.function.Supplier;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.orc.DictionaryCompressionOptimizer.estimateIndexBytesPerValue;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DICTIONARY_V2;
@@ -67,8 +68,8 @@ import static java.util.stream.Collectors.toList;
 public class SliceDictionaryColumnWriter
         implements ColumnWriter, DictionaryColumn
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(SliceDictionaryColumnWriter.class).instanceSize();
-    private static final int DIRECT_CONVERSION_CHUNK_MAX_LOGICAL_BYTES = toIntExact(DataSize.of(32, MEGABYTE).toBytes());
+    private static final int INSTANCE_SIZE = instanceSize(SliceDictionaryColumnWriter.class);
+    private static final int DIRECT_CONVERSION_CHUNK_MAX_BYTES = toIntExact(DataSize.of(32, MEGABYTE).toBytes());
 
     private final OrcColumnId columnId;
     private final Type type;
@@ -216,14 +217,14 @@ public class SliceDictionaryColumnWriter
         for (int i = 0; valueCount > 0 && i < segments.length; i++) {
             int[] segment = segments[i];
             int positionCount = Math.min(valueCount, segment.length);
-            Block block = new DictionaryBlock(positionCount, dictionary, segment);
+            Block block = DictionaryBlock.create(positionCount, dictionary, segment);
 
             while (block != null) {
                 int chunkPositionCount = block.getPositionCount();
                 Block chunk = block.getRegion(0, chunkPositionCount);
 
                 // avoid chunk with huge logical size
-                while (chunkPositionCount > 1 && chunk.getLogicalSizeInBytes() > DIRECT_CONVERSION_CHUNK_MAX_LOGICAL_BYTES) {
+                while (chunkPositionCount > 1 && chunk.getSizeInBytes() > DIRECT_CONVERSION_CHUNK_MAX_BYTES) {
                     chunkPositionCount /= 2;
                     chunk = chunk.getRegion(0, chunkPositionCount);
                 }
@@ -282,17 +283,19 @@ public class SliceDictionaryColumnWriter
 
         // record values
         values.ensureCapacity(rowGroupValueCount + block.getPositionCount());
-        for (int position = 0; position < block.getPositionCount(); position++) {
-            int index = dictionary.putIfAbsent(block, position);
+        VariableWidthBlock valueBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        for (int i = 0; i < block.getPositionCount(); i++) {
+            int position = block.getUnderlyingValuePosition(i);
+            int index = dictionary.putIfAbsent(valueBlock, position);
             values.set(rowGroupValueCount, index);
             rowGroupValueCount++;
             totalValueCount++;
 
-            if (!block.isNull(position)) {
+            if (!valueBlock.isNull(position)) {
                 // todo min/max statistics only need to be updated if value was not already in the dictionary, but non-null count does
-                statisticsBuilder.addValue(type.getSlice(block, position));
+                statisticsBuilder.addValue(type.getSlice(valueBlock, position));
 
-                rawBytes += block.getSliceLength(position);
+                rawBytes += valueBlock.getSliceLength(position);
                 totalNonNullValueCount++;
             }
         }
@@ -349,15 +352,14 @@ public class SliceDictionaryColumnWriter
         checkState(closed);
         checkState(!directEncoded);
 
-        Block dictionaryElements = dictionary.getElementBlock();
+        VariableWidthBlock dictionaryElements = dictionary.getElementBlock();
 
         // write dictionary in sorted order
         int[] sortedDictionaryIndexes = getSortedDictionaryNullsLast(dictionaryElements);
         for (int sortedDictionaryIndex : sortedDictionaryIndexes) {
             if (!dictionaryElements.isNull(sortedDictionaryIndex)) {
-                int length = dictionaryElements.getSliceLength(sortedDictionaryIndex);
-                dictionaryLengthStream.writeLong(length);
-                Slice value = dictionaryElements.getSlice(sortedDictionaryIndex, 0, length);
+                Slice value = dictionaryElements.getSlice(sortedDictionaryIndex);
+                dictionaryLengthStream.writeLong(value.length());
                 dictionaryDataStream.writeSlice(value);
             }
         }
@@ -404,13 +406,14 @@ public class SliceDictionaryColumnWriter
         presentStream.close();
     }
 
-    private static int[] getSortedDictionaryNullsLast(Block elementBlock)
+    private static int[] getSortedDictionaryNullsLast(VariableWidthBlock elementBlock)
     {
         int[] sortedPositions = new int[elementBlock.getPositionCount()];
         for (int i = 0; i < sortedPositions.length; i++) {
             sortedPositions[i] = i;
         }
 
+        Slice rawSlice = elementBlock.getRawSlice();
         IntArrays.quickSort(sortedPositions, 0, sortedPositions.length, (int left, int right) -> {
             boolean nullLeft = elementBlock.isNull(left);
             boolean nullRight = elementBlock.isNull(right);
@@ -423,13 +426,11 @@ public class SliceDictionaryColumnWriter
             if (nullRight) {
                 return -1;
             }
-            return elementBlock.compareTo(
-                    left,
-                    0,
+            return rawSlice.compareTo(
+                    elementBlock.getRawSliceOffset(left),
                     elementBlock.getSliceLength(left),
-                    elementBlock,
-                    right,
-                    0,
+                    rawSlice,
+                    elementBlock.getRawSliceOffset(right),
                     elementBlock.getSliceLength(right));
         });
 
@@ -479,6 +480,10 @@ public class SliceDictionaryColumnWriter
     public List<StreamDataOutput> getBloomFilters(CompressedMetadataWriter metadataWriter)
             throws IOException
     {
+        if (directEncoded) {
+            return directColumnWriter.getBloomFilters(metadataWriter);
+        }
+
         List<BloomFilter> bloomFilters = rowGroups.stream()
                 .map(rowGroup -> rowGroup.getColumnStatistics().getBloomFilter())
                 .filter(Objects::nonNull)

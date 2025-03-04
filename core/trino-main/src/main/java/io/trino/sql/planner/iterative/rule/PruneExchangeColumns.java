@@ -75,7 +75,7 @@ public class PruneExchangeColumns
         builder.addAll(referencedOutputs);
         builder.addAll(exchangeNode.getPartitioningScheme().getPartitioning().getColumns());
         exchangeNode.getPartitioningScheme().getHashColumn().ifPresent(builder::add);
-        exchangeNode.getOrderingScheme().ifPresent(orderingScheme -> builder.addAll(orderingScheme.getOrderBy()));
+        exchangeNode.getOrderingScheme().ifPresent(orderingScheme -> builder.addAll(orderingScheme.orderBy()));
         Set<Symbol> outputsToRetain = builder.build();
 
         if (outputsToRetain.size() == exchangeNode.getOutputSymbols().size()) {
@@ -105,7 +105,8 @@ public class PruneExchangeColumns
                 newOutputs.build(),
                 exchangeNode.getPartitioningScheme().getHashColumn(),
                 exchangeNode.getPartitioningScheme().isReplicateNullsAndAny(),
-                exchangeNode.getPartitioningScheme().getBucketToPartition());
+                exchangeNode.getPartitioningScheme().getBucketToPartition(),
+                exchangeNode.getPartitioningScheme().getPartitionCount());
 
         return Optional.of(new ExchangeNode(
                 exchangeNode.getId(),

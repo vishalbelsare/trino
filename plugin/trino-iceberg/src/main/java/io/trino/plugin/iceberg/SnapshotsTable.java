@@ -15,101 +15,70 @@ package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.iceberg.util.PageListBuilder;
-import io.trino.spi.Page;
 import io.trino.spi.connector.ColumnMetadata;
-import io.trino.spi.connector.ConnectorPageSource;
-import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
-import io.trino.spi.connector.ConnectorTransactionHandle;
-import io.trino.spi.connector.FixedPageSource;
 import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.connector.SystemTable;
-import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeSignature;
 import org.apache.iceberg.Table;
 
-import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.Objects.requireNonNull;
+import static org.apache.iceberg.MetadataTableType.SNAPSHOTS;
 
 public class SnapshotsTable
-        implements SystemTable
+        extends BaseSystemTable
 {
-    private final ConnectorTableMetadata tableMetadata;
-    private final Table icebergTable;
+    private static final String COMMITTED_AT_COLUMN_NAME = "committed_at";
+    private static final String SNAPSHOT_ID_COLUMN_NAME = "snapshot_id";
+    private static final String PARENT_ID_COLUMN_NAME = "parent_id";
+    private static final String OPERATION_COLUMN_NAME = "operation";
+    private static final String MANIFEST_LIST_COLUMN_NAME = "manifest_list";
+    private static final String SUMMARY_COLUMN_NAME = "summary";
 
-    public SnapshotsTable(SchemaTableName tableName, TypeManager typeManager, Table icebergTable)
+    public SnapshotsTable(SchemaTableName tableName, TypeManager typeManager, Table icebergTable, ExecutorService executor)
     {
-        requireNonNull(typeManager, "typeManager is null");
+        super(
+                requireNonNull(icebergTable, "icebergTable is null"),
+                createConnectorTableMetadata(
+                        requireNonNull(tableName, "tableName is null"),
+                        requireNonNull(typeManager, "typeManager is null")),
+                SNAPSHOTS,
+                executor);
+    }
 
-        this.icebergTable = requireNonNull(icebergTable, "icebergTable is null");
-        tableMetadata = new ConnectorTableMetadata(requireNonNull(tableName, "tableName is null"),
+    private static ConnectorTableMetadata createConnectorTableMetadata(SchemaTableName tableName, TypeManager typeManager)
+    {
+        return new ConnectorTableMetadata(
+                tableName,
                 ImmutableList.<ColumnMetadata>builder()
-                        .add(new ColumnMetadata("committed_at", TIMESTAMP_TZ_MILLIS))
-                        .add(new ColumnMetadata("snapshot_id", BIGINT))
-                        .add(new ColumnMetadata("parent_id", BIGINT))
-                        .add(new ColumnMetadata("operation", VARCHAR))
-                        .add(new ColumnMetadata("manifest_list", VARCHAR))
-                        .add(new ColumnMetadata("summary", typeManager.getType(TypeSignature.mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()))))
+                        .add(new ColumnMetadata(COMMITTED_AT_COLUMN_NAME, TIMESTAMP_TZ_MILLIS))
+                        .add(new ColumnMetadata(SNAPSHOT_ID_COLUMN_NAME, BIGINT))
+                        .add(new ColumnMetadata(PARENT_ID_COLUMN_NAME, BIGINT))
+                        .add(new ColumnMetadata(OPERATION_COLUMN_NAME, VARCHAR))
+                        .add(new ColumnMetadata(MANIFEST_LIST_COLUMN_NAME, VARCHAR))
+                        .add(new ColumnMetadata(SUMMARY_COLUMN_NAME, typeManager.getType(TypeSignature.mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()))))
                         .build());
     }
 
     @Override
-    public Distribution getDistribution()
+    protected void addRow(PageListBuilder pagesBuilder, Row row, TimeZoneKey timeZoneKey)
     {
-        return Distribution.SINGLE_COORDINATOR;
-    }
-
-    @Override
-    public ConnectorTableMetadata getTableMetadata()
-    {
-        return tableMetadata;
-    }
-
-    @Override
-    public ConnectorPageSource pageSource(ConnectorTransactionHandle transactionHandle, ConnectorSession session, TupleDomain<Integer> constraint)
-    {
-        return new FixedPageSource(buildPages(tableMetadata, session, icebergTable));
-    }
-
-    private static List<Page> buildPages(ConnectorTableMetadata tableMetadata, ConnectorSession session, Table icebergTable)
-    {
-        PageListBuilder pagesBuilder = PageListBuilder.forTable(tableMetadata);
-
-        TimeZoneKey timeZoneKey = session.getTimeZoneKey();
-        icebergTable.snapshots().forEach(snapshot -> {
-            pagesBuilder.beginRow();
-            pagesBuilder.appendTimestampTzMillis(snapshot.timestampMillis(), timeZoneKey);
-            pagesBuilder.appendBigint(snapshot.snapshotId());
-            if (checkNonNull(snapshot.parentId(), pagesBuilder)) {
-                pagesBuilder.appendBigint(snapshot.parentId());
-            }
-            if (checkNonNull(snapshot.operation(), pagesBuilder)) {
-                pagesBuilder.appendVarchar(snapshot.operation());
-            }
-            if (checkNonNull(snapshot.manifestListLocation(), pagesBuilder)) {
-                pagesBuilder.appendVarchar(snapshot.manifestListLocation());
-            }
-            if (checkNonNull(snapshot.summary(), pagesBuilder)) {
-                pagesBuilder.appendVarcharVarcharMap(snapshot.summary());
-            }
-            pagesBuilder.endRow();
-        });
-
-        return pagesBuilder.build();
-    }
-
-    private static boolean checkNonNull(Object object, PageListBuilder pagesBuilder)
-    {
-        if (object == null) {
-            pagesBuilder.appendNull();
-            return false;
-        }
-        return true;
+        pagesBuilder.beginRow();
+        pagesBuilder.appendTimestampTzMillis(row.get(COMMITTED_AT_COLUMN_NAME, Long.class) / MICROSECONDS_PER_MILLISECOND, timeZoneKey);
+        pagesBuilder.appendBigint(row.get(SNAPSHOT_ID_COLUMN_NAME, Long.class));
+        pagesBuilder.appendBigint(row.get(PARENT_ID_COLUMN_NAME, Long.class));
+        pagesBuilder.appendVarchar(row.get(OPERATION_COLUMN_NAME, String.class));
+        pagesBuilder.appendVarchar(row.get(MANIFEST_LIST_COLUMN_NAME, String.class));
+        //noinspection unchecked
+        pagesBuilder.appendVarcharVarcharMap(row.get(SUMMARY_COLUMN_NAME, Map.class));
+        pagesBuilder.endRow();
     }
 }

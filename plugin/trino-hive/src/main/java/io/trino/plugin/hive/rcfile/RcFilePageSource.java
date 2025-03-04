@@ -15,14 +15,12 @@ package io.trino.plugin.hive.rcfile;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
+import io.trino.hive.formats.FileCorruptionException;
+import io.trino.hive.formats.rcfile.RcFileReader;
 import io.trino.plugin.hive.HiveColumnHandle;
-import io.trino.plugin.hive.HiveType;
-import io.trino.rcfile.RcFileCorruptionException;
-import io.trino.rcfile.RcFileReader;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.LazyBlock;
 import io.trino.spi.block.LazyBlockLoader;
 import io.trino.spi.block.RunLengthEncodedBlock;
@@ -34,6 +32,7 @@ import java.util.List;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_BAD_DATA;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_CURSOR_ERROR;
 import static java.lang.String.format;
@@ -44,7 +43,6 @@ public class RcFilePageSource
 {
     private static final long GUESSED_MEMORY_USAGE = DataSize.of(16, DataSize.Unit.MEGABYTE).toBytes();
 
-    private static final int NULL_ENTRY_SIZE = 0;
     private final RcFileReader rcFileReader;
 
     private final List<String> columnNames;
@@ -71,22 +69,18 @@ public class RcFilePageSource
 
         ImmutableList.Builder<String> namesBuilder = ImmutableList.builder();
         ImmutableList.Builder<Type> typesBuilder = ImmutableList.builder();
-        ImmutableList.Builder<HiveType> hiveTypesBuilder = ImmutableList.builder();
         for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
             HiveColumnHandle column = columns.get(columnIndex);
 
             namesBuilder.add(column.getName());
             typesBuilder.add(column.getType());
-            hiveTypesBuilder.add(column.getHiveType());
 
             hiveColumnIndexes[columnIndex] = column.getBaseHiveColumnIndex();
 
             if (hiveColumnIndexes[columnIndex] >= rcFileReader.getColumnCount()) {
                 // this file may contain fewer fields than what's declared in the schema
                 // this happens when additional columns are added to the hive table after files have been created
-                BlockBuilder blockBuilder = column.getType().createBlockBuilder(null, 1, NULL_ENTRY_SIZE);
-                blockBuilder.appendNull();
-                constantBlocks[columnIndex] = blockBuilder.build();
+                constantBlocks[columnIndex] = column.getType().createNullBlock();
             }
         }
         types = typesBuilder.build();
@@ -128,7 +122,7 @@ public class RcFilePageSource
             Block[] blocks = new Block[hiveColumnIndexes.length];
             for (int fieldId = 0; fieldId < blocks.length; fieldId++) {
                 if (constantBlocks[fieldId] != null) {
-                    blocks[fieldId] = new RunLengthEncodedBlock(constantBlocks[fieldId], currentPageSize);
+                    blocks[fieldId] = RunLengthEncodedBlock.create(constantBlocks[fieldId], currentPageSize);
                 }
                 else {
                     blocks[fieldId] = createBlock(currentPageSize, fieldId);
@@ -138,16 +132,16 @@ public class RcFilePageSource
             return new Page(currentPageSize, blocks);
         }
         catch (TrinoException e) {
-            closeWithSuppression(e);
+            closeAllSuppress(e, this);
             throw e;
         }
-        catch (RcFileCorruptionException e) {
-            closeWithSuppression(e);
-            throw new TrinoException(HIVE_BAD_DATA, format("Corrupted RC file: %s", rcFileReader.getId()), e);
+        catch (FileCorruptionException e) {
+            closeAllSuppress(e, this);
+            throw new TrinoException(HIVE_BAD_DATA, format("Corrupted RC file: %s", rcFileReader.getFileLocation()), e);
         }
         catch (IOException | RuntimeException e) {
-            closeWithSuppression(e);
-            throw new TrinoException(HIVE_CURSOR_ERROR, format("Failed to read RC file: %s", rcFileReader.getId()), e);
+            closeAllSuppress(e, this);
+            throw new TrinoException(HIVE_CURSOR_ERROR, format("Failed to read RC file: %s", rcFileReader.getFileLocation()), e);
         }
     }
 
@@ -174,22 +168,9 @@ public class RcFilePageSource
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
         return GUESSED_MEMORY_USAGE;
-    }
-
-    private void closeWithSuppression(Throwable throwable)
-    {
-        requireNonNull(throwable, "throwable is null");
-        try {
-            close();
-        }
-        catch (Exception e) {
-            if (e != throwable) {
-                throwable.addSuppressed(e);
-            }
-        }
     }
 
     private Block createBlock(int currentPageSize, int fieldId)
@@ -214,7 +195,7 @@ public class RcFilePageSource
         }
 
         @Override
-        public final Block load()
+        public Block load()
         {
             checkState(!loaded, "Already loaded");
             checkState(pageId == expectedBatchId);
@@ -223,11 +204,11 @@ public class RcFilePageSource
             try {
                 block = rcFileReader.readBlock(columnIndex);
             }
-            catch (RcFileCorruptionException e) {
-                throw new TrinoException(HIVE_BAD_DATA, format("Corrupted RC file: %s", rcFileReader.getId()), e);
+            catch (FileCorruptionException e) {
+                throw new TrinoException(HIVE_BAD_DATA, format("Corrupted RC file: %s", rcFileReader.getFileLocation()), e);
             }
             catch (IOException | RuntimeException e) {
-                throw new TrinoException(HIVE_CURSOR_ERROR, format("Failed to read RC file: %s", rcFileReader.getId()), e);
+                throw new TrinoException(HIVE_CURSOR_ERROR, format("Failed to read RC file: %s", rcFileReader.getFileLocation()), e);
             }
 
             loaded = true;

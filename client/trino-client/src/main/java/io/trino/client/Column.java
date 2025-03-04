@@ -15,8 +15,9 @@ package io.trino.client;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.errorprone.annotations.Immutable;
 
-import javax.annotation.concurrent.Immutable;
+import java.util.Objects;
 
 import static java.util.Objects.requireNonNull;
 
@@ -54,5 +55,26 @@ public class Column
     public ClientTypeSignature getTypeSignature()
     {
         return typeSignature;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        Column column = (Column) o;
+        return Objects.equals(name, column.name)
+                && Objects.equals(type, column.type)
+                && Objects.equals(typeSignature, column.typeSignature);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(name, type, typeSignature);
     }
 }

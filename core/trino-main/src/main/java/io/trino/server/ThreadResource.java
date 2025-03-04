@@ -18,11 +18,10 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Ordering;
 import io.trino.server.security.ResourceSecurity;
-
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
@@ -38,9 +37,9 @@ import static io.trino.server.security.ResourceSecurity.AccessType.MANAGEMENT_RE
 import static java.util.Comparator.comparing;
 
 @Path("/v1/thread")
+@ResourceSecurity(MANAGEMENT_READ)
 public class ThreadResource
 {
-    @ResourceSecurity(MANAGEMENT_READ)
     @GET
     @Produces(MediaType.APPLICATION_JSON)
     public List<Info> getThreadInfo()

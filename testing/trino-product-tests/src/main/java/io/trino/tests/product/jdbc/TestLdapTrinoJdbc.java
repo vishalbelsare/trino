@@ -22,7 +22,6 @@ import org.testng.annotations.Test;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
 import static io.trino.tests.product.ImmutableLdapObjectDefinitions.CHILD_GROUP_USER;
 import static io.trino.tests.product.ImmutableLdapObjectDefinitions.ORPHAN_USER;
 import static io.trino.tests.product.ImmutableLdapObjectDefinitions.PARENT_GROUP_USER;
@@ -33,15 +32,16 @@ import static io.trino.tests.product.TestGroups.LDAP_AND_FILE;
 import static io.trino.tests.product.TestGroups.LDAP_MULTIPLE_BINDS;
 import static io.trino.tests.product.TestGroups.PROFILE_SPECIFIC_TESTS;
 import static io.trino.tests.product.TestGroups.TRINO_JDBC;
-import static io.trino.tests.product.TpchTableResults.PRESTO_NATION_RESULT;
+import static io.trino.tests.product.TpchTableResults.TRINO_NATION_RESULT;
 import static java.lang.String.format;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestLdapTrinoJdbc
         extends BaseLdapJdbcTest
 {
     @Inject(optional = true)
-    @Named("databases.presto.file_user_password")
+    @Named("databases.trino.file_user_password")
     private String fileUserPassword;
 
     @Inject(optional = true)
@@ -59,7 +59,7 @@ public class TestLdapTrinoJdbc
     public void shouldRunQueryWithLdap()
             throws SQLException
     {
-        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, ldapUserName, ldapUserPassword)).matches(PRESTO_NATION_RESULT);
+        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, ldapUserName, ldapUserPassword)).matches(TRINO_NATION_RESULT);
     }
 
     @Requires(ImmutableNationTable.class)
@@ -68,7 +68,7 @@ public class TestLdapTrinoJdbc
             throws SQLException
     {
         String name = USER_IN_AMERICA.getAttributes().get("cn");
-        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, name, ldapUserPassword)).matches(PRESTO_NATION_RESULT);
+        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, name, ldapUserPassword)).matches(TRINO_NATION_RESULT);
     }
 
     @Test(groups = {LDAP, TRINO_JDBC, PROFILE_SPECIFIC_TESTS}, timeOut = TIMEOUT)
@@ -116,7 +116,7 @@ public class TestLdapTrinoJdbc
     @Test(groups = {LDAP, TRINO_JDBC, PROFILE_SPECIFIC_TESTS}, timeOut = TIMEOUT)
     public void shouldFailQueryForEmptyUser()
     {
-        expectQueryToFail("", ldapUserPassword, "Connection property 'user' value is empty");
+        expectQueryToFail("", ldapUserPassword, "Connection property user value is empty");
     }
 
     @Test(groups = {LDAP, TRINO_JDBC, PROFILE_SPECIFIC_TESTS}, timeOut = TIMEOUT)
@@ -128,15 +128,15 @@ public class TestLdapTrinoJdbc
     @Test(groups = {LDAP, TRINO_JDBC, PROFILE_SPECIFIC_TESTS}, timeOut = TIMEOUT)
     public void shouldFailQueryForLdapWithoutSsl()
     {
-        assertThatThrownBy(() -> DriverManager.getConnection("jdbc:trino://" + prestoServer(), ldapUserName, ldapUserPassword))
+        assertThatThrownBy(() -> DriverManager.getConnection("jdbc:trino://" + trinoServer(), ldapUserName, ldapUserPassword))
                 .isInstanceOf(SQLException.class)
-                .hasMessageContaining("Authentication using username/password requires SSL to be enabled");
+                .hasMessageContaining("TLS/SSL is required for authentication with username and password");
     }
 
     @Test(groups = {LDAP, TRINO_JDBC, PROFILE_SPECIFIC_TESTS}, timeOut = TIMEOUT)
     public void shouldFailForIncorrectTrustStore()
     {
-        String url = format("jdbc:trino://%s?SSL=true&SSLTrustStorePath=%s&SSLTrustStorePassword=%s", prestoServer(), ldapTruststorePath, "wrong_password");
+        String url = format("jdbc:trino://%s?SSL=true&SSLTrustStorePath=%s&SSLTrustStorePassword=%s", trinoServer(), ldapTruststorePath, "wrong_password");
         assertThatThrownBy(() -> DriverManager.getConnection(url, ldapUserName, ldapUserPassword))
                 .isInstanceOf(SQLException.class)
                 .hasMessageContaining("Error setting up SSL: keystore password was incorrect");
@@ -153,7 +153,7 @@ public class TestLdapTrinoJdbc
     public void shouldRunQueryWithFileAuthenticator()
             throws SQLException
     {
-        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, ldapUserName, fileUserPassword)).matches(PRESTO_NATION_RESULT);
+        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, ldapUserName, fileUserPassword)).matches(TRINO_NATION_RESULT);
     }
 
     @Requires(ImmutableNationTable.class)
@@ -161,7 +161,7 @@ public class TestLdapTrinoJdbc
     public void shouldRunQueryForAnotherUserWithOnlyFileAuthenticator()
             throws SQLException
     {
-        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, "OnlyFileUser", onlyFileUserPassword)).matches(PRESTO_NATION_RESULT);
+        assertThat(executeLdapQuery(NATION_SELECT_ALL_QUERY, "OnlyFileUser", onlyFileUserPassword)).matches(TRINO_NATION_RESULT);
     }
 
     private void expectQueryToFailForUserNotInGroup(String user)

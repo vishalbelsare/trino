@@ -13,14 +13,13 @@
  */
 package io.trino.server.security;
 
+import com.google.inject.Inject;
 import io.trino.client.ProtocolDetectionException;
 import io.trino.server.ProtocolConfig;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.Identity;
-
-import javax.inject.Inject;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.security.Principal;
 import java.util.Optional;
@@ -41,7 +40,6 @@ public class PasswordAuthenticator
     @Inject
     public PasswordAuthenticator(PasswordAuthenticatorManager authenticatorManager, PasswordAuthenticatorConfig config, ProtocolConfig protocolConfig)
     {
-        requireNonNull(config, "config is null");
         this.userMapping = createUserMapping(config.getUserMappingPattern(), config.getUserMappingFile());
 
         this.authenticatorManager = requireNonNull(authenticatorManager, "authenticatorManager is null");
@@ -96,15 +94,26 @@ public class PasswordAuthenticator
     {
         String userHeader;
         try {
-            userHeader = detectProtocol(alternateHeaderName, headers.keySet()).requestUser();
+            userHeader = getUserHeader(headers);
         }
-        catch (ProtocolDetectionException ignored) {
+        catch (ProtocolDetectionException _) {
             // this shouldn't fail here, but ignore and it will be handled elsewhere
             return;
         }
         if (basicAuthCredentials.getUser().equals(headers.getFirst(userHeader))) {
             headers.putSingle(userHeader, authenticatedUser);
         }
+    }
+
+    // Extract this out in a method so that the logic of preferring originalUser and fallback on user remains in one place
+    private String getUserHeader(MultivaluedMap<String, String> headers)
+            throws ProtocolDetectionException
+    {
+        String userHeader = detectProtocol(alternateHeaderName, headers.keySet()).requestOriginalUser();
+        if (headers.getFirst(userHeader) == null || headers.getFirst(userHeader).isEmpty()) {
+            userHeader = detectProtocol(alternateHeaderName, headers.keySet()).requestUser();
+        }
+        return userHeader;
     }
 
     private static AuthenticationException needAuthentication(String message)

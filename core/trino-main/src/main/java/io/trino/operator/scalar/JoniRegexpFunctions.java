@@ -26,19 +26,20 @@ import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.function.Constraint;
 import io.trino.spi.function.Description;
 import io.trino.spi.function.LiteralParameters;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
-import io.trino.type.Constraint;
 import io.trino.type.JoniRegexp;
 import io.trino.type.JoniRegexpType;
 
 import java.nio.charset.StandardCharsets;
 
 import static io.airlift.slice.SliceUtf8.lengthOfCodePointFromStartByte;
+import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Math.toIntExact;
@@ -54,17 +55,9 @@ public final class JoniRegexpFunctions
     @SqlType(StandardTypes.BOOLEAN)
     public static boolean regexpLike(@SqlType("varchar(x)") Slice source, @SqlType(JoniRegexpType.NAME) JoniRegexp pattern)
     {
-        Matcher matcher;
-        int offset;
-        if (source.hasByteArray()) {
-            offset = source.byteArrayOffset();
-            matcher = pattern.regex().matcher(source.byteArray(), offset, offset + source.length());
-        }
-        else {
-            offset = 0;
-            matcher = pattern.matcher(source.getBytes());
-        }
-        return matcher.search(offset, offset + source.length(), Option.DEFAULT) != -1;
+        int offset = source.byteArrayOffset();
+        Matcher matcher = pattern.regex().matcher(source.byteArray(), offset, offset + source.length());
+        return getSearchingOffset(matcher, offset, offset + source.length()) != -1;
     }
 
     private static int getNextStart(Slice source, Matcher matcher)
@@ -73,14 +66,10 @@ public final class JoniRegexpFunctions
             if (matcher.getBegin() < source.length()) {
                 return matcher.getEnd() + lengthOfCodePointFromStartByte(source.getByte(matcher.getBegin()));
             }
-            else {
-                // last match is empty and we matched end of source, move past the source length to terminate the loop
-                return matcher.getEnd() + 1;
-            }
+            // last match is empty and we matched end of source, move past the source length to terminate the loop
+            return matcher.getEnd() + 1;
         }
-        else {
-            return matcher.getEnd();
-        }
+        return matcher.getEnd();
     }
 
     @Description("Removes substrings matching a regular expression")
@@ -95,10 +84,10 @@ public final class JoniRegexpFunctions
     @Description("Replaces substrings matching a regular expression by given string")
     @ScalarFunction
     @LiteralParameters({"x", "y", "z"})
-    // Longest possible output is when the pattern is empty, than the replacement will be placed in between
+    // Longest possible output is when the pattern is empty, then the replacement will be placed in between
     // any two letters of source (x + 1) times. As the replacement may be wildcard and the wildcard input that takes two letters
     // can produce (x) length output it max length is (x * y / 2) however for (x < 2), (y) itself (without wildcards)
-    // may be longer, so we choose max of (x * y / 2) and (y). We than add the length we've added to basic length of source (x)
+    // may be longer, so we choose max of (x * y / 2) and (y). We then add the length we've added to basic length of source (x)
     // to get the formula: x + max(x * y / 2, y) * (x + 1)
     @Constraint(variable = "z", expression = "min(2147483647, x + max(x * y / 2, y) * (x + 1))")
     @SqlType("varchar(z)")
@@ -110,7 +99,7 @@ public final class JoniRegexpFunctions
         int lastEnd = 0;
         int nextStart = 0; // nextStart is the same as lastEnd, unless the last match was zero-width. In such case, nextStart is lastEnd + 1.
         while (true) {
-            int offset = matcher.search(nextStart, source.length(), Option.DEFAULT);
+            int offset = getSearchingOffset(matcher, nextStart, source.length());
             if (offset == -1) {
                 break;
             }
@@ -227,7 +216,7 @@ public final class JoniRegexpFunctions
 
         int nextStart = 0;
         while (true) {
-            int offset = matcher.search(nextStart, source.length(), Option.DEFAULT);
+            int offset = getSearchingOffset(matcher, nextStart, source.length());
             if (offset == -1) {
                 break;
             }
@@ -267,7 +256,7 @@ public final class JoniRegexpFunctions
         validateGroup(groupIndex, matcher.getEagerRegion());
         int group = toIntExact(groupIndex);
 
-        int offset = matcher.search(0, source.length(), Option.DEFAULT);
+        int offset = getSearchingOffset(matcher, 0, source.length());
         if (offset == -1) {
             return null;
         }
@@ -294,7 +283,7 @@ public final class JoniRegexpFunctions
         int lastEnd = 0;
         int nextStart = 0;
         while (true) {
-            int offset = matcher.search(nextStart, source.length(), Option.DEFAULT);
+            int offset = getSearchingOffset(matcher, nextStart, source.length());
             if (offset == -1) {
                 break;
             }
@@ -368,8 +357,8 @@ public final class JoniRegexpFunctions
         // subtract 1 because codePointCount starts from zero
         int nextStart = SliceUtf8.offsetOfCodePoint(source, (int) start - 1);
         while (true) {
-            int offset = matcher.search(nextStart, source.length(), Option.DEFAULT);
-            // Check whether offset is negative, offset is -1 if no pattern was found or -2 if process was interrupted
+            int offset = getSearchingOffset(matcher, nextStart, source.length());
+            // Check whether offset is negative, offset is -1 if no pattern was found
             if (offset < 0) {
                 return -1;
             }
@@ -395,9 +384,9 @@ public final class JoniRegexpFunctions
         // Start from zero, implies the first byte
         int nextStart = 0;
         while (true) {
-            // mather.search returns `source.length` if `nextStart` equals `source.length - 1`.
+            // getSearchingOffset returns `source.length` if `nextStart` equals `source.length - 1`.
             // It should return -1 if `nextStart` is greater than `source.length - 1`.
-            int offset = matcher.search(nextStart, source.length(), Option.DEFAULT);
+            int offset = getSearchingOffset(matcher, nextStart, source.length());
             if (offset < 0) {
                 break;
             }
@@ -407,5 +396,18 @@ public final class JoniRegexpFunctions
         }
 
         return count;
+    }
+
+    public static int getSearchingOffset(Matcher matcher, int at, int range)
+    {
+        try {
+            return matcher.searchInterruptible(at, range, Option.DEFAULT);
+        }
+        catch (InterruptedException interruptedException) {
+            Thread.currentThread().interrupt();
+            throw new TrinoException(GENERIC_USER_ERROR, "" +
+                    "Regular expression matching was interrupted, likely because it took too long. " +
+                    "Regular expression in the worst case can have a catastrophic amount of backtracking and having exponential time complexity");
+        }
     }
 }

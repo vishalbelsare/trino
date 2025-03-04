@@ -18,7 +18,10 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
+import io.trino.spi.function.CatalogSchemaFunctionName;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.PlanNodeDecorrelator;
@@ -28,10 +31,10 @@ import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
 import io.trino.sql.planner.plan.JoinNode;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.Patterns;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.Expression;
 
 import java.util.HashSet;
 import java.util.List;
@@ -41,17 +44,21 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.matching.Pattern.empty;
 import static io.trino.matching.Pattern.nonEmpty;
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.sql.ExpressionUtils.and;
+import static io.trino.sql.ir.Booleans.TRUE;
+import static io.trino.sql.ir.IrUtils.and;
 import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.isDistinctOperator;
+import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.restoreDistinctAggregation;
 import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.rewriteWithMasks;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
-import static io.trino.sql.planner.plan.CorrelatedJoinNode.Type.INNER;
-import static io.trino.sql.planner.plan.CorrelatedJoinNode.Type.LEFT;
+import static io.trino.sql.planner.plan.JoinType.INNER;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
 import static io.trino.sql.planner.plan.Patterns.Aggregation.groupingColumns;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.filter;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.subquery;
@@ -59,16 +66,16 @@ import static io.trino.sql.planner.plan.Patterns.aggregation;
 import static io.trino.sql.planner.plan.Patterns.correlatedJoin;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.source;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static java.util.Objects.requireNonNull;
 
 /**
  * This rule decorrelates a correlated subquery of LEFT or INNER correlated join with:
  * - single global aggregation, or
- * - global aggregation over distinct operator (grouped aggregation with no aggregation assignments)
+ * - global aggregation over distinct operator (grouped aggregation with no aggregation assignments),
+ * in case when the distinct operator cannot be de-correlated by PlanNodeDecorrelator
  * <p>
  * In the case of single aggregation, it transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin LEFT or INNER (correlation: [c], filter: true, output: a, x, y)
  *      - Input (a, c)
  *      - Project (x <- f(count), y <- f'(agg))
@@ -76,9 +83,9 @@ import static java.util.Objects.requireNonNull;
  *             count <- count(*)
  *             agg <- agg(b)
  *                - Source (b) with correlated filter (b > c)
- * </pre>
+ * }</pre>
  * Into:
- * <pre>
+ * <pre>{@code
  * - Project (a <- a, x <- f(count), y <- f'(agg))
  *      - Aggregation (group by [a, c, unique])
  *        count <- count(*) mask(non_null)
@@ -88,10 +95,10 @@ import static java.util.Objects.requireNonNull;
  *                     - Input (a, c)
  *                - Project (non_null <- TRUE)
  *                     - Source (b) decorrelated
- * </pre>
+ * }</pre>
  * <p>
  * In the case of global aggregation over distinct operator, it transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin LEFT or INNER (correlation: [c], filter: true, output: a, x, y)
  *      - Input (a, c)
  *      - Project (x <- f(count), y <- f'(agg))
@@ -100,9 +107,9 @@ import static java.util.Objects.requireNonNull;
  *             agg <- agg(b)
  *                - Aggregation "distinct operator" group by [b]
  *                     - Source (b) with correlated filter (b > c)
- * </pre>
+ * }</pre>
  * Into:
- * <pre>
+ * <pre>{@code
  * - Project (a <- a, x <- f(count), y <- f'(agg))
  *      - Aggregation (group by [a, c, unique])
  *        count <- count(*) mask(non_null)
@@ -113,18 +120,19 @@ import static java.util.Objects.requireNonNull;
  *                          - Input (a, c)
  *                     - Project (non_null <- TRUE)
  *                          - Source (b) decorrelated
- * </pre>
+ * }</pre>
  */
 public class TransformCorrelatedGlobalAggregationWithProjection
         implements Rule<CorrelatedJoinNode>
 {
+    private static final CatalogSchemaFunctionName BOOL_OR = builtinFunctionName("bool_or");
     private static final Capture<ProjectNode> PROJECTION = newCapture();
     private static final Capture<AggregationNode> AGGREGATION = newCapture();
     private static final Capture<PlanNode> SOURCE = newCapture();
 
     private static final Pattern<CorrelatedJoinNode> PATTERN = correlatedJoin()
             .with(nonEmpty(Patterns.CorrelatedJoin.correlation()))
-            .with(filter().equalTo(TRUE_LITERAL))
+            .with(filter().equalTo(TRUE))
             .with(subquery().matching(project()
                     .capturedAs(PROJECTION)
                     .with(source().matching(aggregation()
@@ -132,11 +140,11 @@ public class TransformCorrelatedGlobalAggregationWithProjection
                             .with(source().capturedAs(SOURCE))
                             .capturedAs(AGGREGATION)))));
 
-    private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
-    public TransformCorrelatedGlobalAggregationWithProjection(Metadata metadata)
+    public TransformCorrelatedGlobalAggregationWithProjection(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     @Override
@@ -148,34 +156,46 @@ public class TransformCorrelatedGlobalAggregationWithProjection
     @Override
     public Result apply(CorrelatedJoinNode correlatedJoinNode, Captures captures, Context context)
     {
-        checkArgument(correlatedJoinNode.getType() == INNER || correlatedJoinNode.getType() == LEFT, "unexpected correlated join type: " + correlatedJoinNode.getType());
+        checkArgument(correlatedJoinNode.getType() == INNER || correlatedJoinNode.getType() == LEFT, "unexpected correlated join type: %s", correlatedJoinNode.getType());
 
         // if there is another aggregation below the AggregationNode, handle both
         PlanNode source = captures.get(SOURCE);
+
+        // if we fail to decorrelate the nested plan, and it contains a distinct operator, we can extract and special-handle the distinct operator
         AggregationNode distinct = null;
-        if (isDistinctOperator(source)) {
-            distinct = (AggregationNode) source;
-            source = distinct.getSource();
-        }
 
         // decorrelate nested plan
-        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(metadata, context.getSymbolAllocator(), context.getLookup());
+        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(plannerContext, context.getSymbolAllocator(), context.getLookup());
         Optional<PlanNodeDecorrelator.DecorrelatedNode> decorrelatedSource = decorrelator.decorrelateFilters(source, correlatedJoinNode.getCorrelation());
         if (decorrelatedSource.isEmpty()) {
-            return Result.empty();
+            // we failed to decorrelate the nested plan, so check if we can extract a distinct operator from the nested plan
+            if (isDistinctOperator(source)) {
+                distinct = (AggregationNode) source;
+                source = distinct.getSource();
+                decorrelatedSource = decorrelator.decorrelateFilters(source, correlatedJoinNode.getCorrelation());
+            }
+            if (decorrelatedSource.isEmpty()) {
+                return Result.empty();
+            }
         }
 
         source = decorrelatedSource.get().getNode();
+        Optional<Symbol> nonNull = Optional.empty();
 
-        // append non-null symbol on nested plan. It will be used to restore semantics of null-sensitive aggregations after LEFT join
-        Symbol nonNull = context.getSymbolAllocator().newSymbol("non_null", BOOLEAN);
-        source = new ProjectNode(
-                context.getIdAllocator().getNextId(),
-                source,
-                Assignments.builder()
-                        .putIdentities(source.getOutputSymbols())
-                        .put(nonNull, TRUE_LITERAL)
-                        .build());
+        AggregationNode globalAggregation = captures.get(AGGREGATION);
+        // Null-insensitive aggregations don't distinguish empty input from null input, so they don't need a special mask true symbol
+        // to distinguish between these two cases after decorrelation. For example, count(*) needs a mask symbol because it returns 0
+        // for an empty set but 1 for a set with a single null row, but boolean_or returns null for both an empty set and a set with a single null row.
+        if (!isNullInsensitiveAggregation(globalAggregation)) {
+            nonNull = Optional.of(context.getSymbolAllocator().newSymbol("non_null", BOOLEAN));
+            source = new ProjectNode(
+                    context.getIdAllocator().getNextId(),
+                    source,
+                    Assignments.builder()
+                            .putIdentities(source.getOutputSymbols())
+                            .put(nonNull.get(), TRUE)
+                            .build());
+        }
 
         // assign unique id on correlated join's input. It will be used to distinguish between original input rows after join
         PlanNode inputWithUniqueId = new AssignUniqueId(
@@ -185,7 +205,7 @@ public class TransformCorrelatedGlobalAggregationWithProjection
 
         JoinNode join = new JoinNode(
                 context.getIdAllocator().getNextId(),
-                JoinNode.Type.LEFT,
+                JoinType.LEFT,
                 inputWithUniqueId,
                 source,
                 ImmutableList.of(),
@@ -204,60 +224,59 @@ public class TransformCorrelatedGlobalAggregationWithProjection
 
         // restore distinct aggregation
         if (distinct != null) {
-            root = new AggregationNode(
-                    distinct.getId(),
+            ImmutableList.Builder<Symbol> distinctSymbols = ImmutableList.<Symbol>builder()
+                    .addAll(join.getLeftOutputSymbols())
+                    .addAll(distinct.getGroupingKeys());
+            nonNull.ifPresent(distinctSymbols::add);
+
+            root = restoreDistinctAggregation(
+                    distinct,
                     join,
-                    distinct.getAggregations(),
-                    singleGroupingSet(ImmutableList.<Symbol>builder()
-                            .addAll(join.getLeftOutputSymbols())
-                            .add(nonNull)
-                            .addAll(distinct.getGroupingKeys())
-                            .build()),
-                    ImmutableList.of(),
-                    distinct.getStep(),
-                    Optional.empty(),
-                    Optional.empty());
+                    distinctSymbols.build());
         }
 
-        // prepare mask symbols for aggregations
-        // Every original aggregation agg() will be rewritten to agg() mask(non_null). If the aggregation
-        // already has a mask, it will be replaced with conjunction of the existing mask and non_null.
-        // This is necessary to restore the original aggregation result in case when:
-        // - the nested lateral subquery returned empty result for some input row,
-        // - aggregation is null-sensitive, which means that its result over a single null row is different
-        //   than result for empty input (with global grouping)
-        // It applies to the following aggregate functions: count(*), checksum(), array_agg().
-        AggregationNode globalAggregation = captures.get(AGGREGATION);
-        ImmutableMap.Builder<Symbol, Symbol> masks = ImmutableMap.builder();
-        Assignments.Builder assignmentsBuilder = Assignments.builder();
-        for (Map.Entry<Symbol, Aggregation> entry : globalAggregation.getAggregations().entrySet()) {
-            Aggregation aggregation = entry.getValue();
-            if (aggregation.getMask().isPresent()) {
-                Symbol newMask = context.getSymbolAllocator().newSymbol("mask", BOOLEAN);
-                Expression expression = and(aggregation.getMask().get().toSymbolReference(), nonNull.toSymbolReference());
-                assignmentsBuilder.put(newMask, expression);
-                masks.put(entry.getKey(), newMask);
+        Map<Symbol, Aggregation> aggregations = globalAggregation.getAggregations();
+        if (nonNull.isPresent()) {
+            // prepare mask symbols for aggregations
+            // Every original aggregation agg() will be rewritten to agg() mask(non_null). If the aggregation
+            // already has a mask, it will be replaced with conjunction of the existing mask and non_null.
+            // This is necessary to restore the original aggregation result in case when:
+            // - the nested lateral subquery returned empty result for some input row,
+            // - aggregation is null-sensitive, which means that its result over a single null row is different
+            //   than result for empty input (with global grouping)
+            // It applies to the following aggregate functions: count(*), checksum(), array_agg().
+            ImmutableMap.Builder<Symbol, Symbol> masksBuilder = ImmutableMap.builder();
+            Assignments.Builder assignmentsBuilder = Assignments.builder();
+            for (Map.Entry<Symbol, Aggregation> entry : globalAggregation.getAggregations().entrySet()) {
+                Aggregation aggregation = entry.getValue();
+                if (aggregation.getMask().isPresent()) {
+                    Symbol newMask = context.getSymbolAllocator().newSymbol("mask", BOOLEAN);
+                    Expression expression = and(aggregation.getMask().get().toSymbolReference(), nonNull.get().toSymbolReference());
+                    assignmentsBuilder.put(newMask, expression);
+                    masksBuilder.put(entry.getKey(), newMask);
+                }
+                else {
+                    masksBuilder.put(entry.getKey(), nonNull.get());
+                }
             }
-            else {
-                masks.put(entry.getKey(), nonNull);
+            Assignments maskAssignments = assignmentsBuilder.build();
+            if (!maskAssignments.isEmpty()) {
+                root = new ProjectNode(
+                        context.getIdAllocator().getNextId(),
+                        root,
+                        Assignments.builder()
+                                .putIdentities(root.getOutputSymbols())
+                                .putAll(maskAssignments)
+                                .build());
             }
-        }
-        Assignments maskAssignments = assignmentsBuilder.build();
-        if (!maskAssignments.isEmpty()) {
-            root = new ProjectNode(
-                    context.getIdAllocator().getNextId(),
-                    root,
-                    Assignments.builder()
-                            .putIdentities(root.getOutputSymbols())
-                            .putAll(maskAssignments)
-                            .build());
+            aggregations = rewriteWithMasks(globalAggregation.getAggregations(), masksBuilder.buildOrThrow());
         }
 
         // restore global aggregation
         globalAggregation = new AggregationNode(
                 globalAggregation.getId(),
                 root,
-                rewriteWithMasks(globalAggregation.getAggregations(), masks.build()),
+                aggregations,
                 singleGroupingSet(ImmutableList.<Symbol>builder()
                         .addAll(join.getLeftOutputSymbols())
                         .addAll(globalAggregation.getGroupingKeys())
@@ -282,5 +301,19 @@ public class TransformCorrelatedGlobalAggregationWithProjection
                 context.getIdAllocator().getNextId(),
                 globalAggregation,
                 assignments));
+    }
+
+    private static boolean isNullInsensitiveAggregation(AggregationNode node)
+    {
+        if (node.getAggregations().size() != 1) {
+            return false;
+        }
+
+        Aggregation aggregation = getOnlyElement(node.getAggregations().values());
+        if (aggregation.getFilter().isPresent() || aggregation.getMask().isPresent()) {
+            return false;
+        }
+
+        return aggregation.getResolvedFunction().name().equals(BOOL_OR) && aggregation.getArguments().getFirst() instanceof Reference;
     }
 }

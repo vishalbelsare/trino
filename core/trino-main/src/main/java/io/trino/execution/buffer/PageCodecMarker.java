@@ -20,10 +20,10 @@ import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 
 /**
- * Encodes boolean properties for {@link SerializedPage} by using a bitmasking strategy, allowing
+ * Encodes boolean properties for serialized page by using a bitmasking strategy, allowing
  * up to 8 such properties to be stored in a single byte
  */
-public enum PageCodecMarker
+enum PageCodecMarker
 {
     COMPRESSED(1),
     ENCRYPTED(2);
@@ -33,7 +33,7 @@ public enum PageCodecMarker
     PageCodecMarker(int bit)
     {
         checkArgument(bit > 0 && bit <= 8, "PageCodecMarker bit must be between 1 and 8. Found: %s", bit);
-        this.mask = (1 << (bit - 1));
+        this.mask = 1 << (bit - 1);
     }
 
     public boolean isSet(byte value)
@@ -48,7 +48,7 @@ public enum PageCodecMarker
 
     public byte unset(byte value)
     {
-        return (byte) (Byte.toUnsignedInt(value) & (~mask));
+        return (byte) (Byte.toUnsignedInt(value) & ~mask);
     }
 
     /**

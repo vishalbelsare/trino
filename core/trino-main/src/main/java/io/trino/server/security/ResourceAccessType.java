@@ -14,11 +14,10 @@
 package io.trino.server.security;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.server.security.ResourceSecurity.AccessType;
 import io.trino.server.security.ResourceSecurityBinder.StaticResourceAccessTypeLoader;
-
-import javax.inject.Inject;
-import javax.ws.rs.container.ResourceInfo;
+import jakarta.ws.rs.container.ResourceInfo;
 
 import java.lang.reflect.Method;
 import java.util.List;
@@ -47,20 +46,14 @@ public class ResourceAccessType
             if (accessType.isPresent()) {
                 return accessType.get();
             }
-            // check if the resource class has an access type declared for all methods
-            accessType = resourceAccessTypeLoader.getAccessType(resourceInfo.getResourceClass());
-            if (accessType.isPresent()) {
-                verifyNotTrinoResource(resourceInfo);
-                return accessType.get();
-            }
-            // in some cases there the resource is a nested class, so check the parent class
-            // we currently only check one level, but we could handle multiple nesting levels if necessary
-            if (resourceInfo.getResourceClass().getDeclaringClass() != null) {
-                accessType = resourceAccessTypeLoader.getAccessType(resourceInfo.getResourceClass().getDeclaringClass());
+            // check if the resource class or enclosing classes have an access type declared for all methods
+            Class<?> current = resourceInfo.getResourceClass();
+            while (current != null) {
+                accessType = resourceAccessTypeLoader.getAccessType(current);
                 if (accessType.isPresent()) {
-                    verifyNotTrinoResource(resourceInfo);
                     return accessType.get();
                 }
+                current = current.getDeclaringClass();
             }
         }
         // Trino resources are required to have a declared access control

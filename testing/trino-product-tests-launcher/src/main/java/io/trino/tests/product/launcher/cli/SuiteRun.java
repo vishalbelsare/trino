@@ -16,17 +16,18 @@ package io.trino.tests.product.launcher.cli;
 import com.google.common.base.Joiner;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import com.google.inject.Module;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.jvm.Threads;
 import io.trino.tests.product.launcher.Extensions;
-import io.trino.tests.product.launcher.LauncherModule;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
 import io.trino.tests.product.launcher.env.EnvironmentConfigFactory;
 import io.trino.tests.product.launcher.env.EnvironmentFactory;
 import io.trino.tests.product.launcher.env.EnvironmentModule;
 import io.trino.tests.product.launcher.env.EnvironmentOptions;
+import io.trino.tests.product.launcher.env.jdk.JdkProvider;
 import io.trino.tests.product.launcher.suite.Suite;
 import io.trino.tests.product.launcher.suite.SuiteFactory;
 import io.trino.tests.product.launcher.suite.SuiteModule;
@@ -37,14 +38,15 @@ import picocli.CommandLine.ExitCode;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
 
-import javax.inject.Inject;
-
 import java.io.File;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
@@ -57,8 +59,8 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.Duration.nanosSince;
 import static io.airlift.units.Duration.succinctNanos;
-import static io.trino.tests.product.launcher.cli.Commands.runCommand;
 import static io.trino.tests.product.launcher.cli.SuiteRun.TestRunResult.HEADER;
+import static io.trino.tests.product.launcher.cli.TestRun.Execution.ENVIRONMENT_SKIPPED_EXIT_CODE;
 import static java.lang.Math.max;
 import static java.lang.String.format;
 import static java.lang.management.ManagementFactory.getThreadMXBean;
@@ -74,14 +76,11 @@ import static java.util.stream.Collectors.joining;
         description = "Run suite tests",
         usageHelpAutoWidth = true)
 public class SuiteRun
-        implements Callable<Integer>
+        extends LauncherCommand
 {
     private static final Logger log = Logger.get(SuiteRun.class);
 
     private static final ScheduledExecutorService diagnosticExecutor = newScheduledThreadPool(2, daemonThreadsNamed("TestRun-diagnostic"));
-
-    private final Module additionalEnvironments;
-    private final Module additionalSuites;
 
     @Option(names = {"-h", "--help"}, usageHelp = true, description = "Show this help message and exit")
     public boolean usageHelpRequested;
@@ -92,23 +91,18 @@ public class SuiteRun
     @Mixin
     public EnvironmentOptions environmentOptions = new EnvironmentOptions();
 
-    public SuiteRun(Extensions extensions)
+    public SuiteRun(OutputStream outputStream, Extensions extensions)
     {
-        this.additionalEnvironments = requireNonNull(extensions, "extensions is null").getAdditionalEnvironments();
-        this.additionalSuites = requireNonNull(extensions, "extensions is null").getAdditionalSuites();
+        super(SuiteRun.Execution.class, outputStream, extensions);
     }
 
     @Override
-    public Integer call()
+    List<Module> getCommandModules()
     {
-        return runCommand(
-                ImmutableList.<Module>builder()
-                        .add(new LauncherModule())
-                        .add(new SuiteModule(additionalSuites))
-                        .add(new EnvironmentModule(environmentOptions, additionalEnvironments))
-                        .add(suiteRunOptions.toModule())
-                        .build(),
-                Execution.class);
+        return ImmutableList.of(
+                new SuiteModule(extensions.getAdditionalSuites()),
+                new EnvironmentModule(environmentOptions, extensions.getAdditionalEnvironments()),
+                suiteRunOptions.toModule());
     }
 
     public static class SuiteRunOptions
@@ -123,6 +117,9 @@ public class SuiteRun
 
         @Option(names = "--cli-executable", paramLabel = "<jar>", description = "Path to CLI executable " + DEFAULT_VALUE, defaultValue = "${cli.bin}")
         public File cliJar;
+
+        @Option(names = "--impacted-features", paramLabel = "<file>", description = "Only run tests in environments with these features " + DEFAULT_VALUE)
+        public Optional<File> impactedFeatures;
 
         @Option(names = "--logs-dir", paramLabel = "<dir>", description = "Location of the exported logs directory " + DEFAULT_VALUE)
         public Optional<Path> logsDirBase;
@@ -144,8 +141,10 @@ public class SuiteRun
         // TODO do not store mutable state
         private final EnvironmentOptions environmentOptions;
         private final SuiteFactory suiteFactory;
+        private final JdkProvider jdkProvider;
         private final EnvironmentFactory environmentFactory;
         private final EnvironmentConfigFactory configFactory;
+        private final PrintStream printStream;
         private final long suiteStartTime;
 
         @Inject
@@ -153,14 +152,18 @@ public class SuiteRun
                 SuiteRunOptions suiteRunOptions,
                 EnvironmentOptions environmentOptions,
                 SuiteFactory suiteFactory,
+                JdkProvider jdkProvider,
                 EnvironmentFactory environmentFactory,
-                EnvironmentConfigFactory configFactory)
+                EnvironmentConfigFactory configFactory,
+                PrintStream printStream)
         {
             this.suiteRunOptions = requireNonNull(suiteRunOptions, "suiteRunOptions is null");
             this.environmentOptions = requireNonNull(environmentOptions, "environmentOptions is null");
             this.suiteFactory = requireNonNull(suiteFactory, "suiteFactory is null");
+            this.jdkProvider = requireNonNull(jdkProvider, "jdkProvider is null");
             this.environmentFactory = requireNonNull(environmentFactory, "environmentFactory is null");
             this.configFactory = requireNonNull(configFactory, "configFactory is null");
+            this.printStream = requireNonNull(printStream, "printStream is null");
             this.suiteStartTime = System.nanoTime();
         }
 
@@ -241,7 +244,7 @@ public class SuiteRun
         private void printTestRunsSummary(List<TestRunResult> results)
         {
             ConsoleTable table = new ConsoleTable();
-            table.addHeader(HEADER);
+            table.addHeader(HEADER.toArray());
             results.forEach(result -> table.addRow(result.toRow()));
             table.addSeparator();
             log.info("Suite tests results:\n%s", table.render());
@@ -266,6 +269,7 @@ public class SuiteRun
                         suiteTestRun,
                         environmentConfig,
                         new Duration(0, MILLISECONDS),
+                        OptionalInt.empty(),
                         Optional.of(new Exception("Test execution not attempted because suite total running time limit was exhausted")));
             }
 
@@ -273,8 +277,17 @@ public class SuiteRun
             log.info("Execute this test run using:\n%s test run %s", environmentOptions.launcherBin, OptionsPrinter.format(environmentOptions, testRunOptions));
 
             Stopwatch stopwatch = Stopwatch.createStarted();
-            Optional<Throwable> exception = runTest(runId, environmentConfig, testRunOptions);
-            return new TestRunResult(suiteName, runId, suiteTestRun, environmentConfig, succinctNanos(stopwatch.stop().elapsed(NANOSECONDS)), exception);
+            try {
+                int exitCode = runTest(runId, environmentConfig, testRunOptions);
+                Optional<Throwable> exception = Optional.empty();
+                if (exitCode != 0 && exitCode != ENVIRONMENT_SKIPPED_EXIT_CODE) {
+                    exception = Optional.of(new RuntimeException(format("Tests exited with code %d", exitCode)));
+                }
+                return new TestRunResult(suiteName, runId, suiteTestRun, environmentConfig, succinctNanos(stopwatch.stop().elapsed(NANOSECONDS)), OptionalInt.of(exitCode), exception);
+            }
+            catch (RuntimeException e) {
+                return new TestRunResult(suiteName, runId, suiteTestRun, environmentConfig, succinctNanos(stopwatch.stop().elapsed(NANOSECONDS)), OptionalInt.empty(), Optional.of(e));
+            }
         }
 
         private static String generateRandomRunId()
@@ -282,24 +295,15 @@ public class SuiteRun
             return UUID.randomUUID().toString().replace("-", "");
         }
 
-        private Optional<Throwable> runTest(String runId, EnvironmentConfig environmentConfig, TestRun.TestRunOptions testRunOptions)
+        private int runTest(String runId, EnvironmentConfig environmentConfig, TestRun.TestRunOptions testRunOptions)
         {
-            try {
-                TestRun.Execution execution = new TestRun.Execution(environmentFactory, environmentOptions, environmentConfig, testRunOptions);
+            TestRun.Execution execution = new TestRun.Execution(environmentFactory, jdkProvider, environmentOptions, environmentConfig, testRunOptions, printStream);
 
-                log.info("Test run %s started", runId);
-                int exitCode = execution.call();
-                log.info("Test run %s finished", runId);
+            log.info("Test run %s started", runId);
+            int exitCode = execution.call();
+            log.info("Test run %s finished", runId);
 
-                if (exitCode > 0) {
-                    return Optional.of(new RuntimeException(format("Tests exited with code %d", exitCode)));
-                }
-
-                return Optional.empty();
-            }
-            catch (RuntimeException e) {
-                return Optional.of(e);
-            }
+            return exitCode;
         }
 
         private TestRun.TestRunOptions createTestRunOptions(String runId, String suiteName, SuiteTestRun suiteTestRun, EnvironmentConfig environmentConfig, Optional<Path> logsDirBase)
@@ -310,8 +314,9 @@ public class SuiteRun
             testRunOptions.testArguments = suiteTestRun.getTemptoRunArguments();
             testRunOptions.testJar = suiteRunOptions.testJar;
             testRunOptions.cliJar = suiteRunOptions.cliJar;
+            testRunOptions.impactedFeatures = suiteRunOptions.impactedFeatures;
             String suiteRunId = suiteRunId(runId, suiteName, suiteTestRun, environmentConfig);
-            testRunOptions.reportsDir = Paths.get("presto-product-tests/target/reports/" + suiteRunId);
+            testRunOptions.reportsDir = Paths.get("testing/trino-product-tests/target/reports/" + suiteRunId);
             testRunOptions.logsDirBase = logsDirBase.map(dir -> dir.resolve(suiteRunId));
             // Calculate remaining time
             testRunOptions.timeout = remainingTimeout();
@@ -350,30 +355,35 @@ public class SuiteRun
 
     static class TestRunResult
     {
-        public static final Object[] HEADER = {
-                "id", "suite", "environment", "config", "options", "status", "elapsed", "error"
-        };
+        public static final List<String> HEADER = List.of("id", "suite", "environment", "config", "options", "status", "elapsed", "error");
 
         private final String runId;
         private final SuiteTestRun suiteRun;
         private final EnvironmentConfig environmentConfig;
         private final Duration duration;
         private final Optional<Throwable> throwable;
+        private final OptionalInt exitCode;
         private final String suiteName;
 
-        public TestRunResult(String suiteName, String runId, SuiteTestRun suiteRun, EnvironmentConfig environmentConfig, Duration duration, Optional<Throwable> throwable)
+        public TestRunResult(String suiteName, String runId, SuiteTestRun suiteRun, EnvironmentConfig environmentConfig, Duration duration, OptionalInt exitCode, Optional<Throwable> throwable)
         {
             this.suiteName = suiteName;
             this.runId = runId;
             this.suiteRun = requireNonNull(suiteRun, "suiteRun is null");
             this.environmentConfig = requireNonNull(environmentConfig, "environmentConfig is null");
             this.duration = requireNonNull(duration, "duration is null");
+            this.exitCode = exitCode;
             this.throwable = requireNonNull(throwable, "throwable is null");
         }
 
         public boolean hasFailed()
         {
             return this.throwable.isPresent();
+        }
+
+        public boolean wasSkipped()
+        {
+            return this.exitCode.orElse(0) == ENVIRONMENT_SKIPPED_EXIT_CODE;
         }
 
         @Override
@@ -397,9 +407,17 @@ public class SuiteRun
                     suiteRun.getEnvironmentName(),
                     environmentConfig.getConfigName(),
                     suiteRun.getExtraOptions(),
-                    hasFailed() ? "FAILED" : "SUCCESS",
+                    getStatusString(),
                     duration,
                     throwable.map(Throwable::getMessage).orElse("-")};
+        }
+
+        private String getStatusString()
+        {
+            if (wasSkipped()) {
+                return "SKIPPED";
+            }
+            return hasFailed() ? "FAILED" : "SUCCESS";
         }
     }
 }

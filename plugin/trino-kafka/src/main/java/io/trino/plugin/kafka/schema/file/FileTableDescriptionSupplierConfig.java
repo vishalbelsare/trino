@@ -13,12 +13,10 @@
  */
 package io.trino.plugin.kafka.schema.file;
 
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
-
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotNull;
 
 import java.io.File;
 import java.util.Set;
@@ -36,9 +34,9 @@ public class FileTableDescriptionSupplierConfig
 
     @Config("kafka.table-names")
     @ConfigDescription("Set of tables known to this connector")
-    public FileTableDescriptionSupplierConfig setTableNames(String tableNames)
+    public FileTableDescriptionSupplierConfig setTableNames(Set<String> tableNames)
     {
-        this.tableNames = ImmutableSet.copyOf(Splitter.on(',').omitEmptyStrings().trimResults().split(tableNames));
+        this.tableNames = ImmutableSet.copyOf(tableNames);
         return this;
     }
 

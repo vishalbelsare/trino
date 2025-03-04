@@ -13,13 +13,10 @@
  */
 package io.trino.connector.system;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
 import com.google.inject.multibindings.Multibinder;
-import com.google.inject.multibindings.ProvidesIntoSet;
-import io.trino.connector.ConnectorManager;
 import io.trino.connector.system.jdbc.AttributeJdbcTable;
 import io.trino.connector.system.jdbc.CatalogJdbcTable;
 import io.trino.connector.system.jdbc.ColumnJdbcTable;
@@ -33,10 +30,11 @@ import io.trino.connector.system.jdbc.TableJdbcTable;
 import io.trino.connector.system.jdbc.TableTypeJdbcTable;
 import io.trino.connector.system.jdbc.TypesJdbcTable;
 import io.trino.connector.system.jdbc.UdtJdbcTable;
+import io.trino.operator.table.ExcludeColumnsFunction;
+import io.trino.operator.table.SequenceFunction;
 import io.trino.spi.connector.SystemTable;
+import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.procedure.Procedure;
-
-import javax.inject.Inject;
 
 public class SystemConnectorModule
         implements Module
@@ -73,27 +71,15 @@ public class SystemConnectorModule
         globalTableBinder.addBinding().to(TableTypeJdbcTable.class).in(Scopes.SINGLETON);
         globalTableBinder.addBinding().to(UdtJdbcTable.class).in(Scopes.SINGLETON);
 
-        Multibinder.newSetBinder(binder, Procedure.class);
+        Multibinder<Procedure> procedures = Multibinder.newSetBinder(binder, Procedure.class);
+        procedures.addBinding().toProvider(KillQueryProcedure.class).in(Scopes.SINGLETON);
 
         binder.bind(KillQueryProcedure.class).in(Scopes.SINGLETON);
 
-        binder.bind(GlobalSystemConnectorFactory.class).in(Scopes.SINGLETON);
-        binder.bind(SystemConnectorRegistrar.class).asEagerSingleton();
-    }
+        binder.bind(GlobalSystemConnector.class).in(Scopes.SINGLETON);
 
-    @ProvidesIntoSet
-    public static Procedure getKillQueryProcedure(KillQueryProcedure procedure)
-    {
-        return procedure.getProcedure();
-    }
-
-    private static class SystemConnectorRegistrar
-    {
-        @Inject
-        public SystemConnectorRegistrar(ConnectorManager manager, GlobalSystemConnectorFactory globalSystemConnectorFactory)
-        {
-            manager.addConnectorFactory(globalSystemConnectorFactory, globalSystemConnectorFactory.getClass()::getClassLoader);
-            manager.createCatalog(GlobalSystemConnector.NAME, GlobalSystemConnector.NAME, ImmutableMap.of());
-        }
+        Multibinder<ConnectorTableFunction> tableFunctions = Multibinder.newSetBinder(binder, ConnectorTableFunction.class);
+        tableFunctions.addBinding().to(ExcludeColumnsFunction.class).in(Scopes.SINGLETON);
+        tableFunctions.addBinding().to(SequenceFunction.class).in(Scopes.SINGLETON);
     }
 }

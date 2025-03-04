@@ -14,33 +14,32 @@
 package io.trino.parquet.writer.valuewriter;
 
 import io.trino.spi.block.Block;
+import org.apache.parquet.column.statistics.Statistics;
 import org.apache.parquet.column.values.ValuesWriter;
 import org.apache.parquet.schema.PrimitiveType;
 
 import static io.trino.spi.type.RealType.REAL;
-import static java.lang.Float.intBitsToFloat;
-import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 public class RealValueWriter
         extends PrimitiveValueWriter
 {
-    private final ValuesWriter valuesWriter;
-
     public RealValueWriter(ValuesWriter valuesWriter, PrimitiveType parquetType)
     {
         super(parquetType, valuesWriter);
-        this.valuesWriter = requireNonNull(valuesWriter, "valuesWriter is null");
     }
 
     @Override
     public void write(Block block)
     {
+        ValuesWriter valuesWriter = requireNonNull(getValuesWriter(), "valuesWriter is null");
+        Statistics<?> statistics = requireNonNull(getStatistics(), "statistics is null");
+        boolean mayHaveNull = block.mayHaveNull();
         for (int i = 0; i < block.getPositionCount(); i++) {
-            if (!block.isNull(i)) {
-                float value = intBitsToFloat(toIntExact(REAL.getLong(block, i)));
+            if (!mayHaveNull || !block.isNull(i)) {
+                float value = REAL.getFloat(block, i);
                 valuesWriter.writeFloat(value);
-                getStatistics().updateStats(value);
+                statistics.updateStats(value);
             }
         }
     }

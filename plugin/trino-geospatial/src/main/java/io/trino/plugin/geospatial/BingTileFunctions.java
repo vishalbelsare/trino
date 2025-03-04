@@ -17,11 +17,13 @@ import com.esri.core.geometry.Envelope;
 import com.esri.core.geometry.Point;
 import com.esri.core.geometry.ogc.OGCGeometry;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.FormatMethod;
 import io.airlift.slice.Slice;
-import io.trino.spi.PageBuilder;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BufferedRowValueBuilder;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.function.Description;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
@@ -39,12 +41,12 @@ import static io.trino.geospatial.GeometryUtils.isPointOrRectangle;
 import static io.trino.geospatial.serde.GeometrySerde.deserialize;
 import static io.trino.geospatial.serde.GeometrySerde.serialize;
 import static io.trino.plugin.geospatial.BingTile.MAX_ZOOM_LEVEL;
-import static io.trino.plugin.geospatial.GeometryType.GEOMETRY_TYPE_NAME;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static java.lang.Math.asin;
 import static java.lang.Math.atan2;
+import static java.lang.Math.clamp;
 import static java.lang.Math.cos;
 import static java.lang.Math.multiplyExact;
 import static java.lang.Math.sin;
@@ -84,7 +86,7 @@ public final class BingTileFunctions
 
     @Description("Creates a Bing tile from XY coordinates and zoom level")
     @ScalarFunction("bing_tile")
-    @SqlType(BingTileType.NAME)
+    @SqlType(StandardTypes.BING_TILE)
     public static long toBingTile(@SqlType(StandardTypes.INTEGER) long tileX, @SqlType(StandardTypes.INTEGER) long tileY, @SqlType(StandardTypes.INTEGER) long zoomLevel)
     {
         checkZoomLevel(zoomLevel);
@@ -97,7 +99,7 @@ public final class BingTileFunctions
     @Description("Given a Bing tile, returns its QuadKey")
     @ScalarFunction("bing_tile_quadkey")
     @SqlType(StandardTypes.VARCHAR)
-    public static Slice toQuadKey(@SqlType(BingTileType.NAME) long input)
+    public static Slice toQuadKey(@SqlType(StandardTypes.BING_TILE) long input)
     {
         return utf8Slice(BingTile.decode(input).toQuadKey());
     }
@@ -108,42 +110,35 @@ public final class BingTileFunctions
     {
         private static final RowType BING_TILE_COORDINATES_ROW_TYPE = RowType.anonymous(ImmutableList.of(INTEGER, INTEGER));
 
-        private final PageBuilder pageBuilder;
+        private final BufferedRowValueBuilder rowValueBuilder;
 
         public BingTileCoordinatesFunction()
         {
-            pageBuilder = new PageBuilder(ImmutableList.of(BING_TILE_COORDINATES_ROW_TYPE));
+            rowValueBuilder = BufferedRowValueBuilder.createBuffered(BING_TILE_COORDINATES_ROW_TYPE);
         }
 
         @SqlType("row(x integer,y integer)")
-        public Block bingTileCoordinates(@SqlType(BingTileType.NAME) long input)
+        public SqlRow bingTileCoordinates(@SqlType(StandardTypes.BING_TILE) long input)
         {
-            if (pageBuilder.isFull()) {
-                pageBuilder.reset();
-            }
-            BlockBuilder blockBuilder = pageBuilder.getBlockBuilder(0);
             BingTile tile = BingTile.decode(input);
-            BlockBuilder tileBlockBuilder = blockBuilder.beginBlockEntry();
-            INTEGER.writeLong(tileBlockBuilder, tile.getX());
-            INTEGER.writeLong(tileBlockBuilder, tile.getY());
-            blockBuilder.closeEntry();
-            pageBuilder.declarePosition();
-
-            return BING_TILE_COORDINATES_ROW_TYPE.getObject(blockBuilder, blockBuilder.getPositionCount() - 1);
+            return rowValueBuilder.build(fields -> {
+                INTEGER.writeLong(fields.get(0), tile.getX());
+                INTEGER.writeLong(fields.get(1), tile.getY());
+            });
         }
     }
 
     @Description("Given a Bing tile, returns zoom level of the tile")
     @ScalarFunction("bing_tile_zoom_level")
     @SqlType(StandardTypes.TINYINT)
-    public static long bingTileZoomLevel(@SqlType(BingTileType.NAME) long input)
+    public static long bingTileZoomLevel(@SqlType(StandardTypes.BING_TILE) long input)
     {
         return BingTile.decode(input).getZoomLevel();
     }
 
     @Description("Creates a Bing tile from a QuadKey")
     @ScalarFunction("bing_tile")
-    @SqlType(BingTileType.NAME)
+    @SqlType(StandardTypes.BING_TILE)
     public static long toBingTile(@SqlType(StandardTypes.VARCHAR) Slice quadKey)
     {
         checkQuadKey(quadKey);
@@ -152,7 +147,7 @@ public final class BingTileFunctions
 
     @Description("Given a (latitude, longitude) point, returns the containing Bing tile at the specified zoom level")
     @ScalarFunction("bing_tile_at")
-    @SqlType(BingTileType.NAME)
+    @SqlType(StandardTypes.BING_TILE)
     public static long bingTileAt(
             @SqlType(StandardTypes.DOUBLE) double latitude,
             @SqlType(StandardTypes.DOUBLE) double longitude,
@@ -167,7 +162,7 @@ public final class BingTileFunctions
 
     @Description("Given a (longitude, latitude) point, returns the surrounding Bing tiles at the specified zoom level")
     @ScalarFunction("bing_tiles_around")
-    @SqlType("array(" + BingTileType.NAME + ")")
+    @SqlType("array(" + StandardTypes.BING_TILE + ")")
     public static Block bingTilesAround(
             @SqlType(StandardTypes.DOUBLE) double latitude,
             @SqlType(StandardTypes.DOUBLE) double longitude,
@@ -183,7 +178,7 @@ public final class BingTileFunctions
         int tileX = longitudeToTileX(longitude, mapSize);
         int tileY = longitudeToTileY(latitude, mapSize);
 
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, 9);
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(9);
         for (int i = -1; i <= 1; i++) {
             for (int j = -1; j <= 1; j++) {
                 int x = tileX + i;
@@ -200,7 +195,7 @@ public final class BingTileFunctions
             "returns a minimum set of Bing tiles at specified zoom level that cover a circle of " +
             "specified radius around the specified point.")
     @ScalarFunction("bing_tiles_around")
-    @SqlType("array(" + BingTileType.NAME + ")")
+    @SqlType("array(" + StandardTypes.BING_TILE + ")")
     public static Block bingTilesAround(
             @SqlType(StandardTypes.DOUBLE) double latitude,
             @SqlType(StandardTypes.DOUBLE) double longitude,
@@ -246,7 +241,7 @@ public final class BingTileFunctions
                 "The number of tiles covering input rectangle exceeds the limit of 1M. Number of tiles: %d. Radius: %.1f km. Zoom level: %d.",
                 totalTileCount, radiusInKm, zoomLevel);
 
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, totalTileCount);
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(totalTileCount);
 
         for (int i = 0; i < tileCountX; i++) {
             int x = (leftTile.getX() + i) % (maxTileIndex + 1);
@@ -335,8 +330,8 @@ public final class BingTileFunctions
 
     @Description("Given a Bing tile, returns the polygon representation of the tile")
     @ScalarFunction("bing_tile_polygon")
-    @SqlType(GEOMETRY_TYPE_NAME)
-    public static Slice bingTilePolygon(@SqlType(BingTileType.NAME) long input)
+    @SqlType(StandardTypes.GEOMETRY)
+    public static Slice bingTilePolygon(@SqlType(StandardTypes.BING_TILE) long input)
     {
         BingTile tile = BingTile.decode(input);
 
@@ -345,8 +340,8 @@ public final class BingTileFunctions
 
     @Description("Given a geometry and a zoom level, returns the minimum set of Bing tiles that fully covers that geometry")
     @ScalarFunction("geometry_to_bing_tiles")
-    @SqlType("array(" + BingTileType.NAME + ")")
-    public static Block geometryToBingTiles(@SqlType(GEOMETRY_TYPE_NAME) Slice input, @SqlType(StandardTypes.INTEGER) long zoomLevelInput)
+    @SqlType("array(" + StandardTypes.BING_TILE + ")")
+    public static Block geometryToBingTiles(@SqlType(StandardTypes.GEOMETRY) Slice input, @SqlType(StandardTypes.INTEGER) long zoomLevelInput)
     {
         checkZoomLevel(zoomLevelInput);
 
@@ -374,7 +369,7 @@ public final class BingTileFunctions
 
         checkGeometryToBingTilesLimits(ogcGeometry, envelope, pointOrRectangle, tileCount, zoomLevel);
 
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, toIntExact(tileCount));
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(toIntExact(tileCount));
         if (pointOrRectangle || zoomLevel <= OPTIMIZED_TILING_MIN_ZOOM_LEVEL) {
             // Collect tiles covering the bounding box and check each tile for intersection with the geometry.
             // Skip intersection check if geometry is a point or rectangle. In these cases, by definition,
@@ -507,10 +502,10 @@ public final class BingTileFunctions
         checkArgument(leftUpperTile.getZoomLevel() > zoomLevel);
 
         int divisor = 1 << (leftUpperTile.getZoomLevel() - zoomLevel);
-        int minX = (int) Math.floor(leftUpperTile.getX() / divisor);
-        int maxX = (int) Math.floor(rightLowerTile.getX() / divisor);
-        int minY = (int) Math.floor(leftUpperTile.getY() / divisor);
-        int maxY = (int) Math.floor(rightLowerTile.getY() / divisor);
+        int minX = leftUpperTile.getX() / divisor;
+        int maxX = rightLowerTile.getX() / divisor;
+        int minY = leftUpperTile.getY() / divisor;
+        int maxY = rightLowerTile.getY() / divisor;
 
         BingTile[] tiles = new BingTile[(maxX - minX + 1) * (maxY - minY + 1)];
         int index = 0;
@@ -580,8 +575,8 @@ public final class BingTileFunctions
     private static Point tileXYToLatitudeLongitude(int tileX, int tileY, int zoomLevel)
     {
         long mapSize = mapSize(zoomLevel);
-        double x = (clip(tileX * TILE_PIXELS, 0, mapSize) / mapSize) - 0.5;
-        double y = 0.5 - (clip(tileY * TILE_PIXELS, 0, mapSize) / mapSize);
+        double x = (clamp((long) tileX * TILE_PIXELS, 0, mapSize) / (double) mapSize) - 0.5;
+        double y = 0.5 - (clamp((long) tileY * TILE_PIXELS, 0, mapSize) / (double) mapSize);
 
         double latitude = 90 - 360 * Math.atan(Math.exp(-y * 2 * Math.PI)) / Math.PI;
         double longitude = 360 * x;
@@ -631,7 +626,7 @@ public final class BingTileFunctions
      */
     private static int axisToCoordinates(double axis, long mapSize)
     {
-        int tileAxis = (int) clip(axis * mapSize, 0, mapSize - 1);
+        int tileAxis = (int) clamp(axis * mapSize, 0d, mapSize - 1);
         return tileAxis / TILE_PIXELS;
     }
 
@@ -676,9 +671,9 @@ public final class BingTileFunctions
 
     private static final class GreatCircleDistanceToPoint
     {
-        private double sinLatitude;
-        private double cosLatitude;
-        private double radianLongitude;
+        private final double sinLatitude;
+        private final double cosLatitude;
+        private final double radianLongitude;
 
         private GreatCircleDistanceToPoint(double latitude, double longitude)
         {
@@ -706,16 +701,17 @@ public final class BingTileFunctions
         }
     }
 
+    private static void checkCondition(boolean condition, String message)
+    {
+        checkCondition(condition, "%s", message);
+    }
+
+    @FormatMethod
     private static void checkCondition(boolean condition, String formatString, Object... args)
     {
         if (!condition) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, format(formatString, args));
         }
-    }
-
-    private static double clip(double n, double minValue, double maxValue)
-    {
-        return Math.min(Math.max(n, minValue), maxValue);
     }
 
     private static long mapSize(int zoomLevel)

@@ -13,18 +13,23 @@
  */
 package io.trino.plugin.cassandra.util;
 
-import com.datastax.driver.core.Host;
-import com.datastax.driver.core.TestHost;
+import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
+import com.datastax.oss.driver.api.core.metadata.Node;
+import com.datastax.oss.driver.api.core.session.ProgrammaticArguments;
+import com.datastax.oss.driver.internal.core.context.DefaultDriverContext;
+import com.datastax.oss.driver.internal.core.context.InternalDriverContext;
+import com.datastax.oss.driver.internal.core.metadata.DefaultEndPoint;
+import com.datastax.oss.driver.internal.core.metadata.DefaultNode;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.HostAddress;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Set;
 
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHostAddressFactory
 {
@@ -32,18 +37,27 @@ public class TestHostAddressFactory
     public void testToHostAddressList()
             throws Exception
     {
-        Set<Host> hosts = ImmutableSet.of(
-                new TestHost(
-                        new InetSocketAddress(
-                                InetAddress.getByAddress(new byte[] {
-                                        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
-                                }),
-                                3000)),
-                new TestHost(new InetSocketAddress(InetAddress.getByAddress(new byte[] {1, 2, 3, 4}), 3000)));
+        DriverConfigLoader driverConfigLoader = DriverConfigLoader.programmaticBuilder().build();
+        ProgrammaticArguments args =
+                ProgrammaticArguments.builder().build();
+        InternalDriverContext driverContext = new DefaultDriverContext(driverConfigLoader, args);
+
+        Set<Node> nodes = ImmutableSet.of(
+                new DefaultNode(
+                        new DefaultEndPoint(
+                                new InetSocketAddress(
+                                        InetAddress.getByAddress(new byte[] {
+                                                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+                                        }),
+                                        3000)),
+                        driverContext),
+                new DefaultNode(
+                        new DefaultEndPoint(new InetSocketAddress(InetAddress.getByAddress(new byte[] {1, 2, 3, 4}), 3000)),
+                        driverContext));
 
         HostAddressFactory hostAddressFactory = new HostAddressFactory();
-        List<HostAddress> list = hostAddressFactory.toHostAddressList(hosts);
+        List<HostAddress> list = hostAddressFactory.toHostAddressList(nodes);
 
-        assertEquals(list.toString(), "[[102:304:506:708:90a:b0c:d0e:f10], 1.2.3.4]");
+        assertThat(list.toString()).isEqualTo("[[102:304:506:708:90a:b0c:d0e:f10], 1.2.3.4]");
     }
 }

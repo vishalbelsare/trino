@@ -13,16 +13,15 @@
  */
 package io.trino.plugin.kudu;
 
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.DefunctConfig;
 import io.airlift.units.Duration;
 import io.airlift.units.MaxDuration;
 import io.airlift.units.MinDuration;
-
-import javax.validation.constraints.NotNull;
-import javax.validation.constraints.Size;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -32,19 +31,19 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 /**
  * Configuration read from etc/catalog/kudu.properties
  */
+@DefunctConfig("kudu.client.default-socket-read-timeout")
 public class KuduClientConfig
 {
-    private static final Splitter SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
+    private static final Duration DEFAULT_OPERATION_TIMEOUT = new Duration(30, TimeUnit.SECONDS);
 
-    private List<String> masterAddresses;
-    private Duration defaultAdminOperationTimeout = new Duration(30, TimeUnit.SECONDS);
-    private Duration defaultOperationTimeout = new Duration(30, TimeUnit.SECONDS);
-    private Duration defaultSocketReadTimeout = new Duration(10, TimeUnit.SECONDS);
+    private List<String> masterAddresses = ImmutableList.of();
+    private Duration defaultAdminOperationTimeout = DEFAULT_OPERATION_TIMEOUT;
+    private Duration defaultOperationTimeout = DEFAULT_OPERATION_TIMEOUT;
     private boolean disableStatistics;
     private boolean schemaEmulationEnabled;
     private String schemaEmulationPrefix = "presto::";
-    private boolean groupedExecutionEnabled;
     private Duration dynamicFilteringWaitTimeout = new Duration(0, MINUTES);
+    private boolean allowLocalScheduling;
 
     @NotNull
     @Size(min = 1)
@@ -54,15 +53,9 @@ public class KuduClientConfig
     }
 
     @Config("kudu.client.master-addresses")
-    public KuduClientConfig setMasterAddresses(String commaSeparatedList)
+    public KuduClientConfig setMasterAddresses(List<String> commaSeparatedList)
     {
-        this.masterAddresses = SPLITTER.splitToList(commaSeparatedList);
-        return this;
-    }
-
-    public KuduClientConfig setMasterAddresses(String... contactPoints)
-    {
-        this.masterAddresses = ImmutableList.copyOf(contactPoints);
+        this.masterAddresses = commaSeparatedList;
         return this;
     }
 
@@ -92,20 +85,6 @@ public class KuduClientConfig
     public Duration getDefaultOperationTimeout()
     {
         return defaultOperationTimeout;
-    }
-
-    @Config("kudu.client.default-socket-read-timeout")
-    public KuduClientConfig setDefaultSocketReadTimeout(Duration timeout)
-    {
-        this.defaultSocketReadTimeout = timeout;
-        return this;
-    }
-
-    @MinDuration("1s")
-    @MaxDuration("1h")
-    public Duration getDefaultSocketReadTimeout()
-    {
-        return defaultSocketReadTimeout;
     }
 
     public boolean isDisableStatistics()
@@ -144,18 +123,6 @@ public class KuduClientConfig
         return this;
     }
 
-    @Config("kudu.grouped-execution.enabled")
-    public KuduClientConfig setGroupedExecutionEnabled(boolean enabled)
-    {
-        this.groupedExecutionEnabled = enabled;
-        return this;
-    }
-
-    public boolean isGroupedExecutionEnabled()
-    {
-        return groupedExecutionEnabled;
-    }
-
     @MinDuration("0ms")
     @NotNull
     public Duration getDynamicFilteringWaitTimeout()
@@ -168,6 +135,19 @@ public class KuduClientConfig
     public KuduClientConfig setDynamicFilteringWaitTimeout(Duration dynamicFilteringWaitTimeout)
     {
         this.dynamicFilteringWaitTimeout = dynamicFilteringWaitTimeout;
+        return this;
+    }
+
+    public boolean isAllowLocalScheduling()
+    {
+        return allowLocalScheduling;
+    }
+
+    @Config("kudu.allow-local-scheduling")
+    @ConfigDescription("Assign Kudu splits to replica host if worker and kudu share the same cluster")
+    public KuduClientConfig setAllowLocalScheduling(boolean allowLocalScheduling)
+    {
+        this.allowLocalScheduling = allowLocalScheduling;
         return this;
     }
 }

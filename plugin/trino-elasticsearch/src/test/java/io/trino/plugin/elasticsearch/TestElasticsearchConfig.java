@@ -15,11 +15,12 @@ package io.trino.plugin.elasticsearch;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
@@ -36,7 +37,7 @@ public class TestElasticsearchConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(ElasticsearchConfig.class)
-                .setHost(null)
+                .setHosts(null)
                 .setPort(9200)
                 .setDefaultSchema("default")
                 .setScrollSize(1000)
@@ -66,7 +67,7 @@ public class TestElasticsearchConfig
         Path keystoreFile = Files.createTempFile(null, null);
         Path truststoreFile = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("elasticsearch.host", "example.com")
                 .put("elasticsearch.port", "9999")
                 .put("elasticsearch.default-schema-name", "test")
@@ -88,10 +89,10 @@ public class TestElasticsearchConfig
                 .put("elasticsearch.tls.verify-hostnames", "false")
                 .put("elasticsearch.ignore-publish-address", "true")
                 .put("elasticsearch.security", "AWS")
-                .build();
+                .buildOrThrow();
 
         ElasticsearchConfig expected = new ElasticsearchConfig()
-                .setHost("example.com")
+                .setHosts(Arrays.asList("example.com"))
                 .setPort(9999)
                 .setDefaultSchema("test")
                 .setScrollSize(4000)

@@ -13,11 +13,15 @@
  */
 package io.trino.operator;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
+import com.google.common.io.LittleEndianDataInputStream;
 import com.google.common.net.MediaType;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.HttpClient.HttpResponseFuture;
 import io.airlift.http.client.HttpStatus;
@@ -27,20 +31,17 @@ import io.airlift.http.client.Response;
 import io.airlift.http.client.ResponseHandler;
 import io.airlift.http.client.ResponseTooLargeException;
 import io.airlift.log.Logger;
-import io.airlift.slice.InputStreamSliceInput;
-import io.airlift.slice.SliceInput;
+import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.FeaturesConfig.DataIntegrityVerification;
-import io.trino.execution.buffer.SerializedPage;
+import io.trino.execution.TaskId;
+import io.trino.execution.buffer.PagesSerdeUtil;
 import io.trino.server.remotetask.Backoff;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoTransportException;
+import jakarta.annotation.Nullable;
 import org.joda.time.DateTime;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
 
 import java.io.BufferedReader;
 import java.io.Closeable;
@@ -77,11 +78,13 @@ import static io.trino.server.InternalHeaders.TRINO_BUFFER_COMPLETE;
 import static io.trino.server.InternalHeaders.TRINO_MAX_SIZE;
 import static io.trino.server.InternalHeaders.TRINO_PAGE_NEXT_TOKEN;
 import static io.trino.server.InternalHeaders.TRINO_PAGE_TOKEN;
+import static io.trino.server.InternalHeaders.TRINO_TASK_FAILED;
 import static io.trino.server.InternalHeaders.TRINO_TASK_INSTANCE_ID;
-import static io.trino.server.PagesResponseWriter.SERIALIZED_PAGES_MAGIC;
+import static io.trino.server.PagesInputStreamFactory.SERIALIZED_PAGES_MAGIC;
 import static io.trino.spi.HostAddress.fromUri;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.REMOTE_BUFFER_CLOSE_FAILED;
+import static io.trino.spi.StandardErrorCode.REMOTE_TASK_FAILED;
 import static io.trino.spi.StandardErrorCode.REMOTE_TASK_MISMATCH;
 import static io.trino.util.Failures.REMOTE_TASK_MISMATCH_ERROR;
 import static io.trino.util.Failures.WORKER_NODE_ERROR;
@@ -101,13 +104,13 @@ public final class HttpPageBufferClient
      * For each request, the addPage method will be called zero or more times,
      * followed by either requestComplete or clientFinished (if buffer complete).  If the client is
      * closed, requestComplete or bufferFinished may never be called.
-     * <p/>
+     * <p>
      * <b>NOTE:</b> Implementations of this interface are not allowed to perform
      * blocking operations.
      */
     public interface ClientCallback
     {
-        boolean addPages(HttpPageBufferClient client, List<SerializedPage> pages);
+        boolean addPages(HttpPageBufferClient client, List<Slice> pages);
 
         void requestComplete(HttpPageBufferClient client);
 
@@ -121,9 +124,10 @@ public final class HttpPageBufferClient
     private final DataIntegrityVerification dataIntegrityVerification;
     private final DataSize maxResponseSize;
     private final boolean acknowledgePages;
+    private final TaskId remoteTaskId;
     private final URI location;
     private final ClientCallback clientCallback;
-    private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService scheduledExecutor;
     private final Backoff backoff;
 
     @GuardedBy("this")
@@ -140,6 +144,10 @@ public final class HttpPageBufferClient
     private boolean completed;
     @GuardedBy("this")
     private String taskInstanceId;
+    private volatile long lastRequestStartNanos;
+    private volatile long lastRequestDurationMillis;
+    // it is synchronized on `this` for update
+    private volatile long averageRequestSizeInBytes;
 
     private final AtomicLong rowsReceived = new AtomicLong();
     private final AtomicInteger pagesReceived = new AtomicInteger();
@@ -149,9 +157,11 @@ public final class HttpPageBufferClient
 
     private final AtomicInteger requestsScheduled = new AtomicInteger();
     private final AtomicInteger requestsCompleted = new AtomicInteger();
+    private final AtomicInteger requestsSucceeded = new AtomicInteger();
     private final AtomicInteger requestsFailed = new AtomicInteger();
 
     private final Executor pageBufferClientCallbackExecutor;
+    private final Ticker ticker;
 
     public HttpPageBufferClient(
             String selfAddress,
@@ -160,9 +170,10 @@ public final class HttpPageBufferClient
             DataSize maxResponseSize,
             Duration maxErrorDuration,
             boolean acknowledgePages,
+            TaskId remoteTaskId,
             URI location,
             ClientCallback clientCallback,
-            ScheduledExecutorService scheduler,
+            ScheduledExecutorService scheduledExecutor,
             Executor pageBufferClientCallbackExecutor)
     {
         this(
@@ -172,9 +183,10 @@ public final class HttpPageBufferClient
                 maxResponseSize,
                 maxErrorDuration,
                 acknowledgePages,
+                remoteTaskId,
                 location,
                 clientCallback,
-                scheduler,
+                scheduledExecutor,
                 Ticker.systemTicker(),
                 pageBufferClientCallbackExecutor);
     }
@@ -186,9 +198,10 @@ public final class HttpPageBufferClient
             DataSize maxResponseSize,
             Duration maxErrorDuration,
             boolean acknowledgePages,
+            TaskId remoteTaskId,
             URI location,
             ClientCallback clientCallback,
-            ScheduledExecutorService scheduler,
+            ScheduledExecutorService scheduledExecutor,
             Ticker ticker,
             Executor pageBufferClientCallbackExecutor)
     {
@@ -197,13 +210,15 @@ public final class HttpPageBufferClient
         this.dataIntegrityVerification = requireNonNull(dataIntegrityVerification, "dataIntegrityVerification is null");
         this.maxResponseSize = requireNonNull(maxResponseSize, "maxResponseSize is null");
         this.acknowledgePages = acknowledgePages;
+        this.remoteTaskId = requireNonNull(remoteTaskId, "remoteTaskId is null");
         this.location = requireNonNull(location, "location is null");
         this.clientCallback = requireNonNull(clientCallback, "clientCallback is null");
-        this.scheduler = requireNonNull(scheduler, "scheduler is null");
+        this.scheduledExecutor = requireNonNull(scheduledExecutor, "scheduledExecutor is null");
         this.pageBufferClientCallbackExecutor = requireNonNull(pageBufferClientCallbackExecutor, "pageBufferClientCallbackExecutor is null");
         requireNonNull(maxErrorDuration, "maxErrorDuration is null");
         requireNonNull(ticker, "ticker is null");
         this.backoff = new Backoff(maxErrorDuration, ticker);
+        this.ticker = ticker;
     }
 
     public synchronized PageBufferClientStatus getStatus()
@@ -243,7 +258,18 @@ public final class HttpPageBufferClient
                 requestsScheduled.get(),
                 requestsCompleted.get(),
                 requestsFailed.get(),
+                requestsSucceeded.get(),
                 httpRequestState);
+    }
+
+    public TaskId getRemoteTaskId()
+    {
+        return remoteTaskId;
+    }
+
+    public long getAverageRequestSizeInBytes()
+    {
+        return averageRequestSizeInBytes;
     }
 
     public synchronized boolean isRunning()
@@ -254,10 +280,10 @@ public final class HttpPageBufferClient
     @Override
     public void close()
     {
-        boolean shouldSendDelete;
+        boolean shouldDestroyTaskResults;
         Future<?> future;
         synchronized (this) {
-            shouldSendDelete = !closed;
+            shouldDestroyTaskResults = !closed;
 
             closed = true;
 
@@ -272,9 +298,9 @@ public final class HttpPageBufferClient
             future.cancel(true);
         }
 
-        // abort the output buffer on the remote node; response of delete is ignored
-        if (shouldSendDelete) {
-            sendDelete();
+        // destroy task results on the remote node; response is ignored
+        if (shouldDestroyTaskResults) {
+            destroyTaskResults();
         }
     }
 
@@ -289,11 +315,12 @@ public final class HttpPageBufferClient
         backoff.startRequest();
 
         long delayNanos = backoff.getBackoffDelayNanos();
-        scheduler.schedule(() -> {
+        scheduledExecutor.schedule(() -> {
             try {
                 initiateRequest();
             }
             catch (Throwable t) {
+                assertNotHoldsLock(HttpPageBufferClient.this);
                 // should not happen, but be safe and fail the operator
                 clientCallback.clientFailed(HttpPageBufferClient.this, t);
             }
@@ -301,6 +328,11 @@ public final class HttpPageBufferClient
 
         lastUpdate = DateTime.now();
         requestsScheduled.incrementAndGet();
+    }
+
+    public long getLastRequestDurationMillis()
+    {
+        return lastRequestDurationMillis;
     }
 
     private synchronized void initiateRequest()
@@ -311,7 +343,7 @@ public final class HttpPageBufferClient
         }
 
         if (completed) {
-            sendDelete();
+            destroyTaskResults();
         }
         else {
             sendGetResults();
@@ -323,6 +355,7 @@ public final class HttpPageBufferClient
     private synchronized void sendGetResults()
     {
         URI uri = HttpUriBuilder.uriBuilderFrom(location).appendPath(String.valueOf(token)).build();
+        lastRequestStartNanos = ticker.read();
         HttpResponseFuture<PagesResponse> resultFuture = httpClient.executeAsync(
                 prepareGet()
                         .setHeader(TRINO_MAX_SIZE, maxResponseSize.toString())
@@ -335,12 +368,17 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(PagesResponse result)
             {
-                assertNotHoldsLock(this);
-
+                assertNotHoldsLock(HttpPageBufferClient.this);
+                lastRequestDurationMillis = (ticker.read() - lastRequestStartNanos) / 1_000_000;
                 backoff.success();
 
-                List<SerializedPage> pages;
+                List<Slice> pages;
+                boolean pagesAccepted;
                 try {
+                    if (result.isTaskFailed()) {
+                        throw new TrinoException(REMOTE_TASK_FAILED, format("Remote task failed: %s", remoteTaskId));
+                    }
+
                     boolean shouldAcknowledge = false;
                     synchronized (HttpPageBufferClient.this) {
                         if (taskInstanceId == null) {
@@ -395,19 +433,29 @@ public final class HttpPageBufferClient
                     // clientCallback can keep stats of requests and responses. For example, it may
                     // keep track of how often a client returns empty response and adjust request
                     // frequency or buffer size.
-                    if (clientCallback.addPages(HttpPageBufferClient.this, pages)) {
-                        pagesReceived.addAndGet(pages.size());
-                        rowsReceived.addAndGet(pages.stream().mapToLong(SerializedPage::getPositionCount).sum());
-                    }
-                    else {
-                        pagesRejected.addAndGet(pages.size());
-                        rowsRejected.addAndGet(pages.stream().mapToLong(SerializedPage::getPositionCount).sum());
-                    }
+                    pagesAccepted = clientCallback.addPages(HttpPageBufferClient.this, pages);
                 }
                 catch (TrinoException e) {
                     handleFailure(e, resultFuture);
                     return;
                 }
+
+                // update client stats
+                if (!pages.isEmpty()) {
+                    int pageCount = pages.size();
+                    long rowCount = pages.stream().mapToLong(PagesSerdeUtil::getSerializedPagePositionCount).sum();
+                    if (pagesAccepted) {
+                        pagesReceived.addAndGet(pageCount);
+                        rowsReceived.addAndGet(rowCount);
+                    }
+                    else {
+                        pagesRejected.addAndGet(pageCount);
+                        rowsRejected.addAndGet(rowCount);
+                    }
+                }
+                requestsCompleted.incrementAndGet();
+                long responseSize = pages.stream().mapToLong(Slice::length).sum();
+                requestSucceeded(responseSize);
 
                 synchronized (HttpPageBufferClient.this) {
                     // client is complete, acknowledge it by sending it a delete in the next request
@@ -419,7 +467,6 @@ public final class HttpPageBufferClient
                     }
                     lastUpdate = DateTime.now();
                 }
-                requestsCompleted.incrementAndGet();
                 clientCallback.requestComplete(HttpPageBufferClient.this);
             }
 
@@ -427,7 +474,9 @@ public final class HttpPageBufferClient
             public void onFailure(Throwable t)
             {
                 log.debug("Request to %s failed %s", uri, t);
-                assertNotHoldsLock(this);
+                assertNotHoldsLock(HttpPageBufferClient.this);
+
+                lastRequestDurationMillis = (ticker.read() - lastRequestStartNanos) / 1_000_000;
 
                 if (t instanceof ChecksumVerificationException) {
                     switch (dataIntegrityVerification) {
@@ -460,7 +509,15 @@ public final class HttpPageBufferClient
         }, pageBufferClientCallbackExecutor);
     }
 
-    private synchronized void sendDelete()
+    @VisibleForTesting
+    synchronized void requestSucceeded(long responseSize)
+    {
+        int successfulRequests = requestsSucceeded.incrementAndGet();
+        // AVG_n = AVG_(n-1) * (n-1)/n + VALUE_n / n
+        averageRequestSizeInBytes = (long) ((1.0 * averageRequestSizeInBytes * (successfulRequests - 1)) + responseSize) / successfulRequests;
+    }
+
+    private synchronized void destroyTaskResults()
     {
         HttpResponseFuture<StatusResponse> resultFuture = httpClient.executeAsync(prepareDelete().setUri(location).build(), createStatusResponseHandler());
         future = resultFuture;
@@ -469,9 +526,9 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(@Nullable StatusResponse result)
             {
-                assertNotHoldsLock(this);
+                assertNotHoldsLock(HttpPageBufferClient.this);
 
-                if (result.getStatusCode() != NO_CONTENT.code()) {
+                if (result != null && result.getStatusCode() != NO_CONTENT.code()) {
                     onFailure(new TrinoTransportException(
                             REMOTE_BUFFER_CLOSE_FAILED,
                             fromUri(location),
@@ -494,7 +551,7 @@ public final class HttpPageBufferClient
             @Override
             public void onFailure(Throwable t)
             {
-                assertNotHoldsLock(this);
+                assertNotHoldsLock(HttpPageBufferClient.this);
 
                 log.error("Request to delete %s failed %s", location, t);
                 if (!(t instanceof TrinoException) && backoff.failure()) {
@@ -513,13 +570,14 @@ public final class HttpPageBufferClient
     @SuppressWarnings("checkstyle:IllegalToken")
     private static void assertNotHoldsLock(Object lock)
     {
+        // By design, clientCallback must not be called when holding a lock on HttpPageBufferClient.this.
+        // This check enforce the requirement and help reason about this invariant locally.
         assert !Thread.holdsLock(lock) : "Cannot execute this method while holding a lock";
     }
 
     private void handleFailure(Throwable t, HttpResponseFuture<?> expectedFuture)
     {
-        // Cannot delegate to other callback while holding a lock on this
-        assertNotHoldsLock(this);
+        assertNotHoldsLock(HttpPageBufferClient.this);
 
         requestsFailed.incrementAndGet();
         requestsCompleted.incrementAndGet();
@@ -549,11 +607,7 @@ public final class HttpPageBufferClient
 
         HttpPageBufferClient that = (HttpPageBufferClient) o;
 
-        if (!location.equals(that.location)) {
-            return false;
-        }
-
-        return true;
+        return location.equals(that.location);
     }
 
     @Override
@@ -615,7 +669,12 @@ public final class HttpPageBufferClient
                 // no content means no content was created within the wait period, but query is still ok
                 // if job is finished, complete is set in the response
                 if (response.getStatusCode() == HttpStatus.NO_CONTENT.code()) {
-                    return createEmptyPagesResponse(getTaskInstanceId(response, uri), getToken(response, uri), getNextToken(response, uri), getComplete(response, uri));
+                    return createEmptyPagesResponse(
+                            getTaskInstanceId(response, uri),
+                            getToken(response, uri),
+                            getNextToken(response, uri),
+                            getComplete(response, uri),
+                            getTaskFailed(response, uri));
                 }
 
                 // otherwise we must have gotten an OK response, everything else is considered fatal
@@ -651,18 +710,19 @@ public final class HttpPageBufferClient
                 long token = getToken(response, uri);
                 long nextToken = getNextToken(response, uri);
                 boolean complete = getComplete(response, uri);
+                boolean remoteTaskFailed = getTaskFailed(response, uri);
 
-                try (SliceInput input = new InputStreamSliceInput(response.getInputStream())) {
+                try (LittleEndianDataInputStream input = new LittleEndianDataInputStream(response.getInputStream())) {
                     int magic = input.readInt();
                     if (magic != SERIALIZED_PAGES_MAGIC) {
                         throw new IllegalStateException(format("Invalid stream header, expected 0x%08x, but was 0x%08x", SERIALIZED_PAGES_MAGIC, magic));
                     }
                     long checksum = input.readLong();
                     int pagesCount = input.readInt();
-                    List<SerializedPage> pages = ImmutableList.copyOf(readSerializedPages(input));
+                    List<Slice> pages = ImmutableList.copyOf(readSerializedPages(input));
                     verifyChecksum(checksum, pages);
                     checkState(pages.size() == pagesCount, "Wrong number of pages, expected %s, but read %s", pagesCount, pages.size());
-                    return createPagesResponse(taskInstanceId, token, nextToken, pages, complete);
+                    return createPagesResponse(taskInstanceId, token, nextToken, pages, complete, remoteTaskFailed);
                 }
                 catch (IOException e) {
                     throw new RuntimeException(e);
@@ -673,7 +733,7 @@ public final class HttpPageBufferClient
             }
         }
 
-        private void verifyChecksum(long readChecksum, List<SerializedPage> pages)
+        private void verifyChecksum(long readChecksum, List<Slice> pages)
         {
             if (dataIntegrityVerificationEnabled) {
                 long calculatedChecksum = calculateChecksum(pages);
@@ -724,6 +784,15 @@ public final class HttpPageBufferClient
             return Boolean.parseBoolean(bufferComplete);
         }
 
+        private static boolean getTaskFailed(Response response, URI uri)
+        {
+            String taskFailed = response.getHeader(TRINO_TASK_FAILED);
+            if (taskFailed == null) {
+                throw new PageTransportErrorException(fromUri(uri), format("Expected %s header", TRINO_TASK_FAILED));
+            }
+            return Boolean.parseBoolean(taskFailed);
+        }
+
         private static boolean mediaTypeMatches(String value, MediaType range)
         {
             try {
@@ -737,29 +806,31 @@ public final class HttpPageBufferClient
 
     public static class PagesResponse
     {
-        public static PagesResponse createPagesResponse(String taskInstanceId, long token, long nextToken, Iterable<SerializedPage> pages, boolean complete)
+        public static PagesResponse createPagesResponse(String taskInstanceId, long token, long nextToken, Iterable<Slice> pages, boolean complete, boolean taskFailed)
         {
-            return new PagesResponse(taskInstanceId, token, nextToken, pages, complete);
+            return new PagesResponse(taskInstanceId, token, nextToken, pages, complete, taskFailed);
         }
 
-        public static PagesResponse createEmptyPagesResponse(String taskInstanceId, long token, long nextToken, boolean complete)
+        public static PagesResponse createEmptyPagesResponse(String taskInstanceId, long token, long nextToken, boolean complete, boolean taskFailed)
         {
-            return new PagesResponse(taskInstanceId, token, nextToken, ImmutableList.of(), complete);
+            return new PagesResponse(taskInstanceId, token, nextToken, ImmutableList.of(), complete, taskFailed);
         }
 
         private final String taskInstanceId;
         private final long token;
         private final long nextToken;
-        private final List<SerializedPage> pages;
+        private final List<Slice> pages;
         private final boolean clientComplete;
+        private final boolean taskFailed;
 
-        private PagesResponse(String taskInstanceId, long token, long nextToken, Iterable<SerializedPage> pages, boolean clientComplete)
+        private PagesResponse(String taskInstanceId, long token, long nextToken, Iterable<Slice> pages, boolean clientComplete, boolean taskFailed)
         {
             this.taskInstanceId = taskInstanceId;
             this.token = token;
             this.nextToken = nextToken;
             this.pages = ImmutableList.copyOf(pages);
             this.clientComplete = clientComplete;
+            this.taskFailed = taskFailed;
         }
 
         public long getToken()
@@ -772,7 +843,7 @@ public final class HttpPageBufferClient
             return nextToken;
         }
 
-        public List<SerializedPage> getPages()
+        public List<Slice> getPages()
         {
             return pages;
         }
@@ -787,6 +858,11 @@ public final class HttpPageBufferClient
             return taskInstanceId;
         }
 
+        public boolean isTaskFailed()
+        {
+            return taskFailed;
+        }
+
         @Override
         public String toString()
         {
@@ -795,6 +871,7 @@ public final class HttpPageBufferClient
                     .add("nextToken", nextToken)
                     .add("pagesSize", pages.size())
                     .add("clientComplete", clientComplete)
+                    .add("taskFailed", taskFailed)
                     .toString();
         }
     }

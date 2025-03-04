@@ -19,18 +19,17 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ListMultimap;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.errorprone.annotations.ThreadSafe;
 import io.airlift.stats.CounterStat;
 import io.airlift.stats.Distribution;
 import io.airlift.units.Duration;
 import io.trino.Session;
-import io.trino.execution.Lifespan;
 import io.trino.execution.TaskId;
 import io.trino.memory.QueryContextVisitor;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.memory.context.MemoryTrackingContext;
+import io.trino.spi.metrics.Metrics;
 import org.joda.time.DateTime;
-
-import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.Iterator;
 import java.util.List;
@@ -43,6 +42,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.units.DataSize.succinctBytes;
@@ -56,6 +56,7 @@ public class PipelineContext
     private final TaskContext taskContext;
     private final Executor notificationExecutor;
     private final ScheduledExecutorService yieldExecutor;
+    private final ScheduledExecutorService timeoutExecutor;
     private final int pipelineId;
 
     private final boolean inputPipeline;
@@ -93,16 +94,22 @@ public class PipelineContext
     private final CounterStat processedInputDataSize = new CounterStat();
     private final CounterStat processedInputPositions = new CounterStat();
 
+    private final AtomicLong inputBlockedTime = new AtomicLong();
+
     private final CounterStat outputDataSize = new CounterStat();
     private final CounterStat outputPositions = new CounterStat();
+
+    private final AtomicLong outputBlockedTime = new AtomicLong();
 
     private final AtomicLong physicalWrittenDataSize = new AtomicLong();
 
     private final ConcurrentMap<Integer, OperatorStats> operatorSummaries = new ConcurrentHashMap<>();
+    // pre-merged metrics which are shared among instances of given operator within pipeline
+    private final ConcurrentMap<Integer, Metrics> pipelineOperatorMetrics = new ConcurrentHashMap<>();
 
     private final MemoryTrackingContext pipelineMemoryContext;
 
-    public PipelineContext(int pipelineId, TaskContext taskContext, Executor notificationExecutor, ScheduledExecutorService yieldExecutor, MemoryTrackingContext pipelineMemoryContext, boolean inputPipeline, boolean outputPipeline, boolean partitioned)
+    public PipelineContext(int pipelineId, TaskContext taskContext, Executor notificationExecutor, ScheduledExecutorService yieldExecutor, ScheduledExecutorService timeoutExecutor, MemoryTrackingContext pipelineMemoryContext, boolean inputPipeline, boolean outputPipeline, boolean partitioned)
     {
         this.pipelineId = pipelineId;
         this.inputPipeline = inputPipeline;
@@ -111,6 +118,7 @@ public class PipelineContext
         this.taskContext = requireNonNull(taskContext, "taskContext is null");
         this.notificationExecutor = requireNonNull(notificationExecutor, "notificationExecutor is null");
         this.yieldExecutor = requireNonNull(yieldExecutor, "yieldExecutor is null");
+        this.timeoutExecutor = requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         this.pipelineMemoryContext = requireNonNull(pipelineMemoryContext, "pipelineMemoryContext is null");
         // Initialize the local memory contexts with the ExchangeOperator tag as ExchangeOperator will do the local memory allocations
         pipelineMemoryContext.initializeLocalMemoryContexts(ExchangeOperator.class.getSimpleName());
@@ -143,18 +151,18 @@ public class PipelineContext
 
     public DriverContext addDriverContext()
     {
-        return addDriverContext(Lifespan.taskWide(), 0);
+        return addDriverContext(0);
     }
 
-    public DriverContext addDriverContext(Lifespan lifespan, long splitWeight)
+    public DriverContext addDriverContext(long splitWeight)
     {
         checkArgument(partitioned || splitWeight == 0, "Only partitioned splits should have weights");
         DriverContext driverContext = new DriverContext(
                 this,
                 notificationExecutor,
                 yieldExecutor,
+                timeoutExecutor,
                 pipelineMemoryContext.newMemoryTrackingContext(),
-                lifespan,
                 splitWeight);
         drivers.add(driverContext);
         return driverContext;
@@ -172,6 +180,11 @@ public class PipelineContext
         if (partitioned && weightSum != 0) {
             totalSplitsWeight.addAndGet(weightSum);
         }
+    }
+
+    public void setPipelineOperatorMetrics(int operatorId, Metrics metrics)
+    {
+        pipelineOperatorMetrics.put(operatorId, metrics);
     }
 
     public void driverFinished(DriverContext driverContext)
@@ -203,7 +216,8 @@ public class PipelineContext
         // merge the operator stats into the operator summary
         List<OperatorStats> operators = driverStats.getOperatorStats();
         for (OperatorStats operator : operators) {
-            operatorSummaries.merge(operator.getOperatorId(), operator, OperatorStats::add);
+            Metrics pipelineLevelMetrics = pipelineOperatorMetrics.getOrDefault(operator.getOperatorId(), Metrics.EMPTY);
+            operatorSummaries.merge(operator.getOperatorId(), operator, (first, second) -> first.addFillingPipelineMetrics(second, pipelineLevelMetrics));
         }
 
         physicalInputDataSize.update(driverStats.getPhysicalInputDataSize().toBytes());
@@ -219,8 +233,12 @@ public class PipelineContext
         processedInputDataSize.update(driverStats.getProcessedInputDataSize().toBytes());
         processedInputPositions.update(driverStats.getProcessedInputPositions());
 
+        inputBlockedTime.getAndAdd(driverStats.getInputBlockedTime().roundTo(NANOSECONDS));
+
         outputDataSize.update(driverStats.getOutputDataSize().toBytes());
         outputPositions.update(driverStats.getOutputPositions());
+
+        outputBlockedTime.getAndAdd(driverStats.getOutputBlockedTime().roundTo(NANOSECONDS));
 
         physicalWrittenDataSize.getAndAdd(driverStats.getPhysicalWrittenDataSize().toBytes());
     }
@@ -235,14 +253,14 @@ public class PipelineContext
         taskContext.start();
     }
 
-    public void failed(Throwable cause)
+    public void driverFailed(Throwable cause)
     {
         taskContext.failed(cause);
     }
 
-    public boolean isDone()
+    public boolean isTerminatingOrDone()
     {
-        return taskContext.isDone();
+        return taskContext.isTerminatingOrDone();
     }
 
     public synchronized ListenableFuture<Void> reserveSpill(long bytes)
@@ -256,14 +274,9 @@ public class PipelineContext
         taskContext.freeSpill(bytes);
     }
 
-    public LocalMemoryContext localSystemMemoryContext()
+    public LocalMemoryContext localMemoryContext()
     {
-        return pipelineMemoryContext.localSystemMemoryContext();
-    }
-
-    public void moreMemoryAvailable()
-    {
-        drivers.forEach(DriverContext::moreMemoryAvailable);
+        return pipelineMemoryContext.localUserMemoryContext();
     }
 
     public boolean isPerOperatorCpuTimerEnabled()
@@ -316,11 +329,24 @@ public class PipelineContext
         return stat;
     }
 
+    public long getWriterInputDataSize()
+    {
+        // Avoid using stream api due to performance reasons
+        long writerInputDataSize = 0;
+        for (DriverContext context : drivers) {
+            writerInputDataSize += context.getWriterInputDataSize();
+        }
+        return writerInputDataSize;
+    }
+
     public long getPhysicalWrittenDataSize()
     {
-        return drivers.stream()
-                .mapToLong(DriverContext::getPhysicalWrittenDataSize)
-                .sum();
+        // Avoid using stream api due to performance reasons
+        long physicalWrittenBytes = 0;
+        for (DriverContext context : drivers) {
+            physicalWrittenBytes += context.getPhysicalWrittenDataSize();
+        }
+        return physicalWrittenBytes;
     }
 
     public PipelineStatus getPipelineStatus()
@@ -373,8 +399,12 @@ public class PipelineContext
         long processedInputPositions = this.processedInputPositions.getTotalCount();
         long physicalInputReadTime = this.physicalInputReadTime.get();
 
+        long inputBlockedTime = this.inputBlockedTime.get();
+
         long outputDataSize = this.outputDataSize.getTotalCount();
         long outputPositions = this.outputPositions.getTotalCount();
+
+        long outputBlockedTime = this.outputBlockedTime.get();
 
         long physicalWrittenDataSize = this.physicalWrittenDataSize.get();
 
@@ -383,7 +413,8 @@ public class PipelineContext
         boolean unfinishedDriversFullyBlocked = true;
 
         TreeMap<Integer, OperatorStats> operatorSummaries = new TreeMap<>(this.operatorSummaries);
-        ListMultimap<Integer, OperatorStats> runningOperators = ArrayListMultimap.create();
+        // Expect the same number of operators as existing summaries, with one operator per driver context in the resulting multimap
+        ListMultimap<Integer, OperatorStats> runningOperators = ArrayListMultimap.create(operatorSummaries.size(), driverContexts.size());
         ImmutableList.Builder<DriverStats> drivers = ImmutableList.builderWithExpectedSize(driverContexts.size());
         for (DriverContext driverContext : driverContexts) {
             DriverStats driverStats = driverContext.getDriverStats();
@@ -420,30 +451,39 @@ public class PipelineContext
             processedInputDataSize += driverStats.getProcessedInputDataSize().toBytes();
             processedInputPositions += driverStats.getProcessedInputPositions();
 
+            inputBlockedTime += driverStats.getInputBlockedTime().roundTo(NANOSECONDS);
+
             outputDataSize += driverStats.getOutputDataSize().toBytes();
             outputPositions += driverStats.getOutputPositions();
+
+            outputBlockedTime += driverStats.getOutputBlockedTime().roundTo(NANOSECONDS);
 
             physicalWrittenDataSize += driverStats.getPhysicalWrittenDataSize().toBytes();
         }
 
-        // merge the running operator stats into the operator summary
-        for (Integer operatorId : runningOperators.keySet()) {
+        // Computes the combined stats from existing completed operators and those still running
+        BiFunction<Integer, OperatorStats, OperatorStats> combineOperatorStats = (operatorId, current) -> {
             List<OperatorStats> runningStats = runningOperators.get(operatorId);
             if (runningStats.isEmpty()) {
-                continue;
+                return current;
             }
-            OperatorStats current = operatorSummaries.get(operatorId);
-            OperatorStats combined;
+            Metrics pipelineLevelMetrics = pipelineOperatorMetrics.getOrDefault(operatorId, Metrics.EMPTY);
             if (current != null) {
-                combined = current.add(runningStats);
+                return current.addFillingPipelineMetrics(runningStats, pipelineLevelMetrics);
             }
             else {
-                combined = runningStats.get(0);
+                OperatorStats combined = runningStats.get(0);
                 if (runningStats.size() > 1) {
-                    combined = combined.add(runningStats.subList(1, runningStats.size()));
+                    combined = combined.addFillingPipelineMetrics(runningStats.subList(1, runningStats.size()), pipelineLevelMetrics);
                 }
+                else if (pipelineLevelMetrics != Metrics.EMPTY) {
+                    combined = combined.withPipelineMetrics(pipelineLevelMetrics);
+                }
+                return combined;
             }
-            operatorSummaries.put(operatorId, combined);
+        };
+        for (Integer operatorId : runningOperators.keySet()) {
+            operatorSummaries.compute(operatorId, combineOperatorStats);
         }
 
         PipelineStatus pipelineStatus = pipelineStatusBuilder.build();
@@ -471,7 +511,6 @@ public class PipelineContext
 
                 succinctBytes(pipelineMemoryContext.getUserMemory()),
                 succinctBytes(pipelineMemoryContext.getRevocableMemory()),
-                succinctBytes(pipelineMemoryContext.getSystemMemory()),
 
                 queuedTime.snapshot(),
                 elapsedTime.snapshot(),
@@ -495,8 +534,12 @@ public class PipelineContext
                 succinctBytes(processedInputDataSize),
                 processedInputPositions,
 
+                new Duration(inputBlockedTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
+
                 succinctBytes(outputDataSize),
                 outputPositions,
+
+                new Duration(outputBlockedTime, NANOSECONDS).convertToMostSuccinctTimeUnit(),
 
                 succinctBytes(physicalWrittenDataSize),
 

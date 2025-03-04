@@ -17,13 +17,13 @@ import io.airlift.drift.annotations.ThriftConstructor;
 import io.airlift.drift.annotations.ThriftField;
 import io.airlift.drift.annotations.ThriftStruct;
 import io.trino.plugin.thrift.api.TrinoThriftBlock;
-import io.trino.spi.block.AbstractArrayBlock;
 import io.trino.spi.block.ArrayBlock;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.LongArrayBlock;
+import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.Type;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.Objects;
@@ -89,7 +89,7 @@ public final class TrinoThriftBigintArray
     }
 
     @Override
-    public Block toBlock(Type desiredType)
+    public ValueBlock toBlock(Type desiredType)
     {
         checkArgument(desiredType.getTypeParameters().size() == 1 && BIGINT.equals(desiredType.getTypeParameters().get(0)),
                 "type doesn't match: %s", desiredType);
@@ -144,12 +144,18 @@ public final class TrinoThriftBigintArray
 
     public static TrinoThriftBlock fromBlock(Block block)
     {
-        checkArgument(block instanceof AbstractArrayBlock, "block is not of an array type");
-        AbstractArrayBlock arrayBlock = (AbstractArrayBlock) block;
-        int positions = arrayBlock.getPositionCount();
+        int positions = block.getPositionCount();
         if (positions == 0) {
             return bigintArrayData(new TrinoThriftBigintArray(null, null, null));
         }
+        if (block instanceof RunLengthEncodedBlock && block.isNull(0)) {
+            boolean[] nulls = new boolean[positions];
+            Arrays.fill(nulls, true);
+            return bigintArrayData(new TrinoThriftBigintArray(nulls, null, null));
+        }
+        checkArgument(block instanceof ArrayBlock, "block is not of an array type");
+        ArrayBlock arrayBlock = (ArrayBlock) block;
+
         boolean[] nulls = null;
         int[] sizes = null;
         for (int position = 0; position < positions; position++) {

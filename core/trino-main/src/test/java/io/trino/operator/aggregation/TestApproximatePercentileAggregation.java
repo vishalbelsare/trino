@@ -15,12 +15,14 @@ package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.spi.TrinoException;
+import io.trino.spi.block.ArrayBlockBuilder;
+import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.ArrayType;
 import io.trino.sql.analyzer.TypeSignatureProvider;
-import io.trino.sql.tree.QualifiedName;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
@@ -32,6 +34,8 @@ import static io.trino.block.BlockAssertions.createLongSequenceBlock;
 import static io.trino.block.BlockAssertions.createLongsBlock;
 import static io.trino.block.BlockAssertions.createSequenceBlockOfReal;
 import static io.trino.operator.aggregation.AggregationTestUtils.assertAggregation;
+import static io.trino.operator.aggregation.AggregationTestUtils.assertAggregationFails;
+import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RealType.REAL;
@@ -68,185 +72,185 @@ public class TestApproximatePercentileAggregation
         // regular approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE,
                 null,
                 createLongsBlock(null, null),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE,
                 1L,
                 createLongsBlock(null, 1L),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE,
                 2L,
                 createLongsBlock(null, 1L, 2L, 3L),
-                createRLEBlock(0.5, 4));
+                createRleBlock(0.5, 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE,
                 2L,
                 createLongsBlock(1L, 2L, 3L),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE,
                 3L,
                 createLongsBlock(1L, null, 2L, 2L, null, 2L, 2L, null, 2L, 2L, null, 3L, 3L, null, 3L, null, 3L, 4L, 5L, 6L, 7L),
-                createRLEBlock(0.5, 21));
+                createRleBlock(0.5, 21));
 
         // array of approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY,
                 null,
                 createLongsBlock(null, null),
-                createRLEBlock(ImmutableList.of(0.5), 2));
+                createRleBlock(ImmutableList.of(0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY,
                 null,
                 createLongsBlock(null, null),
-                createRLEBlock(ImmutableList.of(0.5, 0.99), 2));
+                createRleBlock(ImmutableList.of(0.5, 0.99), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1L, 1L),
                 createLongsBlock(null, 1L),
-                createRLEBlock(ImmutableList.of(0.5, 0.5), 2));
+                createRleBlock(ImmutableList.of(0.5, 0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1L, 2L, 3L),
                 createLongsBlock(null, 1L, 2L, 3L),
-                createRLEBlock(ImmutableList.of(0.2, 0.5, 0.8), 4));
+                createRleBlock(ImmutableList.of(0.2, 0.5, 0.8), 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(2L, 3L),
                 createLongsBlock(1L, 2L, 3L),
-                createRLEBlock(ImmutableList.of(0.5, 0.99), 3));
+                createRleBlock(ImmutableList.of(0.5, 0.99), 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1L, 3L),
                 createLongsBlock(1L, null, 2L, 2L, null, 2L, 2L, null, 2L, 2L, null, 3L, 3L, null, 3L, null, 3L, 4L, 5L, 6L, 7L),
-                createRLEBlock(ImmutableList.of(0.01, 0.5), 21));
+                createRleBlock(ImmutableList.of(0.01, 0.5), 21));
 
         // unsorted percentiles
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(3L, 1L, 2L),
                 createLongsBlock(null, 1L, 2L, 3L),
-                createRLEBlock(ImmutableList.of(0.8, 0.2, 0.5), 4));
+                createRleBlock(ImmutableList.of(0.8, 0.2, 0.5), 4));
 
         // weighted approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED,
                 null,
                 createLongsBlock(null, null),
                 createLongsBlock(1L, 1L),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED,
                 1L,
                 createLongsBlock(null, 1L),
                 createDoublesBlock(1.0, 1.0),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2L,
                 createLongsBlock(null, 1L, 2L, 3L),
                 createDoublesBlock(1.0, 1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 4));
+                createRleBlock(0.5, 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2L,
                 createLongsBlock(1L, 2L, 3L),
                 createDoublesBlock(1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2L,
                 createLongsBlock(1L, 2L, 3L),
                 createDoublesBlock(23.4, 23.4, 23.4),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED,
                 3L,
                 createLongsBlock(1L, null, 2L, null, 2L, null, 2L, null, 3L, null, 3L, null, 3L, 4L, 5L, 6L, 7L),
                 createDoublesBlock(1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 17));
+                createRleBlock(0.5, 17));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED,
                 3L,
                 createLongsBlock(1L, null, 2L, null, 2L, null, 2L, null, 3L, null, 3L, null, 3L, 4L, 5L, 6L, 7L),
                 createDoublesBlock(1.1, 1.1, 2.2, 1.1, 2.2, 1.1, 2.2, 1.1, 2.2, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1),
-                createRLEBlock(0.5, 17));
+                createRleBlock(0.5, 17));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_WEIGHTED_WITH_ACCURACY,
                 9900L,
                 createLongSequenceBlock(0, 10000),
                 createDoubleRepeatBlock(1.0, 10000),
-                createRLEBlock(0.99, 10000),
-                createRLEBlock(0.001, 10000));
+                createRleBlock(0.99, 10000),
+                createRleBlock(0.001, 10000));
 
         // weighted + array of approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 LONG_APPROXIMATE_PERCENTILE_ARRAY_WEIGHTED,
                 ImmutableList.of(2L, 3L),
                 createLongsBlock(1L, 2L, 3L),
                 createDoublesBlock(4.0, 2.0, 1.0),
-                createRLEBlock(ImmutableList.of(0.5, 0.8), 3));
+                createRleBlock(ImmutableList.of(0.5, 0.8), 3));
     }
 
     @Test
@@ -255,192 +259,258 @@ public class TestApproximatePercentileAggregation
         // regular approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE,
                 null,
                 createBlockOfReals(null, null),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE,
                 1.0f,
                 createBlockOfReals(null, 1.0f),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE,
                 2.0f,
                 createBlockOfReals(null, 1.0f, 2.0f, 3.0f),
-                createRLEBlock(0.5, 4));
+                createRleBlock(0.5, 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE,
                 1.0f,
                 createBlockOfReals(-1.0f, 1.0f),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE,
                 -1.0f,
                 createBlockOfReals(-2.0f, 3.0f, -1.0f),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE,
                 2.0f,
                 createBlockOfReals(1.0f, 2.0f, 3.0f),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE,
                 3.0f,
                 createBlockOfReals(1.0f, null, 2.0f, 2.0f, null, 2.0f, 2.0f, null, 2.0f, 2.0f, null, 3.0f, 3.0f, null, 3.0f, null, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f),
-                createRLEBlock(0.5, 21));
+                createRleBlock(0.5, 21));
 
         // array of approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
                 null,
                 createBlockOfReals(null, null),
-                createRLEBlock(ImmutableList.of(0.5), 2));
+                createRleBlock(ImmutableList.of(0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
                 null,
                 createBlockOfReals(null, null),
-                createRLEBlock(ImmutableList.of(0.5, 0.5), 2));
+                createRleBlock(ImmutableList.of(0.5, 0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1.0f, 1.0f),
                 createBlockOfReals(null, 1.0f),
-                createRLEBlock(ImmutableList.of(0.5, 0.5), 2));
+                createRleBlock(ImmutableList.of(0.5, 0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1.0f, 2.0f, 3.0f),
                 createBlockOfReals(null, 1.0f, 2.0f, 3.0f),
-                createRLEBlock(ImmutableList.of(0.2, 0.5, 0.8), 4));
+                createRleBlock(ImmutableList.of(0.2, 0.5, 0.8), 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(2.0f, 3.0f),
                 createBlockOfReals(1.0f, 2.0f, 3.0f),
-                createRLEBlock(ImmutableList.of(0.5, 0.99), 3));
+                createRleBlock(ImmutableList.of(0.5, 0.99), 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1.0f, 3.0f),
                 createBlockOfReals(1.0f, null, 2.0f, 2.0f, null, 2.0f, 2.0f, null, 2.0f, 2.0f, null, 3.0f, 3.0f, null, 3.0f, null, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f),
-                createRLEBlock(ImmutableList.of(0.01, 0.5), 21));
+                createRleBlock(ImmutableList.of(0.01, 0.5), 21));
 
         // unsorted percentiles
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(3.0f, 1.0f, 2.0f),
                 createBlockOfReals(null, 1.0f, 2.0f, 3.0f),
-                createRLEBlock(ImmutableList.of(0.8, 0.2, 0.5), 4));
+                createRleBlock(ImmutableList.of(0.8, 0.2, 0.5), 4));
 
         // weighted approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
                 null,
                 createBlockOfReals(null, null),
                 createLongsBlock(1L, 1L),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
                 1.0f,
                 createBlockOfReals(null, 1.0f),
                 createDoublesBlock(1.0, 1.0),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.0f,
                 createBlockOfReals(null, 1.0f, 2.0f, 3.0f),
                 createDoublesBlock(1.0, 1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 4));
+                createRleBlock(0.5, 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.0f,
                 createBlockOfReals(1.0f, 2.0f, 3.0f),
                 createDoublesBlock(1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.75f,
                 createBlockOfReals(1.0f, null, 2.0f, null, 2.0f, null, 2.0f, null, 3.0f, null, 3.0f, null, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f),
                 createDoublesBlock(1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 17));
+                createRleBlock(0.5, 17));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.75f,
                 createBlockOfReals(1.0f, null, 2.0f, null, 2.0f, null, 2.0f, null, 3.0f, null, 3.0f, null, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f),
                 createDoublesBlock(1.1, 1.1, 2.2, 1.1, 2.2, 1.1, 2.2, 1.1, 2.2, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1),
-                createRLEBlock(0.5, 17));
+                createRleBlock(0.5, 17));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED_WITH_ACCURACY,
                 9900.0f,
                 createSequenceBlockOfReal(0, 10000),
                 createDoubleRepeatBlock(1, 10000),
-                createRLEBlock(0.99, 10000),
-                createRLEBlock(0.001, 10000));
+                createRleBlock(0.99, 10000),
+                createRleBlock(0.001, 10000));
 
         // weighted + array of approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 FLOAT_APPROXIMATE_PERCENTILE_ARRAY_WEIGHTED,
                 ImmutableList.of(1.5f, 2.6f),
                 createBlockOfReals(1.0f, 2.0f, 3.0f),
                 createDoublesBlock(4.0, 2.0, 1.0),
-                createRLEBlock(ImmutableList.of(0.5, 0.8), 3));
+                createRleBlock(ImmutableList.of(0.5, 0.8), 3));
+
+        // invalid inputs
+        for (Float invalidValue : List.of(Float.NaN, Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY)) {
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    FLOAT_APPROXIMATE_PERCENTILE,
+                    createBlockOfReals(invalidValue),
+                    createRleBlock(0.5, 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    FLOAT_APPROXIMATE_PERCENTILE_ARRAY,
+                    createBlockOfReals(invalidValue),
+                    createRleBlock(ImmutableList.of(0.5, 0.75), 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
+                    createBlockOfReals(1.0f),
+                    createDoublesBlock((double) invalidValue),
+                    createDoublesBlock(0.5))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED,
+                    createBlockOfReals(invalidValue),
+                    createDoublesBlock(1.0),
+                    createRleBlock(0.5, 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    FLOAT_APPROXIMATE_PERCENTILE_ARRAY_WEIGHTED,
+                    createBlockOfReals(invalidValue),
+                    createDoublesBlock(1.0),
+                    createRleBlock(ImmutableList.of(0.5, 0.75), 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    FLOAT_APPROXIMATE_PERCENTILE_ARRAY_WEIGHTED,
+                    createBlockOfReals(1.0f),
+                    createDoublesBlock((double) invalidValue),
+                    createRleBlock(ImmutableList.of(0.5, 0.75), 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            // for deprecated approx_percentile with accuracy we only validate accuracy for backward compatibility
+            assertAggregationFails(
+                    FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    FLOAT_APPROXIMATE_PERCENTILE_WEIGHTED_WITH_ACCURACY,
+                    createBlockOfReals(1.0f),
+                    createDoublesBlock(1.0),
+                    createDoublesBlock(0.99),
+                    createDoublesBlock((double) invalidValue))
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+        }
     }
 
     @Test
@@ -449,196 +519,259 @@ public class TestApproximatePercentileAggregation
         // regular approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE,
                 null,
                 createDoublesBlock(null, null),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE,
                 1.0,
                 createDoublesBlock(null, 1.0),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE,
                 2.0,
                 createDoublesBlock(null, 1.0, 2.0, 3.0),
-                createRLEBlock(0.5, 4));
+                createRleBlock(0.5, 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE,
                 2.0,
                 createDoublesBlock(1.0, 2.0, 3.0),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE,
                 3.0,
                 createDoublesBlock(1.0, null, 2.0, 2.0, null, 2.0, 2.0, null, 2.0, 2.0, null, 3.0, 3.0, null, 3.0, null, 3.0, 4.0, 5.0, 6.0, 7.0),
-                createRLEBlock(0.5, 21));
+                createRleBlock(0.5, 21));
 
         // array of approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
                 null,
                 createDoublesBlock(null, null),
-                createRLEBlock(ImmutableList.of(0.5), 2));
+                createRleBlock(ImmutableList.of(0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
                 null,
                 createDoublesBlock(null, null),
-                createRLEBlock(ImmutableList.of(0.5, 0.5), 2));
+                createRleBlock(ImmutableList.of(0.5, 0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1.0, 1.0),
                 createDoublesBlock(null, 1.0),
-                createRLEBlock(ImmutableList.of(0.5, 0.5), 2));
+                createRleBlock(ImmutableList.of(0.5, 0.5), 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1.0, 2.0, 3.0),
                 createDoublesBlock(null, 1.0, 2.0, 3.0),
-                createRLEBlock(ImmutableList.of(0.2, 0.5, 0.8), 4));
+                createRleBlock(ImmutableList.of(0.2, 0.5, 0.8), 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(2.0, 3.0),
                 createDoublesBlock(1.0, 2.0, 3.0),
-                createRLEBlock(ImmutableList.of(0.5, 0.99), 3));
+                createRleBlock(ImmutableList.of(0.5, 0.99), 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(1.0, 3.0),
                 createDoublesBlock(1.0, null, 2.0, 2.0, null, 2.0, 2.0, null, 2.0, 2.0, null, 3.0, 3.0, null, 3.0, null, 3.0, 4.0, 5.0, 6.0, 7.0),
-                createRLEBlock(ImmutableList.of(0.01, 0.5), 21));
+                createRleBlock(ImmutableList.of(0.01, 0.5), 21));
 
         // unsorted percentiles
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
                 ImmutableList.of(3.0, 1.0, 2.0),
                 createDoublesBlock(null, 1.0, 2.0, 3.0),
-                createRLEBlock(ImmutableList.of(0.8, 0.2, 0.5), 4));
+                createRleBlock(ImmutableList.of(0.8, 0.2, 0.5), 4));
 
         // weighted approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
                 null,
                 createDoublesBlock(null, null),
                 createLongsBlock(1L, 1L),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
                 1.0,
                 createDoublesBlock(null, 1.0),
                 createDoublesBlock(1.0, 1.0),
-                createRLEBlock(0.5, 2));
+                createRleBlock(0.5, 2));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.0,
                 createDoublesBlock(null, 1.0, 2.0, 3.0),
                 createDoublesBlock(1.0, 1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 4));
+                createRleBlock(0.5, 4));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.0,
                 createDoublesBlock(1.0, 2.0, 3.0),
                 createDoublesBlock(1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 3));
+                createRleBlock(0.5, 3));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.75,
                 createDoublesBlock(1.0, null, 2.0, null, 2.0, null, 2.0, null, 3.0, null, 3.0, null, 3.0, 4.0, 5.0, 6.0, 7.0),
                 createDoublesBlock(1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
-                createRLEBlock(0.5, 17));
+                createRleBlock(0.5, 17));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
                 2.75,
                 createDoublesBlock(1.0, null, 2.0, null, 2.0, null, 2.0, null, 3.0, null, 3.0, null, 3.0, 4.0, 5.0, 6.0, 7.0),
                 createDoublesBlock(1.1, 1.1, 2.2, 1.1, 2.2, 1.1, 2.2, 1.1, 2.2, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1),
-                createRLEBlock(0.5, 17));
+                createRleBlock(0.5, 17));
 
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED_WITH_ACCURACY,
                 9900.0,
                 createDoubleSequenceBlock(0, 10000),
                 createDoubleRepeatBlock(1.0, 10000),
-                createRLEBlock(0.99, 10000),
-                createRLEBlock(0.001, 10000));
+                createRleBlock(0.99, 10000),
+                createRleBlock(0.001, 10000));
 
         // weighted + array of approx_percentile
         assertAggregation(
                 FUNCTION_RESOLUTION,
-                QualifiedName.of("approx_percentile"),
+                "approx_percentile",
                 DOUBLE_APPROXIMATE_PERCENTILE_ARRAY_WEIGHTED,
                 ImmutableList.of(1.5, 2.6000000000000005),
                 createDoublesBlock(1.0, 2.0, 3.0),
                 createDoublesBlock(4.0, 2.0, 1.0),
-                createRLEBlock(ImmutableList.of(0.5, 0.8), 3));
-    }
+                createRleBlock(ImmutableList.of(0.5, 0.8), 3));
 
-    private static RunLengthEncodedBlock createRLEBlock(double percentile, int positionCount)
-    {
-        BlockBuilder blockBuilder = DOUBLE.createBlockBuilder(null, 1);
-        DOUBLE.writeDouble(blockBuilder, percentile);
-        return new RunLengthEncodedBlock(blockBuilder.build(), positionCount);
-    }
+        // invalid inputs
+        for (Double invalidValue : List.of(Double.NaN, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY)) {
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    DOUBLE_APPROXIMATE_PERCENTILE,
+                    createDoublesBlock(invalidValue),
+                    createDoublesBlock(0.5))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
 
-    private static RunLengthEncodedBlock createRLEBlock(Iterable<Double> percentiles, int positionCount)
-    {
-        BlockBuilder rleBlockBuilder = new ArrayType(DOUBLE).createBlockBuilder(null, 1);
-        BlockBuilder arrayBlockBuilder = rleBlockBuilder.beginBlockEntry();
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    DOUBLE_APPROXIMATE_PERCENTILE_ARRAY,
+                    createDoublesBlock(invalidValue),
+                    createRleBlock(ImmutableList.of(0.5, 0.75), 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
 
-        for (double percentile : percentiles) {
-            DOUBLE.writeDouble(arrayBlockBuilder, percentile);
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
+                    createDoublesBlock(invalidValue),
+                    createDoublesBlock(1.0),
+                    createRleBlock(0.5, 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED,
+                    createDoublesBlock(1.0),
+                    createDoublesBlock(invalidValue),
+                    createRleBlock(0.5, 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    DOUBLE_APPROXIMATE_PERCENTILE_ARRAY_WEIGHTED,
+                    createDoublesBlock(1.0),
+                    createDoublesBlock(invalidValue),
+                    createRleBlock(ImmutableList.of(0.5, 0.75), 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            assertAggregationFails(FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    DOUBLE_APPROXIMATE_PERCENTILE_ARRAY_WEIGHTED,
+                    createDoublesBlock(invalidValue),
+                    createDoublesBlock(1.0),
+                    createRleBlock(ImmutableList.of(0.5, 0.75), 1))
+                    .isInstanceOf(TrinoException.class)
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
+
+            // for deprecated approx_percentile with accuracy we only validate accuracy for backward compatibility
+            assertAggregationFails(
+                    FUNCTION_RESOLUTION,
+                    "approx_percentile",
+                    DOUBLE_APPROXIMATE_PERCENTILE_WEIGHTED_WITH_ACCURACY,
+                    createDoublesBlock(1.0),
+                    createDoublesBlock(1.0),
+                    createDoublesBlock(0.99),
+                    createDoublesBlock(invalidValue))
+                    .hasErrorCode(INVALID_FUNCTION_ARGUMENT);
         }
+    }
 
-        rleBlockBuilder.closeEntry();
+    private static Block createRleBlock(double percentile, int positionCount)
+    {
+        BlockBuilder blockBuilder = DOUBLE.createFixedSizeBlockBuilder(1);
+        DOUBLE.writeDouble(blockBuilder, percentile);
+        return RunLengthEncodedBlock.create(blockBuilder.build(), positionCount);
+    }
 
-        return new RunLengthEncodedBlock(rleBlockBuilder.build(), positionCount);
+    private static Block createRleBlock(Iterable<Double> percentiles, int positionCount)
+    {
+        ArrayBlockBuilder arrayBuilder = new ArrayType(DOUBLE).createBlockBuilder(null, 1);
+        arrayBuilder.buildEntry(elementBuilder -> {
+            for (double percentile : percentiles) {
+                DOUBLE.writeDouble(elementBuilder, percentile);
+            }
+        });
+        return RunLengthEncodedBlock.create(arrayBuilder.build(), positionCount);
     }
 }

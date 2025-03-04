@@ -13,9 +13,10 @@
  */
 package io.trino.tests;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.testing.AbstractTestAggregations;
 import io.trino.testing.QueryRunner;
-import io.trino.tests.tpch.TpchQueryRunnerBuilder;
+import io.trino.tests.tpch.TpchQueryRunner;
 
 public class TestOptimizeMixedDistinctAggregations
         extends AbstractTestAggregations
@@ -24,16 +25,9 @@ public class TestOptimizeMixedDistinctAggregations
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return TpchQueryRunnerBuilder.builder()
-                .setSingleCoordinatorProperty("optimizer.optimize-mixed-distinct-aggregations", "true")
+        return TpchQueryRunner.builder()
+                .setCoordinatorProperties(ImmutableMap.of("optimizer.distinct-aggregations-strategy", "pre_aggregate"))
                 .build();
-    }
-
-    @Override
-    public void testCountDistinct()
-    {
-        assertQuery("SELECT COUNT(DISTINCT custkey + 1) FROM orders", "SELECT COUNT(*) FROM (SELECT DISTINCT custkey + 1 FROM orders) t");
-        assertQuery("SELECT COUNT(DISTINCT linenumber), COUNT(*) from lineitem where linenumber < 0");
     }
 
     // TODO add dedicated test cases and remove `extends AbstractTestAggregation`

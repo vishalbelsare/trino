@@ -13,56 +13,33 @@
  */
 package io.trino.plugin.iceberg;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.iceberg.FileContent;
 
+import java.util.List;
 import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
-public class CommitTaskData
+public record CommitTaskData(
+        String path,
+        IcebergFileFormat fileFormat,
+        long fileSizeInBytes,
+        MetricsWrapper metrics,
+        String partitionSpecJson,
+        Optional<String> partitionDataJson,
+        FileContent content,
+        Optional<String> referencedDataFile,
+        Optional<List<Long>> fileSplitOffsets)
 {
-    private final String path;
-    private final long fileSizeInBytes;
-    private final MetricsWrapper metrics;
-    private final Optional<String> partitionDataJson;
-
-    @JsonCreator
-    public CommitTaskData(
-            @JsonProperty("path") String path,
-            @JsonProperty("fileSizeInBytes") long fileSizeInBytes,
-            @JsonProperty("metrics") MetricsWrapper metrics,
-            @JsonProperty("partitionDataJson") Optional<String> partitionDataJson)
+    public CommitTaskData
     {
-        this.path = requireNonNull(path, "path is null");
-        this.fileSizeInBytes = fileSizeInBytes;
-        this.metrics = requireNonNull(metrics, "metrics is null");
-        this.partitionDataJson = requireNonNull(partitionDataJson, "partitionDataJson is null");
-        checkArgument(fileSizeInBytes >= 0, "fileSizeInBytes is negative");
-    }
-
-    @JsonProperty
-    public String getPath()
-    {
-        return path;
-    }
-
-    @JsonProperty
-    public long getFileSizeInBytes()
-    {
-        return fileSizeInBytes;
-    }
-
-    @JsonProperty
-    public MetricsWrapper getMetrics()
-    {
-        return metrics;
-    }
-
-    @JsonProperty
-    public Optional<String> getPartitionDataJson()
-    {
-        return partitionDataJson;
+        requireNonNull(path, "path is null");
+        requireNonNull(fileFormat, "fileFormat is null");
+        requireNonNull(metrics, "metrics is null");
+        requireNonNull(partitionSpecJson, "partitionSpecJson is null");
+        requireNonNull(partitionDataJson, "partitionDataJson is null");
+        requireNonNull(content, "content is null");
+        requireNonNull(referencedDataFile, "referencedDataFile is null");
+        requireNonNull(fileSplitOffsets, "fileSplitOffsets is null");
     }
 }

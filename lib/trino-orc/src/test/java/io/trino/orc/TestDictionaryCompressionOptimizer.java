@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
 import io.trino.orc.DictionaryCompressionOptimizer.DictionaryColumn;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.OptionalInt;
@@ -25,16 +25,12 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.airlift.testing.Assertions.assertGreaterThanOrEqual;
-import static io.airlift.testing.Assertions.assertLessThan;
 import static io.trino.orc.DictionaryCompressionOptimizer.DICTIONARY_MEMORY_MAX_RANGE;
 import static io.trino.orc.DictionaryCompressionOptimizer.estimateIndexBytesPerValue;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDictionaryCompressionOptimizer
 {
@@ -47,22 +43,22 @@ public class TestDictionaryCompressionOptimizer
         DataSimulator simulator = new DataSimulator(0, stripeMaxBytes, expectedMaxRowCount * 2, megabytes(16), bytesPerRow);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // since there are no dictionary columns, the simulator should advance until the strip is full
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.finalOptimize();
 
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.reset();
         }
@@ -80,25 +76,25 @@ public class TestDictionaryCompressionOptimizer
         DataSimulator simulator = new DataSimulator(0, stripeMaxBytes, expectedMaxRowCount, megabytes(16), 0, column);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // since there dictionary columns is only 1 MB, the simulator should advance until the strip is full
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.finalOptimize();
 
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.reset();
         }
@@ -118,25 +114,25 @@ public class TestDictionaryCompressionOptimizer
         DataSimulator simulator = new DataSimulator(0, stripeMaxBytes, expectedMaxRowCount * 10, megabytes(16), 0, column);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // since there dictionary columns is only 1 MB, the simulator should advance until the strip is full
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertLessThan(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isLessThan(expectedMaxRowCount);
 
             simulator.finalOptimize();
 
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertLessThan(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isLessThan(expectedMaxRowCount);
 
             simulator.reset();
         }
@@ -153,29 +149,29 @@ public class TestDictionaryCompressionOptimizer
         // construct a simulator that will hit the dictionary (low) memory limit by estimating the number of rows at the memory limit, and then setting large limits around this value
         int stripeMaxBytes = megabytes(100);
         int dictionaryMaxMemoryBytesLow = dictionaryMaxMemoryBytes - (int) DICTIONARY_MEMORY_MAX_RANGE.toBytes();
-        int expectedMaxRowCount = (int) (dictionaryMaxMemoryBytesLow / bytesPerEntry / uniquePercentage);
+        int expectedMaxRowCount = (int) (1.0 * dictionaryMaxMemoryBytesLow / bytesPerEntry / uniquePercentage);
         DataSimulator simulator = new DataSimulator(0, stripeMaxBytes, expectedMaxRowCount * 2, dictionaryMaxMemoryBytes, 0, column);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until memory is full
-            assertTrue(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isTrue();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.finalOptimize();
 
-            assertTrue(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isTrue();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.reset();
         }
@@ -191,38 +187,38 @@ public class TestDictionaryCompressionOptimizer
 
         // construct a simulator that will flip the column to direct and then hit the bytes limit
         int stripeMaxBytes = megabytes(100);
-        int expectedRowCountAtFlip = (int) (dictionaryMaxMemoryBytes / bytesPerEntry / uniquePercentage);
+        int expectedRowCountAtFlip = (int) (1.0 * dictionaryMaxMemoryBytes / bytesPerEntry / uniquePercentage);
         int expectedMaxRowCountAtFull = stripeMaxBytes / bytesPerEntry;
         DataSimulator simulator = new DataSimulator(stripeMaxBytes / 2, stripeMaxBytes, expectedMaxRowCountAtFull * 2, dictionaryMaxMemoryBytes, 0, column);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the dictionary column is converted to direct
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedRowCountAtFlip);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isTrue();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedRowCountAtFlip);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the stripe is full
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(column.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCountAtFull);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isTrue();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCountAtFull);
 
             simulator.finalOptimize();
 
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(column.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCountAtFull);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isTrue();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCountAtFull);
 
             simulator.reset();
         }
@@ -239,29 +235,29 @@ public class TestDictionaryCompressionOptimizer
         // construct a simulator that will be full because of dictionary memory limit;
         // the column cannot not be converted to direct encoding because of stripe size limit
         int stripeMaxBytes = megabytes(100);
-        int expectedMaxRowCount = (int) (dictionaryMaxMemoryBytes / bytesPerEntry / uniquePercentage);
+        int expectedMaxRowCount = (int) (1.0 * dictionaryMaxMemoryBytes / bytesPerEntry / uniquePercentage);
         DataSimulator simulator = new DataSimulator(stripeMaxBytes / 2, stripeMaxBytes, expectedMaxRowCount * 2, dictionaryMaxMemoryBytes, 0, column);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until memory is full
-            assertTrue(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isTrue();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.finalOptimize();
 
-            assertTrue(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isTrue();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCount);
 
             simulator.reset();
         }
@@ -281,33 +277,33 @@ public class TestDictionaryCompressionOptimizer
         DataSimulator simulator = new DataSimulator(0, stripeMaxBytes, expectedMaxRowCountAtFull, dictionaryMaxMemoryBytes, 0, column);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(column.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the dictionary column is flipped
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(column.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedRowCountAtFlip);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isTrue();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedRowCountAtFlip);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the stripe is full
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(column.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCountAtFull);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isTrue();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCountAtFull);
 
             simulator.finalOptimize();
 
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(column.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCountAtFull);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(column.isDirect()).isTrue();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCountAtFull);
 
             simulator.reset();
         }
@@ -329,37 +325,37 @@ public class TestDictionaryCompressionOptimizer
         DataSimulator simulator = new DataSimulator(stripeMaxBytes / 2, stripeMaxBytes, expectedMaxRowCountAtFull * 2, dictionaryMaxMemoryBytes, 0, directColumn, dictionaryColumn);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isFalse();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the dictionary column is flipped
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedRowCountAtFlip);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isTrue();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedRowCountAtFlip);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the stripe is full
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCountAtFull);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isTrue();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCountAtFull);
 
             simulator.finalOptimize();
 
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertGreaterThanOrEqual(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedMaxRowCountAtFull);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isTrue();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isGreaterThanOrEqualTo(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedMaxRowCountAtFull);
 
             simulator.reset();
         }
@@ -385,37 +381,37 @@ public class TestDictionaryCompressionOptimizer
         DataSimulator simulator = new DataSimulator(0, stripeMaxBytes, maxRowCount, dictionaryMaxMemoryBytes, 0, directColumn, dictionaryColumn);
 
         for (int loop = 0; loop < 3; loop++) {
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertFalse(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertEquals(simulator.getRowCount(), 0);
-            assertEquals(simulator.getBufferedBytes(), 0);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isFalse();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getRowCount()).isEqualTo(0);
+            assertThat(simulator.getBufferedBytes()).isEqualTo(0);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the dictionary column is flipped
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), expectedRowCountAtFlip);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isTrue();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(expectedRowCountAtFlip);
 
             simulator.advanceToNextStateChange();
 
             // the simulator should advance until the stripe is full
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), maxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isTrue();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(maxRowCount);
 
             simulator.finalOptimize();
 
-            assertFalse(simulator.isDictionaryMemoryFull());
-            assertTrue(directColumn.isDirect());
-            assertFalse(dictionaryColumn.isDirect());
-            assertLessThan(simulator.getBufferedBytes(), (long) stripeMaxBytes);
-            assertGreaterThanOrEqual(simulator.getRowCount(), maxRowCount);
+            assertThat(simulator.isDictionaryMemoryFull()).isFalse();
+            assertThat(directColumn.isDirect()).isTrue();
+            assertThat(dictionaryColumn.isDirect()).isFalse();
+            assertThat(simulator.getBufferedBytes()).isLessThan(stripeMaxBytes);
+            assertThat(simulator.getRowCount()).isGreaterThanOrEqualTo(maxRowCount);
 
             simulator.reset();
         }
@@ -462,7 +458,7 @@ public class TestDictionaryCompressionOptimizer
                 for (TestDictionaryColumn dictionaryColumn : dictionaryColumns) {
                     dictionaryColumn.advanceTo(rowCount);
                 }
-                optimizer.optimize(toIntExact(getBufferedBytes()), getRowCount());
+                optimizer.optimize(getBufferedBytes(), getRowCount());
             }
         }
 
@@ -561,7 +557,7 @@ public class TestDictionaryCompressionOptimizer
 
         public void advanceTo(int rowCount)
         {
-            assertTrue(rowCount >= this.rowCount);
+            assertThat(rowCount >= this.rowCount).isTrue();
             this.rowCount = rowCount;
         }
 
@@ -573,7 +569,7 @@ public class TestDictionaryCompressionOptimizer
             }
             int dictionaryEntries = getDictionaryEntries();
             int bytesPerValue = estimateIndexBytesPerValue(dictionaryEntries);
-            return (dictionaryEntries * bytesPerEntry) + (getNonNullValueCount() * bytesPerValue);
+            return ((long) dictionaryEntries * bytesPerEntry) + (getNonNullValueCount() * bytesPerValue);
         }
 
         @Override
@@ -616,15 +612,13 @@ public class TestDictionaryCompressionOptimizer
         @Override
         public OptionalInt tryConvertToDirect(int maxDirectBytes)
         {
-            assertFalse(direct);
+            assertThat(direct).isFalse();
             long directBytes = (long) (rowCount * valuesPerRow * bytesPerEntry);
             if (directBytes <= maxDirectBytes) {
                 direct = true;
                 return OptionalInt.of(toIntExact(directBytes));
             }
-            else {
-                return OptionalInt.empty();
-            }
+            return OptionalInt.empty();
         }
 
         public boolean isDirect()

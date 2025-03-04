@@ -13,10 +13,16 @@
  */
 package io.trino.spi.type;
 
+import com.google.errorprone.annotations.FormatMethod;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.BlockIndex;
 import io.trino.spi.function.BlockPosition;
+import io.trino.spi.function.FlatFixed;
+import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.InvocationConvention.InvocationArgumentConvention;
 import io.trino.spi.function.InvocationConvention.InvocationReturnConvention;
@@ -37,10 +43,16 @@ import java.util.Collection;
 import java.util.List;
 
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BOXED_NULLABLE;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.FLAT;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NULL_FLAG;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.VALUE_BLOCK_POSITION;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.VALUE_BLOCK_POSITION_NOT_NULL;
+import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.BLOCK_BUILDER;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
+import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FLAT_RETURN;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
 import static java.lang.String.format;
@@ -51,10 +63,11 @@ public final class TypeOperatorDeclaration
 {
     public static final TypeOperatorDeclaration NO_TYPE_OPERATOR_DECLARATION = builder(boolean.class).build();
 
+    private final Collection<OperatorMethodHandle> readValueOperators;
     private final Collection<OperatorMethodHandle> equalOperators;
     private final Collection<OperatorMethodHandle> hashCodeOperators;
     private final Collection<OperatorMethodHandle> xxHash64Operators;
-    private final Collection<OperatorMethodHandle> distinctFromOperators;
+    private final Collection<OperatorMethodHandle> identicalOperators;
     private final Collection<OperatorMethodHandle> indeterminateOperators;
     private final Collection<OperatorMethodHandle> comparisonUnorderedLastOperators;
     private final Collection<OperatorMethodHandle> comparisonUnorderedFirstOperators;
@@ -62,20 +75,22 @@ public final class TypeOperatorDeclaration
     private final Collection<OperatorMethodHandle> lessThanOrEqualOperators;
 
     private TypeOperatorDeclaration(
+            Collection<OperatorMethodHandle> readValueOperators,
             Collection<OperatorMethodHandle> equalOperators,
             Collection<OperatorMethodHandle> hashCodeOperators,
             Collection<OperatorMethodHandle> xxHash64Operators,
-            Collection<OperatorMethodHandle> distinctFromOperators,
+            Collection<OperatorMethodHandle> identicalOperators,
             Collection<OperatorMethodHandle> indeterminateOperators,
             Collection<OperatorMethodHandle> comparisonUnorderedLastOperators,
             Collection<OperatorMethodHandle> comparisonUnorderedFirstOperators,
             Collection<OperatorMethodHandle> lessThanOperators,
             Collection<OperatorMethodHandle> lessThanOrEqualOperators)
     {
+        this.readValueOperators = List.copyOf(requireNonNull(readValueOperators, "readValueOperators is null"));
         this.equalOperators = List.copyOf(requireNonNull(equalOperators, "equalOperators is null"));
         this.hashCodeOperators = List.copyOf(requireNonNull(hashCodeOperators, "hashCodeOperators is null"));
         this.xxHash64Operators = List.copyOf(requireNonNull(xxHash64Operators, "xxHash64Operators is null"));
-        this.distinctFromOperators = List.copyOf(requireNonNull(distinctFromOperators, "distinctFromOperators is null"));
+        this.identicalOperators = List.copyOf(requireNonNull(identicalOperators, "identicalOperators is null"));
         this.indeterminateOperators = List.copyOf(requireNonNull(indeterminateOperators, "indeterminateOperators is null"));
         this.comparisonUnorderedLastOperators = List.copyOf(requireNonNull(comparisonUnorderedLastOperators, "comparisonUnorderedLastOperators is null"));
         this.comparisonUnorderedFirstOperators = List.copyOf(requireNonNull(comparisonUnorderedFirstOperators, "comparisonUnorderedFirstOperators is null"));
@@ -93,6 +108,11 @@ public final class TypeOperatorDeclaration
         return !comparisonUnorderedLastOperators.isEmpty();
     }
 
+    public Collection<OperatorMethodHandle> getReadValueOperators()
+    {
+        return readValueOperators;
+    }
+
     public Collection<OperatorMethodHandle> getEqualOperators()
     {
         return equalOperators;
@@ -108,9 +128,9 @@ public final class TypeOperatorDeclaration
         return xxHash64Operators;
     }
 
-    public Collection<OperatorMethodHandle> getDistinctFromOperators()
+    public Collection<OperatorMethodHandle> getIdenticalOperators()
     {
-        return distinctFromOperators;
+        return identicalOperators;
     }
 
     public Collection<OperatorMethodHandle> getIndeterminateOperators()
@@ -154,20 +174,52 @@ public final class TypeOperatorDeclaration
     {
         private final Class<?> typeJavaType;
 
+        private final Collection<OperatorMethodHandle> readValueOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> equalOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> hashCodeOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> xxHash64Operators = new ArrayList<>();
-        private final Collection<OperatorMethodHandle> distinctFromOperators = new ArrayList<>();
+        private final Collection<OperatorMethodHandle> identicalOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> indeterminateOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> comparisonUnorderedLastOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> comparisonUnorderedFirstOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> lessThanOperators = new ArrayList<>();
         private final Collection<OperatorMethodHandle> lessThanOrEqualOperators = new ArrayList<>();
 
-        public Builder(Class<?> typeJavaType)
+        private Builder(Class<?> typeJavaType)
         {
             this.typeJavaType = requireNonNull(typeJavaType, "typeJavaType is null");
             checkArgument(!typeJavaType.equals(void.class), "void type is not supported");
+        }
+
+        public Builder addOperators(TypeOperatorDeclaration operatorDeclaration)
+        {
+            operatorDeclaration.getReadValueOperators().forEach(this::addReadValueOperator);
+            operatorDeclaration.getEqualOperators().forEach(this::addEqualOperator);
+            operatorDeclaration.getHashCodeOperators().forEach(this::addHashCodeOperator);
+            operatorDeclaration.getXxHash64Operators().forEach(this::addXxHash64Operator);
+            operatorDeclaration.getIdenticalOperators().forEach(this::addIdenticalOperator);
+            operatorDeclaration.getIndeterminateOperators().forEach(this::addIndeterminateOperator);
+            operatorDeclaration.getComparisonUnorderedLastOperators().forEach(this::addComparisonUnorderedLastOperator);
+            operatorDeclaration.getComparisonUnorderedFirstOperators().forEach(this::addComparisonUnorderedFirstOperator);
+            operatorDeclaration.getLessThanOperators().forEach(this::addLessThanOperator);
+            operatorDeclaration.getLessThanOrEqualOperators().forEach(this::addLessThanOrEqualOperator);
+            return this;
+        }
+
+        public Builder addReadValueOperator(OperatorMethodHandle readValueOperator)
+        {
+            verifyMethodHandleSignature(1, typeJavaType, readValueOperator);
+            this.readValueOperators.add(readValueOperator);
+            return this;
+        }
+
+        public Builder addReadValueOperators(Collection<OperatorMethodHandle> readValueOperators)
+        {
+            for (OperatorMethodHandle readValueOperator : readValueOperators) {
+                verifyMethodHandleSignature(1, typeJavaType, readValueOperator);
+            }
+            this.readValueOperators.addAll(readValueOperators);
+            return this;
         }
 
         public Builder addEqualOperator(OperatorMethodHandle equalOperator)
@@ -218,19 +270,19 @@ public final class TypeOperatorDeclaration
             return this;
         }
 
-        public Builder addDistinctFromOperator(OperatorMethodHandle distinctFromOperator)
+        public Builder addIdenticalOperator(OperatorMethodHandle operator)
         {
-            verifyMethodHandleSignature(2, boolean.class, distinctFromOperator);
-            this.distinctFromOperators.add(distinctFromOperator);
+            verifyMethodHandleSignature(2, boolean.class, operator);
+            this.identicalOperators.add(operator);
             return this;
         }
 
-        public Builder addDistinctFromOperators(Collection<OperatorMethodHandle> distinctFromOperators)
+        public Builder addIdenticalOperators(Collection<OperatorMethodHandle> operators)
         {
-            for (OperatorMethodHandle distinctFromOperator : distinctFromOperators) {
-                verifyMethodHandleSignature(2, boolean.class, distinctFromOperator);
+            for (OperatorMethodHandle operator : operators) {
+                verifyMethodHandleSignature(2, boolean.class, operator);
             }
-            this.distinctFromOperators.addAll(distinctFromOperators);
+            this.identicalOperators.addAll(operators);
             return this;
         }
 
@@ -333,6 +385,9 @@ public final class TypeOperatorDeclaration
                 }
 
                 switch (operatorType) {
+                    case READ_VALUE:
+                        addReadValueOperator(new OperatorMethodHandle(parseInvocationConvention(operatorType, typeJavaType, method, typeJavaType), methodHandle));
+                        break;
                     case EQUAL:
                         addEqualOperator(new OperatorMethodHandle(parseInvocationConvention(operatorType, typeJavaType, method, boolean.class), methodHandle));
                         break;
@@ -342,8 +397,8 @@ public final class TypeOperatorDeclaration
                     case XX_HASH_64:
                         addXxHash64Operator(new OperatorMethodHandle(parseInvocationConvention(operatorType, typeJavaType, method, long.class), methodHandle));
                         break;
-                    case IS_DISTINCT_FROM:
-                        addDistinctFromOperator(new OperatorMethodHandle(parseInvocationConvention(operatorType, typeJavaType, method, boolean.class), methodHandle));
+                    case IDENTICAL:
+                        addIdenticalOperator(new OperatorMethodHandle(parseInvocationConvention(operatorType, typeJavaType, method, boolean.class), methodHandle));
                         break;
                     case INDETERMINATE:
                         addIndeterminateOperator(new OperatorMethodHandle(parseInvocationConvention(operatorType, typeJavaType, method, boolean.class), methodHandle));
@@ -385,6 +440,7 @@ public final class TypeOperatorDeclaration
             int expectedParameterCount = convention.getArgumentConventions().stream()
                     .mapToInt(InvocationArgumentConvention::getParameterCount)
                     .sum();
+            expectedParameterCount += convention.getReturnConvention().getParameterCount();
             checkArgument(expectedParameterCount == methodType.parameterCount(),
                     "Expected %s method parameters, but got %s", expectedParameterCount, methodType.parameterCount());
 
@@ -407,9 +463,21 @@ public final class TypeOperatorDeclaration
                         checkArgument(parameterType.isAssignableFrom(wrap(typeJavaType)),
                                 "Expected argument type to be %s, but is %s", wrap(typeJavaType), parameterType);
                         break;
+                    case BLOCK_POSITION_NOT_NULL:
                     case BLOCK_POSITION:
                         checkArgument(parameterType.equals(Block.class) && methodType.parameterType(parameterIndex + 1).equals(int.class),
-                                "Expected BLOCK_POSITION argument have parameters Block and int");
+                                "Expected BLOCK_POSITION argument to have parameters Block and int");
+                        break;
+                    case VALUE_BLOCK_POSITION_NOT_NULL:
+                    case VALUE_BLOCK_POSITION:
+                        checkArgument(Block.class.isAssignableFrom(parameterType) && methodType.parameterType(parameterIndex + 1).equals(int.class),
+                                "Expected VALUE_BLOCK_POSITION argument to have parameters ValueBlock and int");
+                        break;
+                    case FLAT:
+                        checkArgument(parameterType.equals(byte[].class) &&
+                                        methodType.parameterType(parameterIndex + 1).equals(int.class) &&
+                                        methodType.parameterType(parameterIndex + 2).equals(byte[].class),
+                                "Expected FLAT argument to have parameters byte[], int, and byte[]");
                         break;
                     case FUNCTION:
                         throw new IllegalArgumentException("Function argument convention is not supported in type operators");
@@ -429,19 +497,38 @@ public final class TypeOperatorDeclaration
                     checkArgument(methodType.returnType().equals(wrap(returnJavaType)),
                             "Expected return type to be %s, but is %s", returnJavaType, wrap(methodType.returnType()));
                     break;
+                case BLOCK_BUILDER:
+                    checkArgument(methodType.lastParameterType().equals(BlockBuilder.class),
+                            "Expected last argument type to be BlockBuilder, but is %s", methodType.returnType());
+                    checkArgument(methodType.returnType().equals(void.class),
+                            "Expected return type to be void, but is %s", methodType.returnType());
+                    break;
+                case FLAT_RETURN:
+                    List<Class<?>> parameters = methodType.parameterList();
+                    parameters = parameters.subList(parameters.size() - 4, parameters.size());
+                    checkArgument(
+                            parameters.equals(List.of(byte[].class, int.class, byte[].class, int.class)),
+                            "Expected last argument types to be (byte[], int, byte[], int), but is %s", methodType);
+                    checkArgument(methodType.returnType().equals(void.class),
+                            "Expected return type to be void, but is %s", methodType.returnType());
+                    break;
                 default:
                     throw new UnsupportedOperationException("Unknown return convention: " + returnConvention);
+            }
+
+            if (operatorMethodHandle.getCallingConvention().getArgumentConventions().stream().anyMatch(argumentConvention -> argumentConvention == BLOCK_POSITION || argumentConvention == BLOCK_POSITION_NOT_NULL)) {
+                throw new IllegalArgumentException("BLOCK_POSITION argument convention is not allowed for type operators");
             }
         }
 
         private static InvocationConvention parseInvocationConvention(OperatorType operatorType, Class<?> typeJavaType, Method method, Class<?> expectedReturnType)
         {
-            checkArgument(expectedReturnType.isPrimitive(), "Expected return type must be a primitive: %s", expectedReturnType);
-
             InvocationReturnConvention returnConvention = getReturnConvention(expectedReturnType, operatorType, method);
 
             List<Class<?>> parameterTypes = List.of(method.getParameterTypes());
             List<Annotation[]> parameterAnnotations = List.of(method.getParameterAnnotations());
+            parameterTypes = parameterTypes.subList(0, parameterTypes.size() - returnConvention.getParameterCount());
+            parameterAnnotations = parameterAnnotations.subList(0, parameterAnnotations.size() - returnConvention.getParameterCount());
 
             InvocationArgumentConvention leftArgumentConvention = extractNextArgumentConvention(typeJavaType, parameterTypes, parameterAnnotations, operatorType, method);
             if (leftArgumentConvention.getParameterCount() == parameterTypes.size()) {
@@ -475,6 +562,19 @@ public final class TypeOperatorDeclaration
             else if (method.isAnnotationPresent(SqlNullable.class) && method.getReturnType().equals(wrap(expectedReturnType))) {
                 returnConvention = NULLABLE_RETURN;
             }
+            else if (method.getReturnType().equals(void.class) &&
+                    method.getParameterCount() >= 1 &&
+                    method.getParameterTypes()[method.getParameterCount() - 1].equals(BlockBuilder.class)) {
+                returnConvention = BLOCK_BUILDER;
+            }
+            else if (method.getReturnType().equals(void.class) &&
+                    method.getParameterCount() >= 4 &&
+                    method.getParameterTypes()[method.getParameterCount() - 4].equals(byte[].class) &&
+                    method.getParameterTypes()[method.getParameterCount() - 3].equals(int.class) &&
+                    method.getParameterTypes()[method.getParameterCount() - 2].equals(byte[].class) &&
+                    method.getParameterTypes()[method.getParameterCount() - 1].equals(int.class)) {
+                returnConvention = FLAT_RETURN;
+            }
             else {
                 throw new IllegalArgumentException(format("Expected %s operator to return %s: %s", operatorType, expectedReturnType, method));
             }
@@ -488,17 +588,30 @@ public final class TypeOperatorDeclaration
                 OperatorType operatorType,
                 Method method)
         {
-            if (isAnnotationPresent(parameterAnnotations.get(0), SqlNullable.class)) {
+            if (isAnnotationPresent(parameterAnnotations.get(0), BlockPosition.class)) {
+                if (parameterTypes.size() > 1 && isAnnotationPresent(parameterAnnotations.get(1), BlockIndex.class)) {
+                    if (!ValueBlock.class.isAssignableFrom(parameterTypes.get(0))) {
+                        throw new IllegalArgumentException("@BlockPosition argument must be a ValueBlock type for %s operator: %s".formatted(operatorType, method));
+                    }
+                    if (parameterTypes.get(1) != int.class) {
+                        throw new IllegalArgumentException("@BlockIndex argument must be type int for %s operator: %s".formatted(operatorType, method));
+                    }
+                    return isAnnotationPresent(parameterAnnotations.get(0), SqlNullable.class) ? VALUE_BLOCK_POSITION : VALUE_BLOCK_POSITION_NOT_NULL;
+                }
+            }
+            else if (isAnnotationPresent(parameterAnnotations.get(0), SqlNullable.class)) {
                 if (parameterTypes.get(0).equals(wrap(typeJavaType))) {
                     return BOXED_NULLABLE;
                 }
             }
-            else if (isAnnotationPresent(parameterAnnotations.get(0), BlockPosition.class)) {
-                if (parameterTypes.size() > 1 &&
-                        isAnnotationPresent(parameterAnnotations.get(1), BlockIndex.class) &&
-                        parameterTypes.get(0).equals(Block.class) &&
-                        parameterTypes.get(1).equals(int.class)) {
-                    return BLOCK_POSITION;
+            else if (isAnnotationPresent(parameterAnnotations.get(0), FlatFixed.class)) {
+                if (parameterTypes.size() > 2 &&
+                        isAnnotationPresent(parameterAnnotations.get(1), FlatFixedOffset.class) &&
+                        isAnnotationPresent(parameterAnnotations.get(2), FlatVariableWidth.class) &&
+                        parameterTypes.get(0).equals(byte[].class) &&
+                        parameterTypes.get(1).equals(int.class) &&
+                        parameterTypes.get(2).equals(byte[].class)) {
+                    return FLAT;
                 }
             }
             else if (parameterTypes.size() > 1 && isAnnotationPresent(parameterAnnotations.get(1), IsNull.class)) {
@@ -516,6 +629,7 @@ public final class TypeOperatorDeclaration
             throw new IllegalArgumentException(format("Unexpected parameters for %s operator: %s", operatorType, method));
         }
 
+        @FormatMethod
         private static void checkArgument(boolean test, String message, Object... arguments)
         {
             if (!test) {
@@ -553,10 +667,11 @@ public final class TypeOperatorDeclaration
             }
 
             return new TypeOperatorDeclaration(
+                    readValueOperators,
                     equalOperators,
                     hashCodeOperators,
                     xxHash64Operators,
-                    distinctFromOperators,
+                    identicalOperators,
                     indeterminateOperators,
                     comparisonUnorderedLastOperators,
                     comparisonUnorderedFirstOperators,

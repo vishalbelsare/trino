@@ -15,8 +15,19 @@ package io.trino.execution;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import io.airlift.slice.Slices;
+import io.airlift.units.DataSize;
+import io.airlift.units.Duration;
+import io.opentelemetry.api.trace.Span;
 import io.trino.cost.StatsAndCosts;
 import io.trino.execution.scheduler.SplitSchedulerStats;
+import io.trino.operator.PipelineContext;
+import io.trino.operator.TaskStats;
+import io.trino.operator.TestingOperatorContext;
+import io.trino.spi.QueryId;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Row;
 import io.trino.sql.planner.Partitioning;
 import io.trino.sql.planner.PartitioningScheme;
 import io.trino.sql.planner.PlanFragment;
@@ -24,29 +35,38 @@ import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.ValuesNode;
-import io.trino.sql.tree.Row;
-import io.trino.sql.tree.StringLiteral;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import org.joda.time.DateTime;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.IOException;
+import java.net.URI;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.operator.StageExecutionDescriptor.ungroupedExecution;
+import static io.airlift.tracing.Tracing.noopTracer;
+import static io.airlift.units.DataSize.succinctBytes;
+import static io.airlift.units.Duration.succinctDuration;
+import static io.trino.execution.StageState.PLANNED;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SOURCE_DISTRIBUTION;
 import static java.util.concurrent.Executors.newCachedThreadPool;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertSame;
-import static org.testng.Assert.assertTrue;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestStageStateMachine
 {
     private static final StageId STAGE_ID = new StageId("query", 0);
@@ -60,7 +80,7 @@ public class TestStageStateMachine
 
     private ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         executor.shutdownNow();
@@ -71,21 +91,21 @@ public class TestStageStateMachine
     public void testBasicStateChanges()
     {
         StageStateMachine stateMachine = createStageStateMachine();
-        assertState(stateMachine, StageState.PLANNED);
+        assertState(stateMachine, PLANNED);
 
-        assertTrue(stateMachine.transitionToScheduling());
+        assertThat(stateMachine.transitionToScheduling()).isTrue();
         assertState(stateMachine, StageState.SCHEDULING);
 
-        assertTrue(stateMachine.transitionToScheduled());
-        assertState(stateMachine, StageState.SCHEDULED);
-
-        assertTrue(stateMachine.transitionToRunning());
+        assertThat(stateMachine.transitionToRunning()).isTrue();
         assertState(stateMachine, StageState.RUNNING);
 
-        assertTrue(stateMachine.transitionToFlushing());
-        assertState(stateMachine, StageState.FLUSHING);
+        assertThat(stateMachine.transitionToPending()).isTrue();
+        assertState(stateMachine, StageState.PENDING);
 
-        assertTrue(stateMachine.transitionToFinished());
+        assertThat(stateMachine.transitionToRunning()).isTrue();
+        assertState(stateMachine, StageState.RUNNING);
+
+        assertThat(stateMachine.transitionToFinished()).isTrue();
         assertState(stateMachine, StageState.FINISHED);
     }
 
@@ -93,199 +113,79 @@ public class TestStageStateMachine
     public void testPlanned()
     {
         StageStateMachine stateMachine = createStageStateMachine();
-        assertState(stateMachine, StageState.PLANNED);
+        assertState(stateMachine, PLANNED);
 
         stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToScheduling());
+        assertThat(stateMachine.transitionToScheduling()).isTrue();
         assertState(stateMachine, StageState.SCHEDULING);
 
         stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToRunning());
+        assertThat(stateMachine.transitionToRunning()).isTrue();
         assertState(stateMachine, StageState.RUNNING);
 
         stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToFlushing());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToFinished());
+        assertThat(stateMachine.transitionToFinished()).isTrue();
         assertState(stateMachine, StageState.FINISHED);
 
         stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToFailed(FAILED_CAUSE));
+        assertThat(stateMachine.transitionToFailed(FAILED_CAUSE)).isTrue();
         assertState(stateMachine, StageState.FAILED);
-
-        stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToAborted());
-        assertState(stateMachine, StageState.ABORTED);
-
-        stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToCanceled());
-        assertState(stateMachine, StageState.CANCELED);
     }
 
     @Test
     public void testScheduling()
     {
         StageStateMachine stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToScheduling());
+        assertThat(stateMachine.transitionToScheduling()).isTrue();
         assertState(stateMachine, StageState.SCHEDULING);
 
-        assertFalse(stateMachine.transitionToScheduling());
+        assertThat(stateMachine.transitionToScheduling()).isFalse();
         assertState(stateMachine, StageState.SCHEDULING);
-
-        assertTrue(stateMachine.transitionToScheduled());
-        assertState(stateMachine, StageState.SCHEDULED);
 
         stateMachine = createStageStateMachine();
         stateMachine.transitionToScheduling();
-        assertTrue(stateMachine.transitionToRunning());
+        assertThat(stateMachine.transitionToRunning()).isTrue();
         assertState(stateMachine, StageState.RUNNING);
 
         stateMachine = createStageStateMachine();
         stateMachine.transitionToScheduling();
-        assertTrue(stateMachine.transitionToFlushing());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToScheduling();
-        assertTrue(stateMachine.transitionToFinished());
+        assertThat(stateMachine.transitionToFinished()).isTrue();
         assertState(stateMachine, StageState.FINISHED);
 
         stateMachine = createStageStateMachine();
         stateMachine.transitionToScheduling();
-        assertTrue(stateMachine.transitionToFailed(FAILED_CAUSE));
+        assertThat(stateMachine.transitionToFailed(FAILED_CAUSE)).isTrue();
         assertState(stateMachine, StageState.FAILED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToScheduling();
-        assertTrue(stateMachine.transitionToAborted());
-        assertState(stateMachine, StageState.ABORTED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToScheduling();
-        assertTrue(stateMachine.transitionToCanceled());
-        assertState(stateMachine, StageState.CANCELED);
-    }
-
-    @Test
-    public void testScheduled()
-    {
-        StageStateMachine stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToScheduled());
-        assertState(stateMachine, StageState.SCHEDULED);
-
-        assertFalse(stateMachine.transitionToScheduling());
-        assertState(stateMachine, StageState.SCHEDULED);
-
-        assertFalse(stateMachine.transitionToScheduled());
-        assertState(stateMachine, StageState.SCHEDULED);
-
-        assertTrue(stateMachine.transitionToRunning());
-        assertState(stateMachine, StageState.RUNNING);
-
-        assertTrue(stateMachine.transitionToFlushing());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToScheduled();
-        assertTrue(stateMachine.transitionToFinished());
-        assertState(stateMachine, StageState.FINISHED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToScheduled();
-        assertTrue(stateMachine.transitionToFailed(FAILED_CAUSE));
-        assertState(stateMachine, StageState.FAILED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToScheduled();
-        assertTrue(stateMachine.transitionToAborted());
-        assertState(stateMachine, StageState.ABORTED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToScheduled();
-        assertTrue(stateMachine.transitionToCanceled());
-        assertState(stateMachine, StageState.CANCELED);
     }
 
     @Test
     public void testRunning()
     {
         StageStateMachine stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToRunning());
+        assertThat(stateMachine.transitionToRunning()).isTrue();
         assertState(stateMachine, StageState.RUNNING);
 
-        assertFalse(stateMachine.transitionToScheduling());
+        assertThat(stateMachine.transitionToScheduling()).isFalse();
         assertState(stateMachine, StageState.RUNNING);
 
-        assertFalse(stateMachine.transitionToScheduled());
+        assertThat(stateMachine.transitionToRunning()).isFalse();
         assertState(stateMachine, StageState.RUNNING);
 
-        assertFalse(stateMachine.transitionToRunning());
-        assertState(stateMachine, StageState.RUNNING);
+        assertThat(stateMachine.transitionToPending()).isTrue();
+        assertState(stateMachine, StageState.PENDING);
 
-        assertTrue(stateMachine.transitionToFlushing());
-        assertState(stateMachine, StageState.FLUSHING);
+        assertThat(stateMachine.transitionToRunning()).isTrue();
+        assertState(stateMachine, StageState.RUNNING);
 
         stateMachine = createStageStateMachine();
         stateMachine.transitionToRunning();
-        assertTrue(stateMachine.transitionToFinished());
+        assertThat(stateMachine.transitionToFinished()).isTrue();
         assertState(stateMachine, StageState.FINISHED);
 
         stateMachine = createStageStateMachine();
         stateMachine.transitionToRunning();
-        assertTrue(stateMachine.transitionToFailed(FAILED_CAUSE));
+        assertThat(stateMachine.transitionToFailed(FAILED_CAUSE)).isTrue();
         assertState(stateMachine, StageState.FAILED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToRunning();
-        assertTrue(stateMachine.transitionToAborted());
-        assertState(stateMachine, StageState.ABORTED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToRunning();
-        assertTrue(stateMachine.transitionToCanceled());
-        assertState(stateMachine, StageState.CANCELED);
-    }
-
-    @Test
-    public void testFlushing()
-    {
-        StageStateMachine stateMachine = createStageStateMachine();
-        assertTrue(stateMachine.transitionToFlushing());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        assertFalse(stateMachine.transitionToScheduling());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        assertFalse(stateMachine.transitionToScheduled());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        assertFalse(stateMachine.transitionToRunning());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        assertFalse(stateMachine.transitionToFlushing());
-        assertState(stateMachine, StageState.FLUSHING);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToFlushing();
-        assertTrue(stateMachine.transitionToFinished());
-        assertState(stateMachine, StageState.FINISHED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToFlushing();
-        assertTrue(stateMachine.transitionToFailed(FAILED_CAUSE));
-        assertState(stateMachine, StageState.FAILED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToFlushing();
-        assertTrue(stateMachine.transitionToAborted());
-        assertState(stateMachine, StageState.ABORTED);
-
-        stateMachine = createStageStateMachine();
-        stateMachine.transitionToFlushing();
-        assertTrue(stateMachine.transitionToCanceled());
-        assertState(stateMachine, StageState.CANCELED);
     }
 
     @Test
@@ -293,7 +193,7 @@ public class TestStageStateMachine
     {
         StageStateMachine stateMachine = createStageStateMachine();
 
-        assertTrue(stateMachine.transitionToFinished());
+        assertThat(stateMachine.transitionToFinished()).isTrue();
         assertFinalState(stateMachine, StageState.FINISHED);
     }
 
@@ -302,105 +202,204 @@ public class TestStageStateMachine
     {
         StageStateMachine stateMachine = createStageStateMachine();
 
-        assertTrue(stateMachine.transitionToFailed(FAILED_CAUSE));
+        assertThat(stateMachine.transitionToFailed(FAILED_CAUSE)).isTrue();
         assertFinalState(stateMachine, StageState.FAILED);
     }
 
     @Test
-    public void testAborted()
+    public void testGetBasicStageInfo()
     {
+        ScheduledExecutorService executorService = new ScheduledThreadPoolExecutor(1);
         StageStateMachine stateMachine = createStageStateMachine();
+        StageId stageId = new StageId(new QueryId("0"), 0);
+        PipelineContext pipeline0Context = TestingOperatorContext.createDriverContext(executorService).getPipelineContext();
+        PipelineContext pipeline1Context = TestingOperatorContext.createDriverContext(executorService).getPipelineContext();
+        int baseValue = 1;
 
-        assertTrue(stateMachine.transitionToAborted());
-        assertFinalState(stateMachine, StageState.ABORTED);
+        TaskInfo task0 = TaskInfo.createInitialTask(
+                new TaskId(stageId, 0, 0),
+                URI.create(""),
+                "0",
+                false,
+                Optional.empty(),
+                taskStats(ImmutableList.of(pipeline0Context, pipeline1Context), baseValue));
+        TaskInfo task1 = task0.withTaskStatus(TaskStatus.failWith(task0.taskStatus(), TaskState.FAILED, ImmutableList.of()));
+        List<TaskInfo> taskInfos = ImmutableList.of(task0, task1);
+        int expectedStatsValue = baseValue * taskInfos.size();
+
+        BasicStageInfo stageInfo = stateMachine.getBasicStageInfo(() -> taskInfos);
+        assertThat(stageInfo.getStageId()).isEqualTo(STAGE_ID);
+        assertThat(stageInfo.getState()).isEqualTo(PLANNED);
+        assertThat(stageInfo.isCoordinatorOnly()).isFalse();
+        assertThat(stageInfo.getSubStages()).isEmpty();
+        assertThat(stageInfo.getTasks()).hasSize(taskInfos.size());
+
+        BasicStageStats stats = stageInfo.getStageStats();
+
+        assertThat(stats.isScheduled()).isFalse();
+        assertThat(stats.getFailedTasks()).isEqualTo(1);
+        assertThat(stats.getTotalDrivers()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getQueuedDrivers()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getRunningDrivers()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getCompletedDrivers()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getBlockedDrivers()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getPhysicalInputDataSize()).isEqualTo(succinctBytes(expectedStatsValue));
+        assertThat(stats.getPhysicalWrittenDataSize()).isEqualTo(succinctBytes(expectedStatsValue));
+        assertThat(stats.getInternalNetworkInputDataSize()).isEqualTo(succinctBytes(expectedStatsValue));
+        assertThat(stats.getInternalNetworkInputPositions()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getPhysicalInputPositions()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getPhysicalInputReadTime()).isEqualTo(succinctDuration(expectedStatsValue, MILLISECONDS));
+        assertThat(stats.getPhysicalInputPositions()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getRawInputDataSize()).isEqualTo(succinctBytes(0));
+        assertThat(stats.getRawInputPositions()).isEqualTo(0);
+        assertThat(stats.getCumulativeUserMemory()).isEqualTo(expectedStatsValue);
+        assertThat(stats.getFailedCumulativeUserMemory()).isEqualTo(1);
+        assertThat(stats.getTotalMemoryReservation()).isEqualTo(succinctBytes(expectedStatsValue * 2L));
+        assertThat(stats.getUserMemoryReservation()).isEqualTo(succinctBytes(expectedStatsValue));
+        assertThat(stats.isFullyBlocked()).isFalse();
+        assertThat(stats.getBlockedReasons()).isEmpty();
+        assertThat(stats.getTotalCpuTime()).isEqualTo(succinctDuration(expectedStatsValue, MILLISECONDS));
+        assertThat(stats.getTotalScheduledTime()).isEqualTo(succinctDuration(expectedStatsValue, MILLISECONDS));
+        assertThat(stats.getFailedCpuTime()).isEqualTo(succinctDuration(1, MILLISECONDS));
+        assertThat(stats.getFailedScheduledTime()).isEqualTo(succinctDuration(1, MILLISECONDS));
+        assertThat(stats.getRunningPercentage()).isEmpty();
+        assertThat(stats.getProgressPercentage()).isEmpty();
+        assertThat(stats.getSpilledDataSize()).isEqualTo(succinctBytes(0));
     }
 
-    @Test
-    public void testCanceled()
+    private static TaskStats taskStats(List<PipelineContext> pipelineContexts)
     {
-        StageStateMachine stateMachine = createStageStateMachine();
+        return taskStats(pipelineContexts, 0);
+    }
 
-        assertTrue(stateMachine.transitionToCanceled());
-        assertFinalState(stateMachine, StageState.CANCELED);
+    private static TaskStats taskStats(List<PipelineContext> pipelineContexts, int baseValue)
+    {
+        return new TaskStats(DateTime.now(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                new Duration(baseValue, MILLISECONDS),
+                new Duration(baseValue, MILLISECONDS),
+                baseValue,
+                baseValue,
+                baseValue,
+                baseValue,
+                baseValue,
+                baseValue,
+                baseValue,
+                baseValue,
+                baseValue,
+                baseValue,
+                DataSize.ofBytes(baseValue),
+                DataSize.ofBytes(baseValue),
+                DataSize.ofBytes(baseValue),
+                new Duration(baseValue, MILLISECONDS),
+                new Duration(baseValue, MILLISECONDS),
+                new Duration(baseValue, MILLISECONDS),
+                false,
+                ImmutableSet.of(),
+                DataSize.ofBytes(baseValue),
+                baseValue,
+                new Duration(baseValue, MILLISECONDS),
+                DataSize.ofBytes(baseValue),
+                baseValue,
+                DataSize.ofBytes(baseValue),
+                baseValue,
+                DataSize.ofBytes(baseValue),
+                baseValue,
+                new Duration(baseValue, MILLISECONDS),
+                DataSize.ofBytes(baseValue),
+                baseValue,
+                new Duration(baseValue, MILLISECONDS),
+                DataSize.ofBytes(baseValue),
+                DataSize.ofBytes(baseValue),
+                Optional.empty(),
+                baseValue,
+                new Duration(baseValue, MILLISECONDS),
+                pipelineContexts.stream().map(PipelineContext::getPipelineStats).collect(toImmutableList()));
     }
 
     private static void assertFinalState(StageStateMachine stateMachine, StageState expectedState)
     {
-        assertTrue(expectedState.isDone());
+        assertThat(expectedState.isDone()).isTrue();
 
         assertState(stateMachine, expectedState);
 
-        assertFalse(stateMachine.transitionToScheduling());
+        assertThat(stateMachine.transitionToScheduling()).isFalse();
         assertState(stateMachine, expectedState);
 
-        assertFalse(stateMachine.transitionToScheduled());
+        assertThat(stateMachine.transitionToPending()).isFalse();
         assertState(stateMachine, expectedState);
 
-        assertFalse(stateMachine.transitionToRunning());
+        assertThat(stateMachine.transitionToRunning()).isFalse();
         assertState(stateMachine, expectedState);
 
-        assertFalse(stateMachine.transitionToFlushing());
+        assertThat(stateMachine.transitionToFinished()).isFalse();
         assertState(stateMachine, expectedState);
 
-        assertFalse(stateMachine.transitionToFinished());
-        assertState(stateMachine, expectedState);
-
-        assertFalse(stateMachine.transitionToFailed(FAILED_CAUSE));
-        assertState(stateMachine, expectedState);
-
-        assertFalse(stateMachine.transitionToAborted());
+        assertThat(stateMachine.transitionToFailed(FAILED_CAUSE)).isFalse();
         assertState(stateMachine, expectedState);
 
         // attempt to fail with another exception, which will fail
-        assertFalse(stateMachine.transitionToFailed(new IOException("failure after finish")));
+        assertThat(stateMachine.transitionToFailed(new IOException("failure after finish"))).isFalse();
         assertState(stateMachine, expectedState);
     }
 
     private static void assertState(StageStateMachine stateMachine, StageState expectedState)
     {
-        assertEquals(stateMachine.getStageId(), STAGE_ID);
-        assertSame(stateMachine.getSession(), TEST_SESSION);
+        assertThat(stateMachine.getStageId()).isEqualTo(STAGE_ID);
 
         StageInfo stageInfo = stateMachine.getStageInfo(ImmutableList::of);
-        assertEquals(stageInfo.getStageId(), STAGE_ID);
-        assertEquals(stageInfo.getSubStages(), ImmutableList.of());
-        assertEquals(stageInfo.getTasks(), ImmutableList.of());
-        assertEquals(stageInfo.getTypes(), ImmutableList.of(VARCHAR));
-        assertSame(stageInfo.getPlan(), PLAN_FRAGMENT);
+        assertThat(stageInfo.getStageId()).isEqualTo(STAGE_ID);
+        assertThat(stageInfo.getSubStages()).isEqualTo(ImmutableList.of());
+        assertThat(stageInfo.getTasks()).isEqualTo(ImmutableList.of());
+        assertThat(stageInfo.getTypes()).isEqualTo(ImmutableList.of(VARCHAR));
+        assertThat(stageInfo.getPlan()).isSameAs(PLAN_FRAGMENT);
 
-        assertEquals(stateMachine.getState(), expectedState);
-        assertEquals(stageInfo.getState(), expectedState);
+        assertThat(stateMachine.getState()).isEqualTo(expectedState);
+        assertThat(stageInfo.getState()).isEqualTo(expectedState);
 
         if (expectedState == StageState.FAILED) {
             ExecutionFailureInfo failure = stageInfo.getFailureCause();
-            assertEquals(failure.getMessage(), FAILED_CAUSE.getMessage());
-            assertEquals(failure.getType(), FAILED_CAUSE.getClass().getName());
+            assertThat(failure.getMessage()).isEqualTo(FAILED_CAUSE.getMessage());
+            assertThat(failure.getType()).isEqualTo(FAILED_CAUSE.getClass().getName());
         }
         else {
-            assertNull(stageInfo.getFailureCause());
+            assertThat(stageInfo.getFailureCause()).isNull();
         }
     }
 
     private StageStateMachine createStageStateMachine()
     {
-        return new StageStateMachine(STAGE_ID, TEST_SESSION, PLAN_FRAGMENT, ImmutableMap.of(), executor, new SplitSchedulerStats());
+        return new StageStateMachine(
+                STAGE_ID,
+                PLAN_FRAGMENT,
+                ImmutableMap.of(),
+                executor,
+                noopTracer(),
+                Span.getInvalid(),
+                new SplitSchedulerStats());
     }
 
     private static PlanFragment createValuesPlan()
     {
-        Symbol symbol = new Symbol("column");
+        Symbol symbol = new Symbol(VARCHAR, "column");
         PlanNodeId valuesNodeId = new PlanNodeId("plan");
         PlanFragment planFragment = new PlanFragment(
                 new PlanFragmentId("plan"),
                 new ValuesNode(valuesNodeId,
                         ImmutableList.of(symbol),
-                        ImmutableList.of(new Row(ImmutableList.of(new StringLiteral("foo"))))),
-                ImmutableMap.of(symbol, VARCHAR),
+                        ImmutableList.of(new Row(ImmutableList.of(new Constant(VARCHAR, Slices.utf8Slice("foo")))))),
+                ImmutableSet.of(symbol),
                 SOURCE_DISTRIBUTION,
+                Optional.empty(),
                 ImmutableList.of(valuesNodeId),
                 new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), ImmutableList.of(symbol)),
-                ungroupedExecution(),
                 StatsAndCosts.empty(),
+                ImmutableList.of(),
+                ImmutableMap.of(),
                 Optional.empty());
 
         return planFragment;

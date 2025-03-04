@@ -13,30 +13,42 @@
  */
 package io.trino.plugin.geospatial;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.sql.planner.assertions.PlanMatchPattern;
-import io.trino.sql.planner.iterative.rule.ExtractSpatialJoins.ExtractSpatialLeftJoin;
-import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
-import io.trino.sql.planner.iterative.rule.test.RuleAssert;
+import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TestingFunctionResolution;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Logical;
+import io.trino.sql.ir.Reference;
+import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.iterative.rule.ExtractSpatialJoins;
+import io.trino.sql.planner.iterative.rule.test.RuleBuilder;
 import io.trino.sql.planner.iterative.rule.test.RuleTester;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.plugin.geospatial.GeometryType.GEOMETRY;
 import static io.trino.plugin.geospatial.SphericalGeographyType.SPHERICAL_GEOGRAPHY;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.Comparison.Operator.NOT_EQUAL;
+import static io.trino.sql.ir.IrExpressions.not;
+import static io.trino.sql.ir.Logical.Operator.AND;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.project;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.spatialLeftJoin;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
-import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.expression;
-import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
 
 public class TestExtractSpatialLeftJoin
-        extends BaseRuleTest
+        extends AbstractTestExtractSpatial
 {
-    public TestExtractSpatialLeftJoin()
-    {
-        super(new GeoPlugin());
-    }
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution(new GeoPlugin());
+    private static final ResolvedFunction ST_CONTAINS = FUNCTIONS.resolveFunction("st_contains", fromTypes(GEOMETRY, GEOMETRY));
+    private static final ResolvedFunction ST_GEOMETRY_FROM_TEXT = FUNCTIONS.resolveFunction("st_geometryfromtext", fromTypes(VARCHAR));
+    private static final ResolvedFunction ST_POINT = FUNCTIONS.resolveFunction("st_point", fromTypes(DOUBLE, DOUBLE));
 
     @Test
     public void testDoesNotFire()
@@ -44,71 +56,90 @@ public class TestExtractSpatialLeftJoin
         // scalar expression
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(),
-                                p.values(p.symbol("b")),
-                                expression("ST_Contains(ST_GeometryFromText('POLYGON ...'), b)")))
+                {
+                    Symbol b = p.symbol("b", GEOMETRY);
+                    return p.join(LEFT,
+                            p.values(),
+                            p.values(b),
+                            containsCall(geometryFromTextCall("POLYGON ..."), b.toSymbolReference()));
+                })
                 .doesNotFire();
 
         // OR operand
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR), p.symbol("name_1")),
-                                p.values(p.symbol("point", GEOMETRY), p.symbol("name_2")),
-                                expression("ST_Contains(ST_GeometryFromText(wkt), point) OR name_1 != name_2")))
+                {
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    Symbol point = p.symbol("point", GEOMETRY);
+                    Symbol name1 = p.symbol("name_1", VARCHAR);
+                    Symbol name2 = p.symbol("name_2", VARCHAR);
+                    return p.join(LEFT,
+                            p.values(wkt, name1),
+                            p.values(point, name2),
+                            Logical.or(
+                                    containsCall(geometryFromTextCall(wkt), point.toSymbolReference()),
+                                    new Comparison(NOT_EQUAL, name1.toSymbolReference(), name2.toSymbolReference())));
+                })
                 .doesNotFire();
 
         // NOT operator
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR), p.symbol("name_1")),
-                                p.values(p.symbol("point", GEOMETRY), p.symbol("name_2")),
-                                expression("NOT ST_Contains(ST_GeometryFromText(wkt), point)")))
+                {
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    Symbol point = p.symbol("point", GEOMETRY);
+                    Symbol name1 = p.symbol("name_1", VARCHAR);
+                    Symbol name2 = p.symbol("name_2", VARCHAR);
+                    return p.join(LEFT,
+                            p.values(wkt, name1),
+                            p.values(point, name2),
+                            not(FUNCTIONS.getMetadata(), containsCall(geometryFromTextCall(wkt), point.toSymbolReference())));
+                })
                 .doesNotFire();
 
         // ST_Distance(...) > r
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("a", GEOMETRY)),
-                                p.values(p.symbol("b", GEOMETRY)),
-                                expression("ST_Distance(a, b) > 5")))
+                {
+                    Symbol a = p.symbol("a", GEOMETRY);
+                    Symbol b = p.symbol("b", GEOMETRY);
+                    return p.join(LEFT,
+                            p.values(a),
+                            p.values(b),
+                            new Comparison(Comparison.Operator.GREATER_THAN,
+                                    distanceCall(a.toSymbolReference(), b.toSymbolReference()),
+                                    new Constant(DOUBLE, 5.0)));
+                })
                 .doesNotFire();
 
         // SphericalGeography operand
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("a", SPHERICAL_GEOGRAPHY)),
-                                p.values(p.symbol("b", SPHERICAL_GEOGRAPHY)),
-                                expression("ST_Distance(a, b) < 5")))
-                .doesNotFire();
-
-        assertRuleApplication()
-                .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("polygon", SPHERICAL_GEOGRAPHY)),
-                                p.values(p.symbol("point", SPHERICAL_GEOGRAPHY)),
-                                expression("ST_Contains(polygon, point)")))
+                {
+                    Symbol a = p.symbol("a", SPHERICAL_GEOGRAPHY);
+                    Symbol b = p.symbol("b", SPHERICAL_GEOGRAPHY);
+                    return p.join(LEFT,
+                            p.values(a),
+                            p.values(b),
+                            new Comparison(Comparison.Operator.GREATER_THAN,
+                                    sphericalDistanceCall(a.toSymbolReference(), b.toSymbolReference()),
+                                    new Constant(DOUBLE, 5.0)));
+                })
                 .doesNotFire();
 
         // to_spherical_geography() operand
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR)),
-                                p.values(p.symbol("point", SPHERICAL_GEOGRAPHY)),
-                                expression("ST_Distance(to_spherical_geography(ST_GeometryFromText(wkt)), point) < 5")))
-                .doesNotFire();
-
-        assertRuleApplication()
-                .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR)),
-                                p.values(p.symbol("point", SPHERICAL_GEOGRAPHY)),
-                                expression("ST_Contains(to_spherical_geography(ST_GeometryFromText(wkt)), point)")))
+                {
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    Symbol point = p.symbol("point", SPHERICAL_GEOGRAPHY);
+                    return p.join(LEFT,
+                            p.values(wkt),
+                            p.values(point),
+                            new Comparison(Comparison.Operator.GREATER_THAN,
+                                    sphericalDistanceCall(toSphericalGeographyCall(wkt), point.toSymbolReference()),
+                                    new Constant(DOUBLE, 5.0)));
+                })
                 .doesNotFire();
     }
 
@@ -118,36 +149,59 @@ public class TestExtractSpatialLeftJoin
         // symbols
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("a")),
-                                p.values(p.symbol("b")),
-                                expression("ST_Contains(a, b)")))
+                {
+                    Symbol a = p.symbol("a", GEOMETRY);
+                    Symbol b = p.symbol("b", GEOMETRY);
+                    return p.join(LEFT,
+                            p.values(a),
+                            p.values(b),
+                            containsCall(a.toSymbolReference(), b.toSymbolReference()));
+                })
                 .matches(
-                        spatialLeftJoin("ST_Contains(a, b)",
+                        spatialLeftJoin(
+                                new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "a"), new Reference(GEOMETRY, "b"))),
                                 values(ImmutableMap.of("a", 0)),
                                 values(ImmutableMap.of("b", 0))));
 
         // AND
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("a"), p.symbol("name_1")),
-                                p.values(p.symbol("b"), p.symbol("name_2")),
-                                expression("name_1 != name_2 AND ST_Contains(a, b)")))
+                {
+                    Symbol a = p.symbol("a", GEOMETRY);
+                    Symbol b = p.symbol("b", GEOMETRY);
+                    Symbol name1 = p.symbol("name_1", VARCHAR);
+                    Symbol name2 = p.symbol("name_2", VARCHAR);
+                    return p.join(LEFT,
+                            p.values(a, name1),
+                            p.values(b, name2),
+                            Logical.and(
+                                    new Comparison(NOT_EQUAL, name1.toSymbolReference(), name2.toSymbolReference()),
+                                    containsCall(a.toSymbolReference(), b.toSymbolReference())));
+                })
                 .matches(
-                        spatialLeftJoin("name_1 != name_2 AND ST_Contains(a, b)",
+                        spatialLeftJoin(
+                                new Logical(AND, ImmutableList.of(new Comparison(NOT_EQUAL, new Reference(VARCHAR, "name_1"), new Reference(VARCHAR, "name_2")), new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "a"), new Reference(GEOMETRY, "b"))))),
                                 values(ImmutableMap.of("a", 0, "name_1", 1)),
                                 values(ImmutableMap.of("b", 0, "name_2", 1))));
 
         // AND
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("a1"), p.symbol("a2")),
-                                p.values(p.symbol("b1"), p.symbol("b2")),
-                                expression("ST_Contains(a1, b1) AND ST_Contains(a2, b2)")))
+                {
+                    Symbol a1 = p.symbol("a1", GEOMETRY);
+                    Symbol a2 = p.symbol("a2", GEOMETRY);
+                    Symbol b1 = p.symbol("b1", GEOMETRY);
+                    Symbol b2 = p.symbol("b2", GEOMETRY);
+                    return p.join(LEFT,
+                            p.values(a1, a2),
+                            p.values(b1, b2),
+                            Logical.and(
+                                    containsCall(a1.toSymbolReference(), b1.toSymbolReference()),
+                                    containsCall(a2.toSymbolReference(), b2.toSymbolReference())));
+                })
                 .matches(
-                        spatialLeftJoin("ST_Contains(a1, b1) AND ST_Contains(a2, b2)",
+                        spatialLeftJoin(
+                                new Logical(AND, ImmutableList.of(new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "a1"), new Reference(GEOMETRY, "b1"))), new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "a2"), new Reference(GEOMETRY, "b2"))))),
                                 values(ImmutableMap.of("a1", 0, "a2", 1)),
                                 values(ImmutableMap.of("b1", 0, "b2", 1))));
     }
@@ -157,21 +211,30 @@ public class TestExtractSpatialLeftJoin
     {
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR)),
-                                p.values(p.symbol("point", GEOMETRY)),
-                                expression("ST_Contains(ST_GeometryFromText(wkt), point)")))
+                {
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    Symbol point = p.symbol("point", GEOMETRY);
+                    return p.join(LEFT,
+                            p.values(wkt),
+                            p.values(point),
+                            containsCall(geometryFromTextCall(wkt), point.toSymbolReference()));
+                })
                 .matches(
-                        spatialLeftJoin("ST_Contains(st_geometryfromtext, point)",
-                                project(ImmutableMap.of("st_geometryfromtext", PlanMatchPattern.expression("ST_GeometryFromText(wkt)")), values(ImmutableMap.of("wkt", 0))),
+                        spatialLeftJoin(
+                                new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "st_geometryfromtext"), new Reference(GEOMETRY, "point"))),
+                                project(ImmutableMap.of("st_geometryfromtext", expression(new Call(ST_GEOMETRY_FROM_TEXT, ImmutableList.of(new Reference(VARCHAR, "wkt"))))),
+                                        values(ImmutableMap.of("wkt", 0))),
                                 values(ImmutableMap.of("point", 0))));
 
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR)),
-                                p.values(),
-                                expression("ST_Contains(ST_GeometryFromText(wkt), ST_Point(0, 0))")))
+                {
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    return p.join(LEFT,
+                            p.values(wkt),
+                            p.values(),
+                            containsCall(geometryFromTextCall(wkt), toPointCall(new Constant(DOUBLE, 0.0), new Constant(DOUBLE, 0.0))));
+                })
                 .doesNotFire();
     }
 
@@ -180,21 +243,32 @@ public class TestExtractSpatialLeftJoin
     {
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("polygon", GEOMETRY)),
-                                p.values(p.symbol("lat"), p.symbol("lng")),
-                                expression("ST_Contains(polygon, ST_Point(lng, lat))")))
+                {
+                    Symbol polygon = p.symbol("polygon", GEOMETRY);
+                    Symbol lat = p.symbol("lat", DOUBLE);
+                    Symbol lng = p.symbol("lng", DOUBLE);
+                    return p.join(LEFT,
+                            p.values(polygon),
+                            p.values(lat, lng),
+                            containsCall(polygon.toSymbolReference(), toPointCall(lng.toSymbolReference(), lat.toSymbolReference())));
+                })
                 .matches(
-                        spatialLeftJoin("ST_Contains(polygon, st_point)",
+                        spatialLeftJoin(
+                                new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "polygon"), new Reference(GEOMETRY, "st_point"))),
                                 values(ImmutableMap.of("polygon", 0)),
-                                project(ImmutableMap.of("st_point", PlanMatchPattern.expression("ST_Point(lng, lat)")), values(ImmutableMap.of("lat", 0, "lng", 1)))));
+                                project(ImmutableMap.of("st_point", expression(new Call(ST_POINT, ImmutableList.of(new Reference(DOUBLE, "lng"), new Reference(DOUBLE, "lat"))))),
+                                        values(ImmutableMap.of("lat", 0, "lng", 1)))));
 
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(),
-                                p.values(p.symbol("lat"), p.symbol("lng")),
-                                expression("ST_Contains(ST_GeometryFromText('POLYGON ...'), ST_Point(lng, lat))")))
+                {
+                    Symbol lat = p.symbol("lat", DOUBLE);
+                    Symbol lng = p.symbol("lng", DOUBLE);
+                    return p.join(LEFT,
+                            p.values(),
+                            p.values(lat, lng),
+                            containsCall(geometryFromTextCall("POLYGON ..."), toPointCall(lng.toSymbolReference(), lat.toSymbolReference())));
+                })
                 .doesNotFire();
     }
 
@@ -203,14 +277,22 @@ public class TestExtractSpatialLeftJoin
     {
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR)),
-                                p.values(p.symbol("lat"), p.symbol("lng")),
-                                expression("ST_Contains(ST_GeometryFromText(wkt), ST_Point(lng, lat))")))
+                {
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    Symbol lat = p.symbol("lat", DOUBLE);
+                    Symbol lng = p.symbol("lng", DOUBLE);
+                    return p.join(LEFT,
+                            p.values(wkt),
+                            p.values(lat, lng),
+                            containsCall(geometryFromTextCall(wkt), toPointCall(lng.toSymbolReference(), lat.toSymbolReference())));
+                })
                 .matches(
-                        spatialLeftJoin("ST_Contains(st_geometryfromtext, st_point)",
-                                project(ImmutableMap.of("st_geometryfromtext", PlanMatchPattern.expression("ST_GeometryFromText(wkt)")), values(ImmutableMap.of("wkt", 0))),
-                                project(ImmutableMap.of("st_point", PlanMatchPattern.expression("ST_Point(lng, lat)")), values(ImmutableMap.of("lat", 0, "lng", 1)))));
+                        spatialLeftJoin(
+                                new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "st_geometryfromtext"), new Reference(GEOMETRY, "st_point"))),
+                                project(ImmutableMap.of("st_geometryfromtext", expression(new Call(ST_GEOMETRY_FROM_TEXT, ImmutableList.of(new Reference(VARCHAR, "wkt"))))),
+                                        values(ImmutableMap.of("wkt", 0))),
+                                project(ImmutableMap.of("st_point", expression(new Call(ST_POINT, ImmutableList.of(new Reference(DOUBLE, "lng"), new Reference(DOUBLE, "lat"))))),
+                                        values(ImmutableMap.of("lat", 0, "lng", 1)))));
     }
 
     @Test
@@ -218,14 +300,21 @@ public class TestExtractSpatialLeftJoin
     {
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("lat"), p.symbol("lng")),
-                                p.values(p.symbol("wkt", VARCHAR)),
-                                expression("ST_Contains(ST_GeometryFromText(wkt), ST_Point(lng, lat))")))
+                {
+                    Symbol lat = p.symbol("lat", DOUBLE);
+                    Symbol lng = p.symbol("lng", DOUBLE);
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    return p.join(LEFT,
+                            p.values(lat, lng),
+                            p.values(wkt),
+                            containsCall(geometryFromTextCall(wkt), toPointCall(lng.toSymbolReference(), lat.toSymbolReference())));
+                })
                 .matches(
-                        spatialLeftJoin("ST_Contains(st_geometryfromtext, st_point)",
-                                project(ImmutableMap.of("st_point", PlanMatchPattern.expression("ST_Point(lng, lat)")), values(ImmutableMap.of("lat", 0, "lng", 1))),
-                                project(ImmutableMap.of("st_geometryfromtext", PlanMatchPattern.expression("ST_GeometryFromText(wkt)")), values(ImmutableMap.of("wkt", 0)))));
+                        spatialLeftJoin(
+                                new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "st_geometryfromtext"), new Reference(GEOMETRY, "st_point"))),
+                                project(ImmutableMap.of("st_point", expression(new Call(ST_POINT, ImmutableList.of(new Reference(DOUBLE, "lng"), new Reference(DOUBLE, "lat"))))), values(ImmutableMap.of("lat", 0, "lng", 1))),
+                                project(ImmutableMap.of("st_geometryfromtext", expression(new Call(ST_GEOMETRY_FROM_TEXT, ImmutableList.of(new Reference(VARCHAR, "wkt"))))),
+                                        values(ImmutableMap.of("wkt", 0)))));
     }
 
     @Test
@@ -233,31 +322,53 @@ public class TestExtractSpatialLeftJoin
     {
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt", VARCHAR), p.symbol("name_1")),
-                                p.values(p.symbol("lat"), p.symbol("lng"), p.symbol("name_2")),
-                                expression("name_1 != name_2 AND ST_Contains(ST_GeometryFromText(wkt), ST_Point(lng, lat))")))
+                {
+                    Symbol wkt = p.symbol("wkt", VARCHAR);
+                    Symbol lat = p.symbol("lat", DOUBLE);
+                    Symbol lng = p.symbol("lng", DOUBLE);
+                    Symbol name1 = p.symbol("name_1", VARCHAR);
+                    Symbol name2 = p.symbol("name_2", VARCHAR);
+                    return p.join(LEFT,
+                            p.values(wkt, name1),
+                            p.values(lat, lng, name2),
+                            Logical.and(
+                                    new Comparison(NOT_EQUAL, name1.toSymbolReference(), name2.toSymbolReference()),
+                                    containsCall(geometryFromTextCall(wkt), toPointCall(lng.toSymbolReference(), lat.toSymbolReference()))));
+                })
                 .matches(
-                        spatialLeftJoin("name_1 != name_2 AND ST_Contains(st_geometryfromtext, st_point)",
-                                project(ImmutableMap.of("st_geometryfromtext", PlanMatchPattern.expression("ST_GeometryFromText(wkt)")), values(ImmutableMap.of("wkt", 0, "name_1", 1))),
-                                project(ImmutableMap.of("st_point", PlanMatchPattern.expression("ST_Point(lng, lat)")), values(ImmutableMap.of("lat", 0, "lng", 1, "name_2", 2)))));
+                        spatialLeftJoin(
+                                new Logical(AND, ImmutableList.of(new Comparison(NOT_EQUAL, new Reference(VARCHAR, "name_1"), new Reference(VARCHAR, "name_2")), new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "st_geometryfromtext"), new Reference(GEOMETRY, "st_point"))))),
+                                project(ImmutableMap.of("st_geometryfromtext", expression(new Call(ST_GEOMETRY_FROM_TEXT, ImmutableList.of(new Reference(VARCHAR, "wkt"))))),
+                                        values(ImmutableMap.of("wkt", 0, "name_1", 1))),
+                                project(ImmutableMap.of("st_point", expression(new Call(ST_POINT, ImmutableList.of(new Reference(DOUBLE, "lng"), new Reference(DOUBLE, "lat"))))),
+                                        values(ImmutableMap.of("lat", 0, "lng", 1, "name_2", 2)))));
 
         // Multiple spatial functions - only the first one is being processed
         assertRuleApplication()
                 .on(p ->
-                        p.join(LEFT,
-                                p.values(p.symbol("wkt1", VARCHAR), p.symbol("wkt2", VARCHAR)),
-                                p.values(p.symbol("geometry1"), p.symbol("geometry2")),
-                                expression("ST_Contains(ST_GeometryFromText(wkt1), geometry1) AND ST_Contains(ST_GeometryFromText(wkt2), geometry2)")))
+                {
+                    Symbol wkt1 = p.symbol("wkt1", VARCHAR);
+                    Symbol wkt2 = p.symbol("wkt2", VARCHAR);
+                    Symbol geometry1 = p.symbol("geometry1", GEOMETRY);
+                    Symbol geometry2 = p.symbol("geometry2", GEOMETRY);
+                    return p.join(LEFT,
+                            p.values(wkt1, wkt2),
+                            p.values(geometry1, geometry2),
+                            Logical.and(
+                                    containsCall(geometryFromTextCall(wkt1), geometry1.toSymbolReference()),
+                                    containsCall(geometryFromTextCall(wkt2), geometry2.toSymbolReference())));
+                })
                 .matches(
-                        spatialLeftJoin("ST_Contains(st_geometryfromtext, geometry1) AND ST_Contains(ST_GeometryFromText(wkt2), geometry2)",
-                                project(ImmutableMap.of("st_geometryfromtext", PlanMatchPattern.expression("ST_GeometryFromText(wkt1)")), values(ImmutableMap.of("wkt1", 0, "wkt2", 1))),
+                        spatialLeftJoin(
+                                new Logical(AND, ImmutableList.of(new Call(ST_CONTAINS, ImmutableList.of(new Reference(GEOMETRY, "st_geometryfromtext"), new Reference(GEOMETRY, "geometry1"))), new Call(ST_CONTAINS, ImmutableList.of(new Call(ST_GEOMETRY_FROM_TEXT, ImmutableList.of(new Reference(VARCHAR, "wkt2"))), new Reference(GEOMETRY, "geometry2"))))),
+                                project(ImmutableMap.of("st_geometryfromtext", expression(new Call(ST_GEOMETRY_FROM_TEXT, ImmutableList.of(new Reference(VARCHAR, "wkt1"))))),
+                                        values(ImmutableMap.of("wkt1", 0, "wkt2", 1))),
                                 values(ImmutableMap.of("geometry1", 0, "geometry2", 1))));
     }
 
-    private RuleAssert assertRuleApplication()
+    private RuleBuilder assertRuleApplication()
     {
         RuleTester tester = tester();
-        return tester().assertThat(new ExtractSpatialLeftJoin(tester.getMetadata(), tester.getSplitManager(), tester.getPageSourceManager(), tester.getTypeAnalyzer()));
+        return tester.assertThat(new ExtractSpatialJoins.ExtractSpatialLeftJoin(tester.getPlannerContext(), tester.getSplitManager(), tester.getPageSourceManager()));
     }
 }

@@ -23,11 +23,11 @@ import org.assertj.core.api.RecursiveComparisonAssert;
 import org.assertj.core.api.ThrowableAssertAlternative;
 import org.assertj.core.api.recursive.comparison.RecursiveComparisonConfiguration;
 import org.assertj.core.presentation.StandardRepresentation;
+import org.intellij.lang.annotations.Language;
 
 import java.util.function.Function;
 
 import static io.trino.sql.SqlFormatter.formatSql;
-import static io.trino.sql.parser.ParsingOptions.DecimalLiteralTreatment.AS_DECIMAL;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 public class ParserAssert
@@ -50,12 +50,12 @@ public class ParserAssert
         return createAssertion(new SqlParser()::createType, sql);
     }
 
-    public static AssertProvider<ParserAssert> expression(String sql)
+    public static AssertProvider<ParserAssert> expression(@Language("SQL") String sql)
     {
         return createAssertion(ParserAssert::createExpression, sql);
     }
 
-    public static AssertProvider<ParserAssert> statement(String sql)
+    public static AssertProvider<ParserAssert> statement(@Language("SQL") String sql)
     {
         return createAssertion(ParserAssert::createStatement, sql);
     }
@@ -65,24 +65,29 @@ public class ParserAssert
         return createAssertion(new SqlParser()::createRowPattern, sql);
     }
 
+    public static AssertProvider<ParserAssert> functionSpecification(String sql)
+    {
+        return createAssertion(new SqlParser()::createFunctionSpecification, sql);
+    }
+
     private static Expression createExpression(String expression)
     {
-        return new SqlParser().createExpression(expression, new ParsingOptions(AS_DECIMAL));
+        return new SqlParser().createExpression(expression);
     }
 
     private static Statement createStatement(String statement)
     {
-        return new SqlParser().createStatement(statement, new ParsingOptions(AS_DECIMAL));
+        return new SqlParser().createStatement(statement);
     }
 
-    public static ThrowableAssertAlternative<ParsingException> assertExpressionIsInvalid(String sql)
+    public static ThrowableAssertAlternative<ParsingException> assertExpressionIsInvalid(@Language("SQL") String sql)
     {
         return assertThatExceptionOfType(ParsingException.class)
                 .as("expression: %s", sql)
                 .isThrownBy(() -> createExpression(sql));
     }
 
-    public static ThrowableAssertAlternative<ParsingException> assertStatementIsInvalid(String sql)
+    public static ThrowableAssertAlternative<ParsingException> assertStatementIsInvalid(@Language("SQL") String sql)
     {
         return assertThatExceptionOfType(ParsingException.class)
                 .as("statement: %s", sql)

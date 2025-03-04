@@ -17,7 +17,9 @@ import com.google.common.collect.ImmutableList;
 import io.trino.plugin.iceberg.util.PageListBuilder;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
@@ -68,10 +70,14 @@ public class ManifestsTable
                         .add(new ColumnMetadata("partition_spec_id", INTEGER))
                         .add(new ColumnMetadata("added_snapshot_id", BIGINT))
                         .add(new ColumnMetadata("added_data_files_count", INTEGER))
+                        .add(new ColumnMetadata("added_rows_count", BIGINT))
                         .add(new ColumnMetadata("existing_data_files_count", INTEGER))
+                        .add(new ColumnMetadata("existing_rows_count", BIGINT))
                         .add(new ColumnMetadata("deleted_data_files_count", INTEGER))
-                        .add(new ColumnMetadata("partitions", new ArrayType(RowType.rowType(
+                        .add(new ColumnMetadata("deleted_rows_count", BIGINT))
+                        .add(new ColumnMetadata("partition_summaries", new ArrayType(RowType.rowType(
                                 RowType.field("contains_null", BOOLEAN),
+                                RowType.field("contains_nan", BOOLEAN),
                                 RowType.field("lower_bound", VARCHAR),
                                 RowType.field("upper_bound", VARCHAR)))))
                         .build());
@@ -110,15 +116,18 @@ public class ManifestsTable
 
         Map<Integer, PartitionSpec> partitionSpecsById = icebergTable.specs();
 
-        snapshot.allManifests().forEach(file -> {
+        snapshot.allManifests(icebergTable.io()).forEach(file -> {
             pagesBuilder.beginRow();
             pagesBuilder.appendVarchar(file.path());
             pagesBuilder.appendBigint(file.length());
             pagesBuilder.appendInteger(file.partitionSpecId());
             pagesBuilder.appendBigint(file.snapshotId());
             pagesBuilder.appendInteger(file.addedFilesCount());
+            pagesBuilder.appendBigint(file.addedRowsCount());
             pagesBuilder.appendInteger(file.existingFilesCount());
+            pagesBuilder.appendBigint(file.existingRowsCount());
             pagesBuilder.appendInteger(file.deletedFilesCount());
+            pagesBuilder.appendBigint(file.deletedRowsCount());
             writePartitionSummaries(pagesBuilder.nextColumn(), file.partitions(), partitionSpecsById.get(file.partitionSpecId()));
             pagesBuilder.endRow();
         });
@@ -128,20 +137,27 @@ public class ManifestsTable
 
     private static void writePartitionSummaries(BlockBuilder arrayBlockBuilder, List<PartitionFieldSummary> summaries, PartitionSpec partitionSpec)
     {
-        BlockBuilder singleArrayWriter = arrayBlockBuilder.beginBlockEntry();
-        for (int i = 0; i < summaries.size(); i++) {
-            PartitionFieldSummary summary = summaries.get(i);
-            PartitionField field = partitionSpec.fields().get(i);
-            Type nestedType = partitionSpec.partitionType().fields().get(i).type();
+        ((ArrayBlockBuilder) arrayBlockBuilder).buildEntry(elementBuilder -> {
+            for (int i = 0; i < summaries.size(); i++) {
+                PartitionFieldSummary summary = summaries.get(i);
+                PartitionField field = partitionSpec.fields().get(i);
+                Type nestedType = partitionSpec.partitionType().fields().get(i).type();
 
-            BlockBuilder rowBuilder = singleArrayWriter.beginBlockEntry();
-            BOOLEAN.writeBoolean(rowBuilder, summary.containsNull());
-            VARCHAR.writeString(rowBuilder, field.transform().toHumanString(
-                    Conversions.fromByteBuffer(nestedType, summary.lowerBound())));
-            VARCHAR.writeString(rowBuilder, field.transform().toHumanString(
-                    Conversions.fromByteBuffer(nestedType, summary.upperBound())));
-            singleArrayWriter.closeEntry();
-        }
-        arrayBlockBuilder.closeEntry();
+                ((RowBlockBuilder) elementBuilder).buildEntry(fieldBuilders -> {
+                    BOOLEAN.writeBoolean(fieldBuilders.get(0), summary.containsNull());
+                    Boolean containsNan = summary.containsNaN();
+                    if (containsNan == null) {
+                        fieldBuilders.get(1).appendNull();
+                    }
+                    else {
+                        BOOLEAN.writeBoolean(fieldBuilders.get(1), containsNan);
+                    }
+                    VARCHAR.writeString(fieldBuilders.get(2), field.transform().toHumanString(
+                            nestedType, Conversions.fromByteBuffer(nestedType, summary.lowerBound())));
+                    VARCHAR.writeString(fieldBuilders.get(3), field.transform().toHumanString(
+                            nestedType, Conversions.fromByteBuffer(nestedType, summary.upperBound())));
+                });
+            }
+        });
     }
 }

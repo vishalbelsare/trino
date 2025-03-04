@@ -14,74 +14,88 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Streams;
 import io.airlift.json.JsonCodec;
+import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
-import io.trino.plugin.hive.HdfsEnvironment;
-import io.trino.plugin.hive.HdfsEnvironment.HdfsContext;
+import io.airlift.units.DataSize;
+import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
 import io.trino.plugin.iceberg.PartitionTransforms.ColumnTransform;
 import io.trino.spi.Page;
 import io.trino.spi.PageIndexer;
 import io.trino.spi.PageIndexerFactory;
+import io.trino.spi.PageSorter;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.type.BigintType;
-import io.trino.spi.type.BooleanType;
-import io.trino.spi.type.DateType;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.DoubleType;
-import io.trino.spi.type.IntegerType;
-import io.trino.spi.type.RealType;
-import io.trino.spi.type.SmallintType;
-import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.UuidType;
+import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.mapred.JobConf;
-import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.MetricsConfig;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.PartitionSpecParser;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.transforms.Transform;
+import org.apache.iceberg.types.TypeUtil;
+import org.apache.iceberg.types.Types;
 
+import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
-import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.wrappedBuffer;
-import static io.trino.plugin.hive.util.ConfigurationUtils.toJobConf;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_TOO_MANY_OPEN_PARTITIONS;
+import static io.trino.plugin.iceberg.IcebergSessionProperties.isSortedWritingEnabled;
+import static io.trino.plugin.iceberg.IcebergUtil.getTopLevelColumns;
 import static io.trino.plugin.iceberg.PartitionTransforms.getColumnTransform;
 import static io.trino.plugin.iceberg.util.Timestamps.getTimestampTz;
 import static io.trino.plugin.iceberg.util.Timestamps.timestampTzToMicros;
+import static io.trino.spi.block.RowBlock.getRowFieldsFromBlock;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.Decimals.readBigDecimal;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.RealType.REAL;
+import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MICROSECOND;
+import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.UuidType.trinoUuidToJavaUuid;
-import static java.lang.Float.intBitsToFloat;
-import static java.lang.Math.toIntExact;
+import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static org.apache.iceberg.FileContent.DATA;
 
 public class IcebergPageSink
         implements ConnectorPageSink
 {
+    private static final Logger LOG = Logger.get(IcebergPageSink.class);
+
     private static final int MAX_PAGE_POSITIONS = 4096;
 
     private final int maxOpenWriters;
@@ -89,19 +103,35 @@ public class IcebergPageSink
     private final PartitionSpec partitionSpec;
     private final LocationProvider locationProvider;
     private final IcebergFileWriterFactory fileWriterFactory;
-    private final HdfsEnvironment hdfsEnvironment;
-    private final HdfsContext hdfsContext;
-    private final JobConf jobConf;
+    private final TrinoFileSystem fileSystem;
     private final JsonCodec<CommitTaskData> jsonCodec;
     private final ConnectorSession session;
-    private final FileFormat fileFormat;
+    private final IcebergFileFormat fileFormat;
+    private final MetricsConfig metricsConfig;
     private final PagePartitioner pagePartitioner;
+    private final long targetMaxFileSize;
+    private final long idleWriterMinFileSize;
+    private final Map<String, String> storageProperties;
+    private final List<TrinoSortField> sortOrder;
+    private final boolean sortedWritingEnabled;
+    private final DataSize sortingFileWriterBufferSize;
+    private final Integer sortingFileWriterMaxOpenFiles;
+    private final Location tempDirectory;
+    private final TypeManager typeManager;
+    private final PageSorter pageSorter;
+    private final List<Type> columnTypes;
+    private final List<Integer> sortColumnIndexes;
+    private final List<SortOrder> sortOrders;
 
     private final List<WriteContext> writers = new ArrayList<>();
+    private final List<Closeable> closedWriterRollbackActions = new ArrayList<>();
+    private final Collection<Slice> commitTasks = new ArrayList<>();
+    private final List<Boolean> activeWriters = new ArrayList<>();
 
     private long writtenBytes;
-    private long systemMemoryUsage;
+    private long memoryUsage;
     private long validationCpuNanos;
+    private long currentOpenWriters;
 
     public IcebergPageSink(
             Schema outputSchema,
@@ -109,27 +139,63 @@ public class IcebergPageSink
             LocationProvider locationProvider,
             IcebergFileWriterFactory fileWriterFactory,
             PageIndexerFactory pageIndexerFactory,
-            HdfsEnvironment hdfsEnvironment,
-            HdfsContext hdfsContext,
+            TrinoFileSystem fileSystem,
             List<IcebergColumnHandle> inputColumns,
             JsonCodec<CommitTaskData> jsonCodec,
             ConnectorSession session,
-            FileFormat fileFormat,
-            int maxOpenWriters)
+            IcebergFileFormat fileFormat,
+            Map<String, String> storageProperties,
+            int maxOpenWriters,
+            List<TrinoSortField> sortOrder,
+            DataSize sortingFileWriterBufferSize,
+            int sortingFileWriterMaxOpenFiles,
+            TypeManager typeManager,
+            PageSorter pageSorter)
     {
         requireNonNull(inputColumns, "inputColumns is null");
         this.outputSchema = requireNonNull(outputSchema, "outputSchema is null");
         this.partitionSpec = requireNonNull(partitionSpec, "partitionSpec is null");
         this.locationProvider = requireNonNull(locationProvider, "locationProvider is null");
         this.fileWriterFactory = requireNonNull(fileWriterFactory, "fileWriterFactory is null");
-        this.hdfsEnvironment = requireNonNull(hdfsEnvironment, "hdfsEnvironment is null");
-        this.hdfsContext = requireNonNull(hdfsContext, "hdfsContext is null");
-        this.jobConf = toJobConf(hdfsEnvironment.getConfiguration(hdfsContext, new Path(locationProvider.newDataLocation("data-file"))));
+        this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.jsonCodec = requireNonNull(jsonCodec, "jsonCodec is null");
         this.session = requireNonNull(session, "session is null");
         this.fileFormat = requireNonNull(fileFormat, "fileFormat is null");
+        this.metricsConfig = MetricsConfig.fromProperties(requireNonNull(storageProperties, "storageProperties is null"));
         this.maxOpenWriters = maxOpenWriters;
-        this.pagePartitioner = new PagePartitioner(pageIndexerFactory, toPartitionColumns(inputColumns, partitionSpec));
+        this.pagePartitioner = new PagePartitioner(pageIndexerFactory, toPartitionColumns(inputColumns, partitionSpec, outputSchema));
+        this.targetMaxFileSize = IcebergSessionProperties.getTargetMaxFileSize(session);
+        this.idleWriterMinFileSize = IcebergSessionProperties.getIdleWriterMinFileSize(session);
+        this.storageProperties = requireNonNull(storageProperties, "storageProperties is null");
+        this.sortOrder = requireNonNull(sortOrder, "sortOrder is null");
+        this.sortedWritingEnabled = isSortedWritingEnabled(session);
+        this.sortingFileWriterBufferSize = requireNonNull(sortingFileWriterBufferSize, "sortingFileWriterBufferSize is null");
+        this.sortingFileWriterMaxOpenFiles = sortingFileWriterMaxOpenFiles;
+        this.tempDirectory = Location.of(locationProvider.newDataLocation("trino-tmp-files"));
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
+        this.pageSorter = requireNonNull(pageSorter, "pageSorter is null");
+        this.columnTypes = getTopLevelColumns(outputSchema, typeManager).stream()
+                .map(IcebergColumnHandle::getType)
+                .collect(toImmutableList());
+
+        if (sortedWritingEnabled) {
+            ImmutableList.Builder<Integer> sortColumnIndexes = ImmutableList.builder();
+            ImmutableList.Builder<SortOrder> sortOrders = ImmutableList.builder();
+            for (TrinoSortField sortField : sortOrder) {
+                Types.NestedField column = outputSchema.findField(sortField.sourceColumnId());
+                if (column == null) {
+                    throw new TrinoException(ICEBERG_INVALID_METADATA, "Unable to find sort field source column in the table schema: " + sortField);
+                }
+                sortColumnIndexes.add(outputSchema.columns().indexOf(column));
+                sortOrders.add(sortField.sortOrder());
+            }
+            this.sortColumnIndexes = sortColumnIndexes.build();
+            this.sortOrders = sortOrders.build();
+        }
+        else {
+            this.sortColumnIndexes = ImmutableList.of();
+            this.sortOrders = ImmutableList.of();
+        }
     }
 
     @Override
@@ -139,9 +205,9 @@ public class IcebergPageSink
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
-        return systemMemoryUsage;
+        return memoryUsage;
     }
 
     @Override
@@ -153,34 +219,17 @@ public class IcebergPageSink
     @Override
     public CompletableFuture<?> appendPage(Page page)
     {
-        hdfsEnvironment.doAs(session.getIdentity(), () -> doAppend(page));
-
+        doAppend(page);
         return NOT_BLOCKED;
     }
 
     @Override
     public CompletableFuture<Collection<Slice>> finish()
     {
-        Collection<Slice> commitTasks = new ArrayList<>();
-
-        for (WriteContext context : writers) {
-            context.getWriter().commit();
-
-            CommitTaskData task = new CommitTaskData(
-                    context.getPath().toString(),
-                    context.getWriter().getWrittenBytes(),
-                    new MetricsWrapper(context.getWriter().getMetrics()),
-                    context.getPartitionData().map(PartitionData::toJson));
-
-            commitTasks.add(wrappedBuffer(jsonCodec.toJsonBytes(task)));
+        for (int writerIndex = 0; writerIndex < writers.size(); writerIndex++) {
+            closeWriter(writerIndex);
         }
-
-        writtenBytes = writers.stream()
-                .mapToLong(writer -> writer.getWriter().getWrittenBytes())
-                .sum();
-        validationCpuNanos = writers.stream()
-                .mapToLong(writer -> writer.getWriter().getValidationCpuNanos())
-                .sum();
+        writers.clear();
 
         return completedFuture(commitTasks);
     }
@@ -188,12 +237,16 @@ public class IcebergPageSink
     @Override
     public void abort()
     {
+        List<Closeable> rollbackActions = Streams.concat(
+                        writers.stream()
+                                .filter(Objects::nonNull)
+                                .map(writer -> writer::rollback),
+                        closedWriterRollbackActions.stream())
+                .collect(toImmutableList());
         RuntimeException error = null;
-        for (WriteContext context : writers) {
+        for (Closeable rollbackAction : rollbackActions) {
             try {
-                if (context != null) {
-                    context.getWriter().rollback();
-                }
+                rollbackAction.close();
             }
             catch (Throwable t) {
                 if (error == null) {
@@ -209,13 +262,12 @@ public class IcebergPageSink
 
     private void doAppend(Page page)
     {
-        while (page.getPositionCount() > MAX_PAGE_POSITIONS) {
-            Page chunk = page.getRegion(0, MAX_PAGE_POSITIONS);
-            page = page.getRegion(MAX_PAGE_POSITIONS, page.getPositionCount() - MAX_PAGE_POSITIONS);
+        int writeOffset = 0;
+        while (writeOffset < page.getPositionCount()) {
+            Page chunk = page.getRegion(writeOffset, min(page.getPositionCount() - writeOffset, MAX_PAGE_POSITIONS));
+            writeOffset += chunk.getPositionCount();
             writePage(chunk);
         }
-
-        writePage(page);
     }
 
     private void writePage(Page page)
@@ -257,15 +309,19 @@ public class IcebergPageSink
                 pageForWriter = pageForWriter.getPositions(positions, 0, positions.length);
             }
 
-            IcebergFileWriter writer = writers.get(index).getWriter();
+            WriteContext writeContext = writers.get(index);
+            verify(writeContext != null, "Expected writer at index %s", index);
+            IcebergFileWriter writer = writeContext.getWriter();
 
             long currentWritten = writer.getWrittenBytes();
-            long currentMemory = writer.getSystemMemoryUsage();
+            long currentMemory = writer.getMemoryUsage();
 
             writer.appendRows(pageForWriter);
 
             writtenBytes += (writer.getWrittenBytes() - currentWritten);
-            systemMemoryUsage += (writer.getSystemMemoryUsage() - currentMemory);
+            memoryUsage += (writer.getMemoryUsage() - currentMemory);
+            // Mark this writer as active (i.e. not idle)
+            activeWriters.set(index, true);
         }
     }
 
@@ -273,51 +329,128 @@ public class IcebergPageSink
     {
         int[] writerIndexes = pagePartitioner.partitionPage(page);
 
-        if (pagePartitioner.getMaxIndex() >= maxOpenWriters) {
-            throw new TrinoException(ICEBERG_TOO_MANY_OPEN_PARTITIONS, format("Exceeded limit of %s open writers for partitions", maxOpenWriters));
-        }
-
         // expand writers list to new size
         while (writers.size() <= pagePartitioner.getMaxIndex()) {
             writers.add(null);
+            activeWriters.add(false);
         }
 
         // create missing writers
         for (int position = 0; position < page.getPositionCount(); position++) {
             int writerIndex = writerIndexes[position];
-            if (writers.get(writerIndex) != null) {
-                continue;
+            WriteContext writer = writers.get(writerIndex);
+            if (writer != null) {
+                if (writer.getWrittenBytes() <= targetMaxFileSize) {
+                    continue;
+                }
+                closeWriter(writerIndex);
             }
 
             Optional<PartitionData> partitionData = getPartitionData(pagePartitioner.getColumns(), page, position);
-            WriteContext writer = createWriter(partitionData);
+            // prepend query id to a file name so we can determine which files were written by which query. This is needed for opportunistic cleanup of extra files
+            // which may be present for successfully completing query in presence of failure recovery mechanisms.
+            String fileName = fileFormat.toIceberg().addExtension(session.getQueryId() + "-" + randomUUID());
+            String outputPath = partitionData
+                    .map(partition -> locationProvider.newDataLocation(partitionSpec, partition, fileName))
+                    .orElseGet(() -> locationProvider.newDataLocation(fileName));
+
+            if (!sortOrder.isEmpty() && sortedWritingEnabled) {
+                String tempName = "sorting-file-writer-%s-%s".formatted(session.getQueryId(), randomUUID());
+                Location tempFilePrefix = tempDirectory.appendPath(tempName);
+                WriteContext writerContext = createWriter(outputPath, partitionData);
+                IcebergFileWriter sortedFileWriter = new IcebergSortingFileWriter(
+                        fileSystem,
+                        tempFilePrefix,
+                        writerContext.getWriter(),
+                        sortingFileWriterBufferSize,
+                        sortingFileWriterMaxOpenFiles,
+                        columnTypes,
+                        sortColumnIndexes,
+                        sortOrders,
+                        pageSorter,
+                        typeManager.getTypeOperators());
+                writer = new WriteContext(sortedFileWriter, outputPath, partitionData);
+            }
+            else {
+                writer = createWriter(outputPath, partitionData);
+            }
 
             writers.set(writerIndex, writer);
+            currentOpenWriters++;
+            memoryUsage += writer.getWriter().getMemoryUsage();
         }
         verify(writers.size() == pagePartitioner.getMaxIndex() + 1);
-        verify(!writers.contains(null));
+
+        if (currentOpenWriters > maxOpenWriters) {
+            throw new TrinoException(ICEBERG_TOO_MANY_OPEN_PARTITIONS, format("Exceeded limit of %s open writers for partitions: %s", maxOpenWriters, currentOpenWriters));
+        }
 
         return writerIndexes;
     }
 
-    private WriteContext createWriter(Optional<PartitionData> partitionData)
+    @Override
+    public void closeIdleWriters()
     {
-        String fileName = fileFormat.addExtension(randomUUID().toString());
-        Path outputPath = partitionData.map(partition -> new Path(locationProvider.newDataLocation(partitionSpec, partition, fileName)))
-                .orElse(new Path(locationProvider.newDataLocation(fileName)));
+        for (int writerIndex = 0; writerIndex < writers.size(); writerIndex++) {
+            WriteContext writeContext = writers.get(writerIndex);
+            if (activeWriters.get(writerIndex) || writeContext == null || writeContext.getWriter().getWrittenBytes() <= idleWriterMinFileSize) {
+                activeWriters.set(writerIndex, false);
+                continue;
+            }
+            LOG.debug("Closing writer %s with %s bytes written", writerIndex, writeContext.getWriter().getWrittenBytes());
+            closeWriter(writerIndex);
+        }
+    }
 
-        IcebergFileWriter writer = fileWriterFactory.createFileWriter(
-                outputPath,
+    private void closeWriter(int writerIndex)
+    {
+        WriteContext writeContext = writers.get(writerIndex);
+        if (writeContext == null) {
+            return;
+        }
+        IcebergFileWriter writer = writeContext.getWriter();
+
+        long currentWritten = writer.getWrittenBytes();
+        long currentMemory = writer.getMemoryUsage();
+
+        closedWriterRollbackActions.add(writer.commit());
+
+        validationCpuNanos += writer.getValidationCpuNanos();
+        writtenBytes += (writer.getWrittenBytes() - currentWritten);
+        memoryUsage -= currentMemory;
+
+        writers.set(writerIndex, null);
+        currentOpenWriters--;
+
+        CommitTaskData task = new CommitTaskData(
+                writeContext.getPath(),
+                fileFormat,
+                writer.getWrittenBytes(),
+                new MetricsWrapper(writer.getFileMetrics().metrics()),
+                PartitionSpecParser.toJson(partitionSpec),
+                writeContext.getPartitionData().map(PartitionData::toJson),
+                DATA,
+                Optional.empty(),
+                writer.getFileMetrics().splitOffsets());
+
+        commitTasks.add(wrappedBuffer(jsonCodec.toJsonBytes(task)));
+    }
+
+    private WriteContext createWriter(String outputPath, Optional<PartitionData> partitionData)
+    {
+        IcebergFileWriter writer = fileWriterFactory.createDataFileWriter(
+                fileSystem,
+                Location.of(outputPath),
                 outputSchema,
-                jobConf,
                 session,
-                hdfsContext,
-                fileFormat);
+                fileFormat,
+                metricsConfig,
+                storageProperties);
 
         return new WriteContext(writer, outputPath, partitionData);
     }
 
-    private static Optional<PartitionData> getPartitionData(List<PartitionColumn> columns, Page page, int position)
+    private Optional<PartitionData> getPartitionData(List<PartitionColumn> columns, Page page, int position)
     {
         if (columns.isEmpty()) {
             return Optional.empty();
@@ -326,18 +459,19 @@ public class IcebergPageSink
         Object[] values = new Object[columns.size()];
         for (int i = 0; i < columns.size(); i++) {
             PartitionColumn column = columns.get(i);
-            Block block = page.getBlock(column.getSourceChannel());
-            Type type = column.getSourceType();
+            Block block = PagePartitioner.getPartitionBlock(column, page);
+            Type type = column.sourceType();
+            org.apache.iceberg.types.Type icebergType = outputSchema.findType(column.field().sourceId());
             Object value = getIcebergValue(block, position, type);
-            values[i] = applyTransform(column.getField().transform(), value);
+            values[i] = applyTransform(column.field().transform(), icebergType, value);
         }
         return Optional.of(new PartitionData(values));
     }
 
     @SuppressWarnings("unchecked")
-    private static Object applyTransform(Transform<?, ?> transform, Object value)
+    private static Object applyTransform(Transform<?, ?> transform, org.apache.iceberg.types.Type icebergType, Object value)
     {
-        return ((Transform<Object, Object>) transform).apply(value);
+        return ((Transform<Object, Object>) transform).bind(icebergType).apply(value);
     }
 
     public static Object getIcebergValue(Block block, int position, Type type)
@@ -345,46 +479,55 @@ public class IcebergPageSink
         if (block.isNull(position)) {
             return null;
         }
-        if (type instanceof BigintType) {
-            return type.getLong(block, position);
+        if (type.equals(BIGINT)) {
+            return BIGINT.getLong(block, position);
         }
-        if (type instanceof IntegerType || type instanceof SmallintType || type instanceof TinyintType || type instanceof DateType) {
-            return toIntExact(type.getLong(block, position));
+        if (type.equals(TINYINT)) {
+            return (int) TINYINT.getByte(block, position);
         }
-        if (type instanceof BooleanType) {
-            return type.getBoolean(block, position);
+        if (type.equals(SMALLINT)) {
+            return (int) SMALLINT.getShort(block, position);
         }
-        if (type instanceof DecimalType) {
-            return readBigDecimal((DecimalType) type, block, position);
+        if (type.equals(INTEGER)) {
+            return INTEGER.getInt(block, position);
         }
-        if (type instanceof RealType) {
-            return intBitsToFloat(toIntExact(type.getLong(block, position)));
+        if (type.equals(DATE)) {
+            return DATE.getInt(block, position);
         }
-        if (type instanceof DoubleType) {
-            return type.getDouble(block, position);
+        if (type.equals(BOOLEAN)) {
+            return BOOLEAN.getBoolean(block, position);
+        }
+        if (type instanceof DecimalType decimalType) {
+            return readBigDecimal(decimalType, block, position);
+        }
+        if (type.equals(REAL)) {
+            return REAL.getFloat(block, position);
+        }
+        if (type.equals(DOUBLE)) {
+            return DOUBLE.getDouble(block, position);
         }
         if (type.equals(TIME_MICROS)) {
-            return type.getLong(block, position) / PICOSECONDS_PER_MICROSECOND;
+            return TIME_MICROS.getLong(block, position) / PICOSECONDS_PER_MICROSECOND;
         }
         if (type.equals(TIMESTAMP_MICROS)) {
-            return type.getLong(block, position);
+            return TIMESTAMP_MICROS.getLong(block, position);
         }
         if (type.equals(TIMESTAMP_TZ_MICROS)) {
             return timestampTzToMicros(getTimestampTz(block, position));
         }
-        if (type instanceof VarbinaryType) {
-            return type.getSlice(block, position).getBytes();
+        if (type instanceof VarbinaryType varbinaryType) {
+            return varbinaryType.getSlice(block, position).toByteBuffer();
         }
-        if (type instanceof VarcharType) {
-            return type.getSlice(block, position).toStringUtf8();
+        if (type instanceof VarcharType varcharType) {
+            return varcharType.getSlice(block, position).toStringUtf8();
         }
-        if (type instanceof UuidType) {
-            return trinoUuidToJavaUuid(type.getSlice(block, position));
+        if (type.equals(UUID)) {
+            return trinoUuidToJavaUuid(UUID.getSlice(block, position));
         }
         throw new UnsupportedOperationException("Type not supported as partition column: " + type.getDisplayName());
     }
 
-    private static List<PartitionColumn> toPartitionColumns(List<IcebergColumnHandle> handles, PartitionSpec partitionSpec)
+    private static List<PartitionColumn> toPartitionColumns(List<IcebergColumnHandle> handles, PartitionSpec partitionSpec, Schema schema)
     {
         Map<Integer, Integer> idChannels = new HashMap<>();
         for (int i = 0; i < handles.size(); i++) {
@@ -392,23 +535,69 @@ public class IcebergPageSink
         }
 
         return partitionSpec.fields().stream()
-                .map(field -> {
-                    Integer channel = idChannels.get(field.sourceId());
-                    checkArgument(channel != null, "partition field not found: %s", field);
-                    Type inputType = handles.get(channel).getType();
-                    ColumnTransform transform = getColumnTransform(field, inputType);
-                    return new PartitionColumn(field, channel, inputType, transform.getType(), transform.getBlockTransform());
-                })
+                .map(field -> getPartitionColumn(field, handles, schema.asStruct(), idChannels))
                 .collect(toImmutableList());
+    }
+
+    private static PartitionColumn getPartitionColumn(PartitionField field, List<IcebergColumnHandle> handles, Types.StructType schema, Map<Integer, Integer> idChannels)
+    {
+        List<Integer> sourceChannels = getIndexPathToField(schema, getNestedFieldIds(schema, field.sourceId()));
+        Type sourceType = handles.get(idChannels.get(field.sourceId())).getType();
+        ColumnTransform transform = getColumnTransform(field, sourceType);
+        return new PartitionColumn(field, sourceChannels, sourceType, transform.type(), transform.blockTransform());
+    }
+
+    private static List<Integer> getNestedFieldIds(Types.StructType schema, Integer sourceId)
+    {
+        Map<Integer, Integer> parentIndex = TypeUtil.indexParents(schema);
+        Map<Integer, Types.NestedField> idIndex = TypeUtil.indexById(schema);
+        ImmutableList.Builder<Integer> parentColumnsBuilder = ImmutableList.builder();
+
+        parentColumnsBuilder.add(idIndex.get(sourceId).fieldId());
+        Integer current = parentIndex.get(sourceId);
+
+        while (current != null) {
+            parentColumnsBuilder.add(idIndex.get(current).fieldId());
+            current = parentIndex.get(current);
+        }
+        return parentColumnsBuilder.build().reverse();
+    }
+
+    private static List<Integer> getIndexPathToField(Types.StructType schema, List<Integer> nestedFieldIds)
+    {
+        ImmutableList.Builder<Integer> sourceIdsBuilder = ImmutableList.builder();
+        Types.StructType current = schema;
+
+        // Iterate over field names while finding position in schema
+        for (int i = 0; i < nestedFieldIds.size(); i++) {
+            int fieldId = nestedFieldIds.get(i);
+            sourceIdsBuilder.add(findFieldPosFromSchema(fieldId, current));
+
+            if (i + 1 < nestedFieldIds.size()) {
+                checkState(current.field(fieldId).type().isStructType(), "Could not find field " + nestedFieldIds + " in schema");
+                current = current.field(fieldId).type().asStructType();
+            }
+        }
+        return sourceIdsBuilder.build();
+    }
+
+    private static int findFieldPosFromSchema(int fieldId, Types.StructType struct)
+    {
+        for (int i = 0; i < struct.fields().size(); i++) {
+            if (struct.fields().get(i).fieldId() == fieldId) {
+                return i;
+            }
+        }
+        throw new IllegalArgumentException("Could not find field " + fieldId + " in schema");
     }
 
     private static class WriteContext
     {
         private final IcebergFileWriter writer;
-        private final Path path;
+        private final String path;
         private final Optional<PartitionData> partitionData;
 
-        public WriteContext(IcebergFileWriter writer, Path path, Optional<PartitionData> partitionData)
+        public WriteContext(IcebergFileWriter writer, String path, Optional<PartitionData> partitionData)
         {
             this.writer = requireNonNull(writer, "writer is null");
             this.path = requireNonNull(path, "path is null");
@@ -420,7 +609,7 @@ public class IcebergPageSink
             return writer;
         }
 
-        public Path getPath()
+        public String getPath()
         {
             return path;
         }
@@ -428,6 +617,16 @@ public class IcebergPageSink
         public Optional<PartitionData> getPartitionData()
         {
             return partitionData;
+        }
+
+        public long getWrittenBytes()
+        {
+            return writer.getWrittenBytes();
+        }
+
+        public void rollback()
+        {
+            writer.rollback();
         }
     }
 
@@ -439,7 +638,7 @@ public class IcebergPageSink
         public PagePartitioner(PageIndexerFactory pageIndexerFactory, List<PartitionColumn> columns)
         {
             this.pageIndexer = pageIndexerFactory.createPageIndexer(columns.stream()
-                    .map(PartitionColumn::getResultType)
+                    .map(PartitionColumn::resultType)
                     .collect(toImmutableList()));
             this.columns = ImmutableList.copyOf(columns);
         }
@@ -449,12 +648,22 @@ public class IcebergPageSink
             Block[] blocks = new Block[columns.size()];
             for (int i = 0; i < columns.size(); i++) {
                 PartitionColumn column = columns.get(i);
-                Block block = page.getBlock(column.getSourceChannel());
-                blocks[i] = column.getBlockTransform().apply(block);
+                Block block = getPartitionBlock(column, page);
+                blocks[i] = column.blockTransform().apply(block);
             }
             Page transformed = new Page(page.getPositionCount(), blocks);
 
             return pageIndexer.indexPage(transformed);
+        }
+
+        private static Block getPartitionBlock(PartitionColumn column, Page page)
+        {
+            List<Integer> sourceChannels = column.sourceChannels();
+            Block block = page.getBlock(sourceChannels.getFirst());
+            for (int i = 1; i < sourceChannels.size(); i++) {
+                block = getRowFieldsFromBlock(block).get(sourceChannels.get(i));
+            }
+            return block;
         }
 
         public int getMaxIndex()
@@ -468,46 +677,16 @@ public class IcebergPageSink
         }
     }
 
-    private static class PartitionColumn
+    private record PartitionColumn(PartitionField field, List<Integer> sourceChannels, Type sourceType, Type resultType, Function<Block, Block> blockTransform)
     {
-        private final PartitionField field;
-        private final int sourceChannel;
-        private final Type sourceType;
-        private final Type resultType;
-        private final Function<Block, Block> blockTransform;
-
-        public PartitionColumn(PartitionField field, int sourceChannel, Type sourceType, Type resultType, Function<Block, Block> blockTransform)
+        private PartitionColumn
         {
-            this.field = requireNonNull(field, "field is null");
-            this.sourceChannel = sourceChannel;
-            this.sourceType = requireNonNull(sourceType, "sourceType is null");
-            this.resultType = requireNonNull(resultType, "resultType is null");
-            this.blockTransform = requireNonNull(blockTransform, "blockTransform is null");
-        }
-
-        public PartitionField getField()
-        {
-            return field;
-        }
-
-        public int getSourceChannel()
-        {
-            return sourceChannel;
-        }
-
-        public Type getSourceType()
-        {
-            return sourceType;
-        }
-
-        public Type getResultType()
-        {
-            return resultType;
-        }
-
-        public Function<Block, Block> getBlockTransform()
-        {
-            return blockTransform;
+            requireNonNull(field, "field is null");
+            sourceChannels = ImmutableList.copyOf(requireNonNull(sourceChannels, "sourceChannels is null"));
+            requireNonNull(sourceType, "sourceType is null");
+            requireNonNull(resultType, "resultType is null");
+            requireNonNull(blockTransform, "blockTransform is null");
+            checkState(!sourceChannels.isEmpty(), "sourceChannels is empty");
         }
     }
 }

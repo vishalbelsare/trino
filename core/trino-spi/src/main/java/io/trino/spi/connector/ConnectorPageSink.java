@@ -33,12 +33,12 @@ public interface ConnectorPageSink
     }
 
     /**
-     * Get the total memory that needs to be reserved in the general memory pool.
+     * Get the total memory that needs to be reserved in the memory pool.
      * This memory should include any buffers, etc. that are used for reading data.
      *
      * @return the memory used so far in table read
      */
-    default long getSystemMemoryUsage()
+    default long getMemoryUsage()
     {
         return 0;
     }
@@ -60,6 +60,14 @@ public interface ConnectorPageSink
      * this method should return {@code NOT_BLOCKED}.
      */
     CompletableFuture<?> appendPage(Page page);
+
+    /**
+     * Closes the idle partition writers that have not received any data since the last time this
+     * method is called. This method is called periodically based on some
+     * data written threshold by the TableWriterOperator. It is needed to avoid high memory
+     * usage due to stale partitions kept in memory during partitioned writes.
+     */
+    default void closeIdleWriters() {}
 
     /**
      * Notifies the connector that no more pages will be appended and returns

@@ -18,27 +18,25 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.ObjectMapperProvider;
+import io.trino.metastore.HiveType;
 import io.trino.plugin.base.TypeDeserializer;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeOperators;
-import io.trino.type.InternalTypeManager;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.PARTITION_KEY;
 import static io.trino.plugin.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static io.trino.plugin.hive.HiveColumnHandle.createBaseColumn;
-import static io.trino.plugin.hive.HiveType.toHiveType;
+import static io.trino.plugin.hive.util.HiveTypeTranslator.toHiveType;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.Arrays.asList;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHiveColumnHandle
 {
@@ -90,23 +88,22 @@ public class TestHiveColumnHandle
     private void testRoundTrip(HiveColumnHandle expected)
     {
         ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
-        TypeManager typeManager = new InternalTypeManager(createTestMetadataManager(), new TypeOperators());
-        objectMapperProvider.setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(typeManager)));
+        objectMapperProvider.setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
         JsonCodec<HiveColumnHandle> codec = new JsonCodecFactory(objectMapperProvider).jsonCodec(HiveColumnHandle.class);
 
         String json = codec.toJson(expected);
         HiveColumnHandle actual = codec.fromJson(json);
 
-        assertEquals(actual.getBaseColumnName(), expected.getBaseColumnName());
-        assertEquals(actual.getBaseHiveColumnIndex(), expected.getBaseHiveColumnIndex());
-        assertEquals(actual.getBaseType(), expected.getBaseType());
-        assertEquals(actual.getBaseHiveType(), expected.getBaseHiveType());
+        assertThat(actual.getBaseColumnName()).isEqualTo(expected.getBaseColumnName());
+        assertThat(actual.getBaseHiveColumnIndex()).isEqualTo(expected.getBaseHiveColumnIndex());
+        assertThat(actual.getBaseType()).isEqualTo(expected.getBaseType());
+        assertThat(actual.getBaseHiveType()).isEqualTo(expected.getBaseHiveType());
 
-        assertEquals(actual.getName(), expected.getName());
-        assertEquals(actual.getType(), expected.getType());
-        assertEquals(actual.getHiveType(), expected.getHiveType());
+        assertThat(actual.getName()).isEqualTo(expected.getName());
+        assertThat(actual.getType()).isEqualTo(expected.getType());
+        assertThat(actual.getHiveType()).isEqualTo(expected.getHiveType());
 
-        assertEquals(actual.getHiveColumnProjectionInfo(), expected.getHiveColumnProjectionInfo());
-        assertEquals(actual.isPartitionKey(), expected.isPartitionKey());
+        assertThat(actual.getHiveColumnProjectionInfo()).isEqualTo(expected.getHiveColumnProjectionInfo());
+        assertThat(actual.isPartitionKey()).isEqualTo(expected.isPartitionKey());
     }
 }

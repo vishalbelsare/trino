@@ -15,24 +15,21 @@ package io.trino.plugin.kafka;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import jakarta.validation.constraints.AssertTrue;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 
-import javax.annotation.PostConstruct;
-import javax.validation.constraints.NotNull;
+import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkState;
-import static java.lang.String.format;
 import static org.apache.kafka.common.security.auth.SecurityProtocol.PLAINTEXT;
 import static org.apache.kafka.common.security.auth.SecurityProtocol.SSL;
 
 public class KafkaSecurityConfig
 {
-    private SecurityProtocol securityProtocol = PLAINTEXT;
+    private SecurityProtocol securityProtocol;
 
-    @NotNull
-    public SecurityProtocol getSecurityProtocol()
+    public Optional<SecurityProtocol> getSecurityProtocol()
     {
-        return securityProtocol;
+        return Optional.ofNullable(securityProtocol);
     }
 
     @Config("kafka.security-protocol")
@@ -43,11 +40,9 @@ public class KafkaSecurityConfig
         return this;
     }
 
-    @PostConstruct
-    public void validate()
+    @AssertTrue(message = "Only PLAINTEXT and SSL security protocols are supported. See 'kafka.config.resources' if other security protocols are needed")
+    public boolean isValidSecurityProtocol()
     {
-        checkState(
-                securityProtocol.equals(PLAINTEXT) || securityProtocol.equals(SSL),
-                format("Only %s and %s security protocols are supported", PLAINTEXT, SSL));
+        return securityProtocol == null || securityProtocol.equals(PLAINTEXT) || securityProtocol.equals(SSL);
     }
 }

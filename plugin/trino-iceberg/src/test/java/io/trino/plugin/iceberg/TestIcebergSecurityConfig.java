@@ -14,7 +14,7 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -36,9 +36,7 @@ public class TestIcebergSecurityConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("iceberg.security", "read-only")
-                .build();
+        Map<String, String> properties = ImmutableMap.of("iceberg.security", "read-only");
 
         IcebergSecurityConfig expected = new IcebergSecurityConfig()
                 .setSecuritySystem(READ_ONLY);

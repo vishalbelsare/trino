@@ -13,175 +13,80 @@
  */
 package io.trino.plugin.bigquery;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.google.cloud.bigquery.Field;
-import com.google.common.annotations.VisibleForTesting;
+import com.google.cloud.bigquery.StandardSQLTypeName;
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.type.Type;
 
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 
-import static com.google.common.base.MoreObjects.toStringHelper;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
-import static java.lang.String.format;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
-public class BigQueryColumnHandle
-        implements ColumnHandle, BigQueryType.Adaptor
+public record BigQueryColumnHandle(
+        String name,
+        List<String> dereferenceNames,
+        Type trinoType,
+        StandardSQLTypeName bigqueryType,
+        boolean isPushdownSupported,
+        Field.Mode mode,
+        List<BigQueryColumnHandle> subColumns,
+        String description,
+        boolean hidden)
+        implements ColumnHandle
 {
-    private final String name;
-    private final BigQueryType bigQueryType;
-    private final Field.Mode mode;
-    private final Long precision;
-    private final Long scale;
-    private final List<BigQueryColumnHandle> subColumns;
-    private final String description;
-    private final boolean hidden;
+    private static final int INSTANCE_SIZE = instanceSize(BigQueryColumnHandle.class);
 
-    @JsonCreator
-    public BigQueryColumnHandle(
-            @JsonProperty("name") String name,
-            @JsonProperty("bigQueryType") BigQueryType bigQueryType,
-            @JsonProperty("mode") Field.Mode mode,
-            @JsonProperty("precision") Long precision,
-            @JsonProperty("scale") Long scale,
-            @JsonProperty("subColumns") List<BigQueryColumnHandle> subColumns,
-            @JsonProperty("description") String description,
-            @JsonProperty("hidden") boolean hidden)
+    public BigQueryColumnHandle
     {
-        this.name = requireNonNull(name, "column name cannot be null");
-        this.bigQueryType = requireNonNull(bigQueryType, () -> format("column type cannot be null for column [%s]", name));
-        this.mode = requireNonNull(mode, "Field mode cannot be null");
-        this.precision = precision;
-        this.scale = scale;
-        this.subColumns = ImmutableList.copyOf(requireNonNull(subColumns, "subColumns is null"));
-        this.description = description;
-        this.hidden = hidden;
+        requireNonNull(name, "name is null");
+        dereferenceNames = ImmutableList.copyOf(requireNonNull(dereferenceNames, "dereferenceNames is null"));
+        requireNonNull(trinoType, "trinoType is null");
+        requireNonNull(bigqueryType, "bigqueryType is null");
+        requireNonNull(mode, "mode is null");
+        subColumns = ImmutableList.copyOf(requireNonNull(subColumns, "subColumns is null"));
     }
 
-    @VisibleForTesting
-    BigQueryColumnHandle(
-            String name,
-            BigQueryType bigQueryType,
-            Field.Mode mode,
-            Long precision,
-            Long scale,
-            List<BigQueryColumnHandle> subColumns,
-            String description)
-    {
-        this(name, bigQueryType, mode, precision, scale, subColumns, description, false);
-    }
-
-    @JsonProperty
-    public String getName()
-    {
-        return name;
-    }
-
-    @Override
-    @JsonProperty
-    public BigQueryType getBigQueryType()
-    {
-        return bigQueryType;
-    }
-
-    @Override
-    public Map<String, BigQueryType.Adaptor> getBigQuerySubTypes()
-    {
-        return subColumns.stream().collect(toImmutableMap(BigQueryColumnHandle::getName, column -> column));
-    }
-
-    @Override
-    @JsonProperty
-    public Field.Mode getMode()
-    {
-        return mode;
-    }
-
-    @Override
-    @JsonProperty
-    public Long getPrecision()
-    {
-        return precision;
-    }
-
-    @Override
-    @JsonProperty
-    public Long getScale()
-    {
-        return scale;
-    }
-
-    @JsonProperty
-    public List<BigQueryColumnHandle> getSubColumns()
-    {
-        return subColumns;
-    }
-
-    @JsonProperty
-    public String description()
-    {
-        return description;
-    }
-
-    @JsonProperty
-    public boolean isHidden()
-    {
-        return hidden;
-    }
-
+    @JsonIgnore
     public ColumnMetadata getColumnMetadata()
     {
         return ColumnMetadata.builder()
                 .setName(name)
-                .setType(getTrinoType())
+                .setType(trinoType)
                 .setComment(Optional.ofNullable(description))
                 .setNullable(mode == Field.Mode.NULLABLE)
                 .setHidden(hidden)
                 .build();
     }
 
-    @Override
-    public boolean equals(Object o)
+    @JsonIgnore
+    public String getQualifiedName()
     {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        BigQueryColumnHandle that = (BigQueryColumnHandle) o;
-        return Objects.equals(name, that.name) &&
-                Objects.equals(bigQueryType, that.bigQueryType) &&
-                Objects.equals(mode, that.mode) &&
-                Objects.equals(precision, that.precision) &&
-                Objects.equals(scale, that.scale) &&
-                Objects.equals(subColumns, that.subColumns) &&
-                Objects.equals(description, that.description);
+        return Joiner.on('.')
+                .join(ImmutableList.<String>builder()
+                        .add(name)
+                        .addAll(dereferenceNames)
+                        .build());
     }
 
-    @Override
-    public int hashCode()
+    @JsonIgnore
+    public long getRetainedSizeInBytes()
     {
-        return Objects.hash(name, bigQueryType, mode, precision, scale, subColumns, description);
+        return INSTANCE_SIZE
+                + estimatedSizeOf(name)
+                + estimatedSizeOf(subColumns, BigQueryColumnHandle::getRetainedSizeInBytes)
+                + estimatedSizeOf(description);
     }
 
     @Override
     public String toString()
     {
-        return toStringHelper(this)
-                .add("name", name)
-                .add("type", bigQueryType)
-                .add("mode", mode)
-                .add("precision", precision)
-                .add("scale", scale)
-                .add("subColumns", subColumns)
-                .add("description", description)
-                .toString();
+        return "%s:%s".formatted(getQualifiedName(), trinoType.getDisplayName());
     }
 }

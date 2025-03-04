@@ -13,51 +13,69 @@
  */
 package io.trino.type;
 
-import io.trino.metadata.Metadata;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.Type;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeSignature.arrayType;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static io.trino.util.StructuralTestUtil.arrayBlockOf;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTinyintArrayType
         extends AbstractTestType
 {
     public TestTinyintArrayType()
     {
-        this(createTestMetadataManager());
+        super(TESTING_TYPE_MANAGER.getType(arrayType(TINYINT.getTypeSignature())), List.class, createTestBlock(TESTING_TYPE_MANAGER.getType(arrayType(TINYINT.getTypeSignature()))));
     }
 
-    private TestTinyintArrayType(Metadata metadata)
-    {
-        super(metadata.getType(arrayType(TINYINT.getTypeSignature())), List.class, createTestBlock(metadata.getType(arrayType(TINYINT.getTypeSignature()))));
-    }
-
-    public static Block createTestBlock(Type arrayType)
+    public static ValueBlock createTestBlock(Type arrayType)
     {
         BlockBuilder blockBuilder = arrayType.createBlockBuilder(null, 4);
         arrayType.writeObject(blockBuilder, arrayBlockOf(TINYINT, 1, 2));
         arrayType.writeObject(blockBuilder, arrayBlockOf(TINYINT, 1, 2, 3));
         arrayType.writeObject(blockBuilder, arrayBlockOf(TINYINT, 1, 2, 3));
         arrayType.writeObject(blockBuilder, arrayBlockOf(TINYINT, 100, 110, 127));
-        return blockBuilder.build();
+        return blockBuilder.buildValueBlock();
     }
 
     @Override
     protected Object getGreaterValue(Object value)
     {
         Block block = (Block) value;
-        BlockBuilder blockBuilder = TINYINT.createBlockBuilder(null, block.getPositionCount() + 1);
+        BlockBuilder blockBuilder = TINYINT.createFixedSizeBlockBuilder(block.getPositionCount() + 1);
         for (int i = 0; i < block.getPositionCount(); i++) {
             TINYINT.appendTo(block, i, blockBuilder);
         }
         TINYINT.writeLong(blockBuilder, 1L);
 
-        return blockBuilder.build();
+        return blockBuilder.buildValueBlock();
+    }
+
+    @Test
+    public void testRange()
+    {
+        assertThat(type.getRange())
+                .isEmpty();
+    }
+
+    @Test
+    public void testPreviousValue()
+    {
+        assertThat(type.getPreviousValue(getSampleValue()))
+                .isEmpty();
+    }
+
+    @Test
+    public void testNextValue()
+    {
+        assertThat(type.getNextValue(getSampleValue()))
+                .isEmpty();
     }
 }

@@ -14,48 +14,52 @@
 package io.trino.cli;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import io.airlift.json.JsonCodec;
 import io.airlift.units.Duration;
 import io.trino.client.ClientSession;
 import io.trino.client.ClientTypeSignature;
 import io.trino.client.Column;
 import io.trino.client.QueryResults;
 import io.trino.client.StatementStats;
-import okhttp3.logging.HttpLoggingInterceptor;
+import io.trino.client.TrinoJsonCodec;
+import io.trino.client.TypedQueryData;
+import io.trino.client.uri.PropertyName;
+import io.trino.client.uri.TrinoUri;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.io.IOException;
 import java.io.PrintStream;
 import java.time.ZoneId;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
+import java.util.Properties;
 
 import static com.google.common.io.ByteStreams.nullOutputStream;
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
 import static com.google.common.net.HttpHeaders.LOCATION;
 import static com.google.common.net.HttpHeaders.SET_COOKIE;
-import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.trino.cli.ClientOptions.OutputFormat.CSV;
 import static io.trino.cli.TerminalUtils.getTerminal;
 import static io.trino.client.ClientStandardTypes.BIGINT;
+import static io.trino.client.TrinoJsonCodec.jsonCodec;
+import static io.trino.client.auth.external.ExternalRedirectStrategy.PRINT;
 import static java.util.concurrent.TimeUnit.MINUTES;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestQueryRunner
 {
-    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
-
+    private static final TrinoJsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
     private MockWebServer server;
 
-    @BeforeMethod
+    @BeforeEach
     public void setup()
             throws IOException
     {
@@ -63,11 +67,12 @@ public class TestQueryRunner
         server.start();
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void teardown()
             throws IOException
     {
         server.close();
+        server = null;
     }
 
     @Test
@@ -85,43 +90,43 @@ public class TestQueryRunner
                 .addHeader(CONTENT_TYPE, "application/json")
                 .setBody(createResults(server)));
 
-        QueryRunner queryRunner = createQueryRunner(createClientSession(server), false);
+        QueryRunner queryRunner = createQueryRunner(createTrinoUri(server, false), createClientSession(server));
 
         try (Query query = queryRunner.startQuery("first query will introduce a cookie")) {
-            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, false, false);
+            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, Optional.of(""), false, false);
         }
         try (Query query = queryRunner.startQuery("second query should carry the cookie")) {
-            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, false, false);
+            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, Optional.of(""), false, false);
         }
 
-        assertNull(server.takeRequest().getHeader("Cookie"));
-        assertEquals(server.takeRequest().getHeader("Cookie"), "a=apple");
-        assertEquals(server.takeRequest().getHeader("Cookie"), "a=apple");
+        assertThat(server.takeRequest().getHeader("Cookie")).isNull();
+        assertThat(server.takeRequest().getHeader("Cookie")).isEqualTo("a=apple");
+        assertThat(server.takeRequest().getHeader("Cookie")).isEqualTo("a=apple");
+    }
+
+    static TrinoUri createTrinoUri(MockWebServer server, boolean insecureSsl)
+    {
+        Properties properties = new Properties();
+        properties.setProperty(PropertyName.EXTERNAL_AUTHENTICATION_REDIRECT_HANDLERS.toString(), PRINT.name());
+        properties.setProperty(PropertyName.SSL.toString(), Boolean.toString(!insecureSsl));
+        return TrinoUri.create(server.url("/").uri(), properties);
     }
 
     static ClientSession createClientSession(MockWebServer server)
     {
-        return new ClientSession(
-                server.url("/").uri(),
-                "user",
-                Optional.empty(),
-                "source",
-                Optional.empty(),
-                ImmutableSet.of(),
-                "clientInfo",
-                "catalog",
-                "schema",
-                "path",
-                ZoneId.of("America/Los_Angeles"),
-                Locale.ENGLISH,
-                ImmutableMap.of(),
-                ImmutableMap.of(),
-                ImmutableMap.of(),
-                ImmutableMap.of(),
-                ImmutableMap.of(),
-                null,
-                new Duration(2, MINUTES),
-                true);
+        return ClientSession.builder()
+                .server(server.url("/").uri())
+                .user(Optional.of("user"))
+                .source("source")
+                .clientInfo("clientInfo")
+                .catalog("catalog")
+                .schema("schema")
+                .timeZone(ZoneId.of("America/Los_Angeles"))
+                .locale(Locale.ENGLISH)
+                .transactionId(null)
+                .clientRequestTimeout(new Duration(2, MINUTES))
+                .compressionDisabled(true)
+                .build();
     }
 
     static String createResults(MockWebServer server)
@@ -132,42 +137,25 @@ public class TestQueryRunner
                 null,
                 null,
                 ImmutableList.of(new Column("_col0", BIGINT, new ClientTypeSignature(BIGINT))),
-                ImmutableList.of(ImmutableList.of(123)),
-                StatementStats.builder().setState("FINISHED").build(),
+                TypedQueryData.of(ImmutableList.of(ImmutableList.of(123))),
+                StatementStats.builder()
+                        .setState("FINISHED")
+                        .setProgressPercentage(OptionalDouble.empty())
+                        .setRunningPercentage(OptionalDouble.empty())
+                        .build(),
                 //new StatementStats("FINISHED", false, true, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null),
                 null,
                 ImmutableList.of(),
                 null,
-                null);
+                OptionalLong.empty());
         return QUERY_RESULTS_CODEC.toJson(queryResults);
     }
 
-    static QueryRunner createQueryRunner(ClientSession clientSession, boolean insecureSsl)
+    static QueryRunner createQueryRunner(TrinoUri uri, ClientSession clientSession)
     {
         return new QueryRunner(
+                uri,
                 clientSession,
-                false,
-                HttpLoggingInterceptor.Level.NONE,
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                insecureSsl,
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                false,
-                false,
                 false);
     }
 

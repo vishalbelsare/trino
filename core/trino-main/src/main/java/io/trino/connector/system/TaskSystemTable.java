@@ -13,11 +13,12 @@
  */
 package io.trino.connector.system;
 
+import com.google.inject.Inject;
 import io.airlift.node.NodeInfo;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.trino.execution.SqlTaskManager;
 import io.trino.execution.TaskInfo;
-import io.trino.execution.TaskManager;
 import io.trino.execution.TaskStatus;
 import io.trino.operator.TaskStats;
 import io.trino.spi.connector.ConnectorSession;
@@ -30,8 +31,6 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.predicate.TupleDomain;
 import org.joda.time.DateTime;
-
-import javax.inject.Inject;
 
 import static io.trino.metadata.MetadataUtil.TableMetadataBuilder.tableMetadataBuilder;
 import static io.trino.spi.connector.SystemTable.Distribution.ALL_NODES;
@@ -81,11 +80,11 @@ public class TaskSystemTable
             .column("end", TIMESTAMP_TZ_MILLIS)
             .build();
 
-    private final TaskManager taskManager;
+    private final SqlTaskManager taskManager;
     private final String nodeId;
 
     @Inject
-    public TaskSystemTable(TaskManager taskManager, NodeInfo nodeInfo)
+    public TaskSystemTable(SqlTaskManager taskManager, NodeInfo nodeInfo)
     {
         this.taskManager = taskManager;
         this.nodeId = nodeInfo.getNodeId();
@@ -108,8 +107,8 @@ public class TaskSystemTable
     {
         Builder table = InMemoryRecordSet.builder(TASK_TABLE);
         for (TaskInfo taskInfo : taskManager.getAllTaskInfo()) {
-            TaskStats stats = taskInfo.getStats();
-            TaskStatus taskStatus = taskInfo.getTaskStatus();
+            TaskStats stats = taskInfo.stats();
+            TaskStatus taskStatus = taskInfo.taskStatus();
             table.addRow(
                     nodeId,
 
@@ -141,7 +140,7 @@ public class TaskSystemTable
 
                     toTimestampWithTimeZoneMillis(stats.getCreateTime()),
                     toTimestampWithTimeZoneMillis(stats.getFirstStartTime()),
-                    toTimestampWithTimeZoneMillis(taskInfo.getLastHeartbeat()),
+                    toTimestampWithTimeZoneMillis(taskInfo.lastHeartbeat()),
                     toTimestampWithTimeZoneMillis(stats.getEndTime()));
         }
         return table.build().cursor();

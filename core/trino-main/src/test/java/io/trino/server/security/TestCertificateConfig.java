@@ -14,7 +14,7 @@
 package io.trino.server.security;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -41,10 +41,10 @@ public class TestCertificateConfig
     {
         Path userMappingFile = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("http-server.authentication.certificate.user-mapping.pattern", "(.*)@something")
                 .put("http-server.authentication.certificate.user-mapping.file", userMappingFile.toString())
-                .build();
+                .buildOrThrow();
 
         CertificateConfig expected = new CertificateConfig()
                 .setUserMappingPattern("(.*)@something")

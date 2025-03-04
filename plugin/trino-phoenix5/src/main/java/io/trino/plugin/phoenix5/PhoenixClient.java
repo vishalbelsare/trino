@@ -16,6 +16,10 @@ package io.trino.plugin.phoenix5;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.inject.Inject;
+import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
+import io.trino.plugin.base.mapping.IdentifierMapping;
+import io.trino.plugin.base.mapping.RemoteIdentifiers;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
@@ -25,20 +29,32 @@ import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
+import io.trino.plugin.jdbc.LongReadFunction;
+import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.ObjectReadFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
+import io.trino.plugin.jdbc.PredicatePushdownController;
 import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
+import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.WriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
-import io.trino.plugin.jdbc.mapping.IdentifierMapping;
+import io.trino.plugin.jdbc.expression.ComparisonOperator;
+import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
+import io.trino.plugin.jdbc.expression.RewriteComparison;
+import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.JoinStatistics;
+import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
@@ -48,12 +64,13 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.regionserver.BloomType;
@@ -66,7 +83,6 @@ import org.apache.phoenix.iterate.LookAheadResultIterator;
 import org.apache.phoenix.iterate.MapReduceParallelScanGrouper;
 import org.apache.phoenix.iterate.PeekingResultIterator;
 import org.apache.phoenix.iterate.ResultIterator;
-import org.apache.phoenix.iterate.RoundRobinResultIterator;
 import org.apache.phoenix.iterate.SequenceResultIterator;
 import org.apache.phoenix.iterate.TableResultIterator;
 import org.apache.phoenix.jdbc.DelegatePreparedStatement;
@@ -83,24 +99,27 @@ import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.TableProperty;
 import org.apache.phoenix.schema.types.PDataType;
+import org.apache.phoenix.schema.types.PhoenixArray;
 import org.apache.phoenix.util.SchemaUtil;
 
-import javax.inject.Inject;
-
 import java.io.IOException;
-import java.sql.Array;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.JDBCType;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.function.BiFunction;
@@ -108,17 +127,18 @@ import java.util.function.BiFunction;
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.jdbc.DecimalConfig.DecimalMapping.ALLOW_OVERFLOW;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalDefaultScale;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRounding;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRoundingMode;
+import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
+import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.booleanColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.booleanWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.charWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.dateColumnMapping;
-import static io.trino.plugin.jdbc.StandardColumnMappings.dateWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.decimalColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.defaultCharColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.defaultVarcharColumnMapping;
@@ -132,7 +152,6 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.timeWriteFunctionUsingSqlTime;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryColumnMapping;
@@ -141,6 +160,7 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.varcharColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.plugin.jdbc.TypeHandlingJdbcSessionProperties.getUnsupportedTypeHandling;
 import static io.trino.plugin.jdbc.UnsupportedTypeHandling.CONVERT_TO_VARCHAR;
+import static io.trino.plugin.phoenix5.ConfigurationInstantiator.newEmptyConfiguration;
 import static io.trino.plugin.phoenix5.MetadataUtil.getEscapedTableName;
 import static io.trino.plugin.phoenix5.MetadataUtil.toPhoenixSchemaName;
 import static io.trino.plugin.phoenix5.PhoenixClientModule.getConnectionProperties;
@@ -154,6 +174,7 @@ import static io.trino.plugin.phoenix5.TypeUtils.jdbcObjectArrayToBlock;
 import static io.trino.plugin.phoenix5.TypeUtils.toBoxedArray;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.connector.ConnectorMetadata.MODIFYING_ROWS_MESSAGE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
@@ -164,9 +185,6 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
-import static io.trino.spi.type.TimeType.TIME;
-import static io.trino.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static java.lang.Math.max;
@@ -185,7 +203,7 @@ import static java.util.Locale.ENGLISH;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toSet;
 import static org.apache.hadoop.hbase.HConstants.FOREVER;
-import static org.apache.phoenix.coprocessor.BaseScannerRegionObserver.SKIP_REGION_BOUNDARY_CHECK;
+import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants.SKIP_REGION_BOUNDARY_CHECK;
 import static org.apache.phoenix.util.PhoenixRuntime.getTable;
 import static org.apache.phoenix.util.SchemaUtil.ESCAPE_CHARACTER;
 import static org.apache.phoenix.util.SchemaUtil.getEscapedArgument;
@@ -193,23 +211,72 @@ import static org.apache.phoenix.util.SchemaUtil.getEscapedArgument;
 public class PhoenixClient
         extends BaseJdbcClient
 {
-    private static final String ROWKEY = "ROWKEY";
+    public static final String MERGE_ROW_ID_COLUMN_NAME = "$merge_row_id";
+    public static final String ROWKEY = "ROWKEY";
+    public static final JdbcColumnHandle ROWKEY_COLUMN_HANDLE = new JdbcColumnHandle(
+            ROWKEY,
+            new JdbcTypeHandle(Types.BIGINT, Optional.of("BIGINT"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()),
+            BIGINT);
+
+    private static final String DATE_FORMAT = "y-MM-dd G";
+    private static final DateTimeFormatter LOCAL_DATE_FORMATTER = DateTimeFormatter.ofPattern(DATE_FORMAT);
+
+    // Phoenix threshold for simplifying big IN predicates is 50k https://issues.apache.org/jira/browse/PHOENIX-6751
+    public static final int DEFAULT_DOMAIN_COMPACTION_THRESHOLD = 5_000;
 
     private final Configuration configuration;
 
+    private final ConnectorExpressionRewriter<ParameterizedExpression> connectorExpressionRewriter;
+
     @Inject
-    public PhoenixClient(PhoenixConfig config, ConnectionFactory connectionFactory, IdentifierMapping identifierMapping)
+    public PhoenixClient(PhoenixConfig config, ConnectionFactory connectionFactory, QueryBuilder queryBuilder, IdentifierMapping identifierMapping, RemoteQueryModifier queryModifier)
             throws SQLException
     {
         super(
                 ESCAPE_CHARACTER,
                 connectionFactory,
+                queryBuilder,
                 ImmutableSet.of(),
-                identifierMapping);
-        this.configuration = new Configuration(false);
+                identifierMapping,
+                queryModifier,
+                false);
+        this.configuration = newEmptyConfiguration();
         getConnectionProperties(config).forEach((k, v) -> configuration.set((String) k, (String) v));
+        this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
+                .addStandardRules(this::quoted)
+                .add(new RewriteComparison(ImmutableSet.of(ComparisonOperator.EQUAL, ComparisonOperator.NOT_EQUAL)))
+                .withTypeClass("integer_type", ImmutableSet.of("tinyint", "smallint", "integer", "bigint"))
+                .map("$add(left: integer_type, right: integer_type)").to("left + right")
+                .map("$subtract(left: integer_type, right: integer_type)").to("left - right")
+                .map("$multiply(left: integer_type, right: integer_type)").to("left * right")
+                .map("$divide(left: integer_type, right: integer_type)").to("left / right")
+                .map("$modulus(left: integer_type, right: integer_type)").to("left % right")
+                .map("$negate(value: integer_type)").to("-value")
+                .build();
     }
 
+    @Override
+    public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return connectorExpressionRewriter.rewrite(session, expression, assignments);
+    }
+
+    @Override
+    public Optional<PreparedQuery> implementJoin(
+            ConnectorSession session,
+            JoinType joinType,
+            PreparedQuery leftSource,
+            Map<JdbcColumnHandle, String> leftProjections,
+            PreparedQuery rightSource,
+            Map<JdbcColumnHandle, String> rightProjections,
+            List<ParameterizedExpression> joinConditions,
+            JoinStatistics statistics)
+    {
+        // Joins are currently not supported
+        return Optional.empty();
+    }
+
+    @Override
     public Connection getConnection(ConnectorSession session)
             throws SQLException
     {
@@ -258,7 +325,7 @@ public class PhoenixClient
                 table,
                 columnHandles,
                 Optional.of(split));
-        QueryPlan queryPlan = getQueryPlan((PhoenixPreparedStatement) query);
+        QueryPlan queryPlan = getQueryPlan(query.unwrap(PhoenixPreparedStatement.class));
         ResultSet resultSet = getResultSet(((PhoenixSplit) split).getPhoenixInputSplit(), queryPlan);
         return new DelegatePreparedStatement(query)
         {
@@ -286,7 +353,7 @@ public class PhoenixClient
                 columns,
                 ImmutableMap.of(),
                 split);
-        return new QueryBuilder(this).prepareStatement(session, connection, preparedQuery);
+        return queryBuilder.prepareStatement(this, session, connection, preparedQuery, Optional.of(columns.size()));
     }
 
     @Override
@@ -306,6 +373,12 @@ public class PhoenixClient
     {
         // There are multiple splits and TopN is not guaranteed across them.
         return false;
+    }
+
+    @Override
+    public OptionalLong update(ConnectorSession session, JdbcTableHandle handle)
+    {
+        throw new TrinoException(NOT_SUPPORTED, MODIFYING_ROWS_MESSAGE);
     }
 
     @Override
@@ -333,13 +406,13 @@ public class PhoenixClient
         if (outputHandle.rowkeyColumn().isPresent()) {
             String nextId = format(
                     "NEXT VALUE FOR %s, ",
-                    quoted(null, handle.getSchemaName(), handle.getTableName() + "_sequence"));
+                    quoted(null, handle.getRemoteTableName().getSchemaName().orElse(null), handle.getRemoteTableName().getTableName() + "_sequence"));
             params = nextId + params;
             columns = outputHandle.rowkeyColumn().get() + ", " + columns;
         }
         return format(
                 "UPSERT INTO %s (%s) VALUES (%s)",
-                quoted(null, handle.getSchemaName(), handle.getTableName()),
+                quoted(handle.getRemoteTableName()),
                 columns,
                 params);
     }
@@ -359,6 +432,20 @@ public class PhoenixClient
     }
 
     @Override
+    protected ResultSet getColumns(RemoteTableName remoteTableName, DatabaseMetaData metadata)
+            throws SQLException
+    {
+        try {
+            return super.getColumns(remoteTableName, metadata);
+        }
+        catch (org.apache.phoenix.schema.TableNotFoundException e) {
+            // Most JDBC driver return an empty result when DatabaseMetaData.getColumns can't find objects, but Phoenix driver throws an exception
+            // Rethrow as Trino TableNotFoundException to suppress the exception during listing information_schema
+            throw new io.trino.spi.connector.TableNotFoundException(new SchemaTableName(remoteTableName.getSchemaName().orElse(null), remoteTableName.getTableName()));
+        }
+    }
+
+    @Override
     public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
     {
         Optional<ColumnMapping> mapping = getForcedMappingToVarchar(typeHandle);
@@ -366,7 +453,7 @@ public class PhoenixClient
             return mapping;
         }
 
-        switch (typeHandle.getJdbcType()) {
+        switch (typeHandle.jdbcType()) {
             case Types.BOOLEAN:
                 return Optional.of(booleanColumnMapping());
 
@@ -389,9 +476,9 @@ public class PhoenixClient
                 return Optional.of(doubleColumnMapping());
 
             case Types.DECIMAL:
-                Optional<Integer> columnSize = typeHandle.getColumnSize();
+                Optional<Integer> columnSize = typeHandle.columnSize();
                 int precision = columnSize.orElse(DEFAULT_PRECISION);
-                int decimalDigits = typeHandle.getDecimalDigits().orElse(DEFAULT_SCALE);
+                int decimalDigits = typeHandle.decimalDigits().orElse(DEFAULT_SCALE);
                 if (getDecimalRounding(session) == ALLOW_OVERFLOW) {
                     if (columnSize.isEmpty()) {
                         return Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, getDecimalDefaultScale(session)), getDecimalRoundingMode(session)));
@@ -405,22 +492,26 @@ public class PhoenixClient
                 return Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0)), UNNECESSARY));
 
             case Types.CHAR:
-                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), true));
+                return Optional.of(defaultCharColumnMapping(typeHandle.requiredColumnSize(), true));
 
             case VARCHAR:
             case NVARCHAR:
             case LONGVARCHAR:
             case LONGNVARCHAR:
-                if (typeHandle.getColumnSize().isEmpty()) {
+                if (typeHandle.columnSize().isEmpty()) {
                     return Optional.of(varcharColumnMapping(createUnboundedVarcharType(), true));
                 }
-                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), true));
+                return Optional.of(defaultVarcharColumnMapping(typeHandle.requiredColumnSize(), true));
 
+            case Types.BINARY:
             case Types.VARBINARY:
                 return Optional.of(varbinaryColumnMapping());
 
             case Types.DATE:
-                return Optional.of(dateColumnMapping());
+                return Optional.of(ColumnMapping.longMapping(
+                        DATE,
+                        dateReadFunction(),
+                        dateWriteFunctionUsingString()));
 
             // TODO add support for TIMESTAMP after Phoenix adds support for LocalDateTime
             case TIMESTAMP:
@@ -433,17 +524,19 @@ public class PhoenixClient
 
             case ARRAY:
                 JdbcTypeHandle elementTypeHandle = getArrayElementTypeHandle(typeHandle);
-                if (elementTypeHandle.getJdbcType() == Types.VARBINARY) {
+                if (elementTypeHandle.jdbcType() == Types.VARBINARY) {
                     return Optional.empty();
                 }
                 return toColumnMapping(session, connection, elementTypeHandle)
                         .map(elementMapping -> {
                             ArrayType trinoArrayType = new ArrayType(elementMapping.getType());
-                            String jdbcTypeName = elementTypeHandle.getJdbcTypeName()
+                            String jdbcTypeName = elementTypeHandle.jdbcTypeName()
                                     .orElseThrow(() -> new TrinoException(
                                             PHOENIX_METADATA_ERROR,
-                                            "Type name is missing for jdbc type: " + JDBCType.valueOf(elementTypeHandle.getJdbcType())));
-                            return arrayColumnMapping(session, trinoArrayType, jdbcTypeName);
+                                            "Type name is missing for jdbc type: " + JDBCType.valueOf(elementTypeHandle.jdbcType())));
+                            // TODO (https://github.com/trinodb/trino/issues/11132) Enable predicate pushdown on ARRAY(CHAR) type in Phoenix
+                            PredicatePushdownController pushdownController = elementTypeHandle.jdbcType() == Types.CHAR ? DISABLE_PUSHDOWN : FULL_PUSHDOWN;
+                            return arrayColumnMapping(session, trinoArrayType, jdbcTypeName, pushdownController);
                         });
         }
         if (getUnsupportedTypeHandling(session) == CONVERT_TO_VARCHAR) {
@@ -478,20 +571,18 @@ public class PhoenixClient
             return WriteMapping.doubleMapping("double", doubleWriteFunction());
         }
 
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
+        if (type instanceof DecimalType decimalType) {
             String dataType = format("decimal(%s, %s)", decimalType.getPrecision(), decimalType.getScale());
             if (decimalType.isShort()) {
                 return WriteMapping.longMapping(dataType, shortDecimalWriteFunction(decimalType));
             }
-            return WriteMapping.sliceMapping(dataType, longDecimalWriteFunction(decimalType));
+            return WriteMapping.objectMapping(dataType, longDecimalWriteFunction(decimalType));
         }
 
-        if (type instanceof CharType) {
-            return WriteMapping.sliceMapping("char(" + ((CharType) type).getLength() + ")", charWriteFunction());
+        if (type instanceof CharType charType) {
+            return WriteMapping.sliceMapping("char(" + charType.getLength() + ")", charWriteFunction());
         }
-        if (type instanceof VarcharType) {
-            VarcharType varcharType = (VarcharType) type;
+        if (type instanceof VarcharType varcharType) {
             String dataType;
             if (varcharType.isUnbounded()) {
                 dataType = "varchar";
@@ -506,17 +597,10 @@ public class PhoenixClient
         }
 
         if (type == DATE) {
-            return WriteMapping.longMapping("date", dateWriteFunction());
+            return WriteMapping.longMapping("date", dateWriteFunctionUsingString());
         }
-        if (TIME.equals(type)) {
-            return WriteMapping.longMapping("time", timeWriteFunctionUsingSqlTime());
-        }
-        // Phoenix doesn't support _WITH_TIME_ZONE
-        if (TIME_WITH_TIME_ZONE.equals(type) || TIMESTAMP_TZ_MILLIS.equals(type)) {
-            throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
-        }
-        if (type instanceof ArrayType) {
-            Type elementType = ((ArrayType) type).getElementType();
+        if (type instanceof ArrayType arrayType) {
+            Type elementType = arrayType.getElementType();
             String elementDataType = toWriteMapping(session, elementType).getDataType().toUpperCase(ENGLISH);
             String elementWriteName = getArrayElementPhoenixTypeName(session, this, elementType);
             return WriteMapping.objectMapping(elementDataType + " ARRAY", arrayWriteFunction(session, elementType, elementWriteName));
@@ -525,8 +609,18 @@ public class PhoenixClient
     }
 
     @Override
+    public Optional<String> getTableComment(ResultSet resultSet)
+    {
+        // Don't return a comment until the connector supports creating tables with comment
+        return Optional.empty();
+    }
+
+    @Override
     public JdbcOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata)
     {
+        if (tableMetadata.getComment().isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating tables with table comment");
+        }
         SchemaTableName schemaTableName = tableMetadata.getTable();
         String schema = schemaTableName.getSchemaName();
         String table = schemaTableName.getTableName();
@@ -537,8 +631,9 @@ public class PhoenixClient
 
         try (Connection connection = connectionFactory.openConnection(session)) {
             ConnectorIdentity identity = session.getIdentity();
-            schema = getIdentifierMapping().toRemoteSchemaName(identity, connection, schema);
-            table = getIdentifierMapping().toRemoteTableName(identity, connection, schema, table);
+            RemoteIdentifiers remoteIdentifiers = getRemoteIdentifiers(connection);
+            schema = getIdentifierMapping().toRemoteSchemaName(remoteIdentifiers, identity, schema);
+            table = getIdentifierMapping().toRemoteTableName(remoteIdentifiers, identity, schema, table);
             schema = toPhoenixSchemaName(schema);
             LinkedList<ColumnMetadata> tableColumns = new LinkedList<>(tableMetadata.getColumns());
             Map<String, Object> tableProperties = tableMetadata.getProperties();
@@ -559,7 +654,10 @@ public class PhoenixClient
                 rowkeyColumn = Optional.of(ROWKEY);
             }
             for (ColumnMetadata column : tableColumns) {
-                String columnName = getIdentifierMapping().toRemoteColumnName(connection, column.getName());
+                if (column.getComment() != null) {
+                    throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating tables with column comment");
+                }
+                String columnName = getIdentifierMapping().toRemoteColumnName(remoteIdentifiers, column.getName());
                 columnNames.add(columnName);
                 columnTypes.add(column.getType());
                 String typeStatement = toWriteMapping(session, column.getType()).getDataType();
@@ -575,12 +673,12 @@ public class PhoenixClient
             PhoenixTableProperties.getSplitOn(tableProperties).ifPresent(value -> tableOptions.add("SPLIT ON (" + value.replace('"', '\'') + ")"));
             PhoenixTableProperties.getDisableWal(tableProperties).ifPresent(value -> tableOptions.add(TableProperty.DISABLE_WAL + "=" + value));
             PhoenixTableProperties.getDefaultColumnFamily(tableProperties).ifPresent(value -> tableOptions.add(TableProperty.DEFAULT_COLUMN_FAMILY + "=" + value));
-            PhoenixTableProperties.getBloomfilter(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.BLOOMFILTER + "='" + value + "'"));
+            PhoenixTableProperties.getBloomfilter(tableProperties).ifPresent(value -> tableOptions.add(ColumnFamilyDescriptorBuilder.BLOOMFILTER + "='" + value + "'"));
             PhoenixTableProperties.getVersions(tableProperties).ifPresent(value -> tableOptions.add(HConstants.VERSIONS + "=" + value));
-            PhoenixTableProperties.getMinVersions(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.MIN_VERSIONS + "=" + value));
-            PhoenixTableProperties.getCompression(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.COMPRESSION + "='" + value + "'"));
-            PhoenixTableProperties.getTimeToLive(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.TTL + "=" + value));
-            PhoenixTableProperties.getDataBlockEncoding(tableProperties).ifPresent(value -> tableOptions.add(HColumnDescriptor.DATA_BLOCK_ENCODING + "='" + value + "'"));
+            PhoenixTableProperties.getMinVersions(tableProperties).ifPresent(value -> tableOptions.add(ColumnFamilyDescriptorBuilder.MIN_VERSIONS + "=" + value));
+            PhoenixTableProperties.getCompression(tableProperties).ifPresent(value -> tableOptions.add(ColumnFamilyDescriptorBuilder.COMPRESSION + "='" + value + "'"));
+            PhoenixTableProperties.getTimeToLive(tableProperties).ifPresent(value -> tableOptions.add(ColumnFamilyDescriptorBuilder.TTL + "=" + value));
+            PhoenixTableProperties.getDataBlockEncoding(tableProperties).ifPresent(value -> tableOptions.add(ColumnFamilyDescriptorBuilder.DATA_BLOCK_ENCODING + "='" + value + "'"));
 
             String sql = format(
                     "CREATE %s TABLE %s (%s , CONSTRAINT PK PRIMARY KEY (%s)) %s",
@@ -593,8 +691,7 @@ public class PhoenixClient
             execute(session, sql);
 
             return new PhoenixOutputTableHandle(
-                    schema,
-                    table,
+                    new RemoteTableName(Optional.empty(), Optional.ofNullable(schema), table),
                     columnNames.build(),
                     columnTypes.build(),
                     Optional.empty(),
@@ -609,20 +706,33 @@ public class PhoenixClient
     }
 
     @Override
+    public void renameColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle jdbcColumn, String newColumnName)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming columns");
+    }
+
+    @Override
     protected void renameTable(ConnectorSession session, String catalogName, String schemaName, String tableName, SchemaTableName newTable)
     {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming tables");
     }
 
     @Override
+    public void renameSchema(ConnectorSession session, String schemaName, String newSchemaName)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming schemas");
+    }
+
+    @Override
     public Map<String, Object> getTableProperties(ConnectorSession session, JdbcTableHandle handle)
     {
         ImmutableMap.Builder<String, Object> properties = ImmutableMap.builder();
+        RemoteTableName remoteTableName = handle.getRequiredNamedRelation().getRemoteTableName();
 
         try (Connection connection = connectionFactory.openConnection(session);
                 Admin admin = connection.unwrap(PhoenixConnection.class).getQueryServices().getAdmin()) {
-            String schemaName = toPhoenixSchemaName(handle.getSchemaName());
-            PTable table = getTable(connection, SchemaUtil.getTableName(schemaName, handle.getTableName()));
+            String schemaName = toPhoenixSchemaName(remoteTableName.getSchemaName().orElse(null));
+            PTable table = getTable(connection, SchemaUtil.getTableName(schemaName, remoteTableName.getTableName()));
 
             boolean salted = table.getBucketNum() != null;
             StringJoiner joiner = new StringJoiner(",");
@@ -648,10 +758,10 @@ public class PhoenixClient
                 properties.put(PhoenixTableProperties.DEFAULT_COLUMN_FAMILY, defaultFamilyName);
             }
 
-            HTableDescriptor tableDesc = admin.getTableDescriptor(TableName.valueOf(table.getPhysicalName().getBytes()));
+            TableDescriptor tableDesc = admin.getDescriptor(TableName.valueOf(table.getPhysicalName().getBytes()));
 
-            HColumnDescriptor[] columnFamilies = tableDesc.getColumnFamilies();
-            for (HColumnDescriptor columnFamily : columnFamilies) {
+            ColumnFamilyDescriptor[] columnFamilies = tableDesc.getColumnFamilies();
+            for (ColumnFamilyDescriptor columnFamily : columnFamilies) {
                 if (columnFamily.getNameAsString().equals(defaultFamilyName)) {
                     if (columnFamily.getBloomFilterType() != BloomType.NONE) {
                         properties.put(PhoenixTableProperties.BLOOMFILTER, columnFamily.getBloomFilterType());
@@ -662,8 +772,8 @@ public class PhoenixClient
                     if (columnFamily.getMinVersions() > 0) {
                         properties.put(PhoenixTableProperties.MIN_VERSIONS, columnFamily.getMinVersions());
                     }
-                    if (columnFamily.getCompression() != Compression.Algorithm.NONE) {
-                        properties.put(PhoenixTableProperties.COMPRESSION, columnFamily.getCompression());
+                    if (columnFamily.getCompressionType() != Compression.Algorithm.NONE) {
+                        properties.put(PhoenixTableProperties.COMPRESSION, columnFamily.getCompressionType());
                     }
                     if (columnFamily.getTimeToLive() < FOREVER) {
                         properties.put(PhoenixTableProperties.TTL, columnFamily.getTimeToLive());
@@ -675,18 +785,76 @@ public class PhoenixClient
                 }
             }
         }
+        catch (org.apache.phoenix.schema.TableNotFoundException e) {
+            // Rethrow as Trino TableNotFoundException to suppress the exception during listing information_schema
+            throw new io.trino.spi.connector.TableNotFoundException(new SchemaTableName(remoteTableName.getSchemaName().orElse(null), remoteTableName.getTableName()));
+        }
         catch (IOException | SQLException e) {
             throw new TrinoException(PHOENIX_METADATA_ERROR, "Couldn't get Phoenix table properties", e);
         }
-        return properties.build();
+        return properties.buildOrThrow();
     }
 
-    private static ColumnMapping arrayColumnMapping(ConnectorSession session, ArrayType arrayType, String elementJdbcTypeName)
+    @Override
+    public void setColumnType(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Type type)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting column types");
+    }
+
+    @Override
+    public boolean supportsMerge()
+    {
+        return true;
+    }
+
+    @Override
+    public List<JdbcColumnHandle> getPrimaryKeys(ConnectorSession session, RemoteTableName remoteTableName)
+    {
+        JdbcTableHandle plainTable = new JdbcTableHandle(remoteTableName.getSchemaTableName(), remoteTableName, Optional.empty());
+        Map<String, Object> tableProperties = getTableProperties(session, plainTable);
+        List<JdbcColumnHandle> primaryKeys = getColumns(session, remoteTableName.getSchemaTableName(), remoteTableName)
+                .stream()
+                .filter(columnHandle -> PhoenixColumnProperties.isPrimaryKey(columnHandle.getColumnMetadata(), tableProperties))
+                .collect(toImmutableList());
+        verify(!primaryKeys.isEmpty(), "Phoenix primary keys is empty");
+        return primaryKeys;
+    }
+
+    private static LongReadFunction dateReadFunction()
+    {
+        return (resultSet, index) -> {
+            // Convert to LocalDate from java.sql.Date via String because java.sql.Date#toLocalDate() returns wrong results in B.C. dates. -5881579-07-11 -> +5881580-07-11
+            // Phoenix JDBC driver supports getObject(index, LocalDate.class), but it leads to incorrect issues. -5877641-06-23 -> 7642-06-23 & 5881580-07-11 -> 1580-07-11
+            // The current implementation still returns +10 days during julian -> gregorian switch
+            return LocalDate.parse(new SimpleDateFormat(DATE_FORMAT).format(resultSet.getDate(index)), LOCAL_DATE_FORMATTER).toEpochDay();
+        };
+    }
+
+    private static LongWriteFunction dateWriteFunctionUsingString()
+    {
+        return new LongWriteFunction() {
+            @Override
+            public String getBindExpression()
+            {
+                return "TO_DATE(?, 'y-MM-dd G', 'local')";
+            }
+
+            @Override
+            public void set(PreparedStatement statement, int index, long value)
+                    throws SQLException
+            {
+                statement.setString(index, LOCAL_DATE_FORMATTER.format(LocalDate.ofEpochDay(value)));
+            }
+        };
+    }
+
+    private static ColumnMapping arrayColumnMapping(ConnectorSession session, ArrayType arrayType, String elementJdbcTypeName, PredicatePushdownController pushdownController)
     {
         return ColumnMapping.objectMapping(
                 arrayType,
                 arrayReadFunction(session, arrayType.getElementType()),
-                arrayWriteFunction(session, arrayType.getElementType(), elementJdbcTypeName));
+                arrayWriteFunction(session, arrayType.getElementType(), elementJdbcTypeName),
+                pushdownController);
     }
 
     private static ObjectReadFunction arrayReadFunction(ConnectorSession session, Type elementType)
@@ -700,24 +868,31 @@ public class PhoenixClient
     private static ObjectWriteFunction arrayWriteFunction(ConnectorSession session, Type elementType, String elementJdbcTypeName)
     {
         return ObjectWriteFunction.of(Block.class, (statement, index, block) -> {
-            Array jdbcArray = statement.getConnection().createArrayOf(elementJdbcTypeName, getJdbcObjectArray(session, elementType, block));
-            statement.setArray(index, jdbcArray);
+            Object[] jdbcObjectArray = getJdbcObjectArray(session, elementType, block);
+            PhoenixArray phoenixArray = (PhoenixArray) statement.getConnection().createArrayOf(elementJdbcTypeName, jdbcObjectArray);
+            for (int i = 0; i < jdbcObjectArray.length; i++) {
+                if (jdbcObjectArray[i] == null && phoenixArray.getElement(i) != null) {
+                    // TODO (https://github.com/trinodb/trino/issues/6421) Prevent writing incorrect results due to Phoenix JDBC driver bug
+                    throw new TrinoException(PHOENIX_QUERY_ERROR, format("Phoenix JDBC driver replaced 'null' with '%s' at index %s in %s", phoenixArray.getElement(i), i + 1, phoenixArray));
+                }
+            }
+            statement.setArray(index, phoenixArray);
         });
     }
 
     private JdbcTypeHandle getArrayElementTypeHandle(JdbcTypeHandle arrayTypeHandle)
     {
-        String arrayTypeName = arrayTypeHandle.getJdbcTypeName()
-                .orElseThrow(() -> new TrinoException(PHOENIX_METADATA_ERROR, "Type name is missing for jdbc type: " + JDBCType.valueOf(arrayTypeHandle.getJdbcType())));
+        String arrayTypeName = arrayTypeHandle.jdbcTypeName()
+                .orElseThrow(() -> new TrinoException(PHOENIX_METADATA_ERROR, "Type name is missing for jdbc type: " + JDBCType.valueOf(arrayTypeHandle.jdbcType())));
         checkArgument(arrayTypeName.endsWith(" ARRAY"), "array type must end with ' ARRAY'");
         arrayTypeName = arrayTypeName.substring(0, arrayTypeName.length() - " ARRAY".length());
-        verify(arrayTypeHandle.getCaseSensitivity().isEmpty(), "Case sensitivity not supported");
+        verify(arrayTypeHandle.caseSensitivity().isEmpty(), "Case sensitivity not supported");
         return new JdbcTypeHandle(
                 PDataType.fromSqlTypeName(arrayTypeName).getSqlType(),
                 Optional.of(arrayTypeName),
-                arrayTypeHandle.getColumnSize(),
-                arrayTypeHandle.getDecimalDigits(),
-                arrayTypeHandle.getArrayDimensions(),
+                arrayTypeHandle.columnSize(),
+                arrayTypeHandle.decimalDigits(),
+                Optional.empty(),
                 Optional.empty());
     }
 
@@ -767,7 +942,7 @@ public class PhoenixClient
                         MapReduceParallelScanGrouper.getInstance());
                 iterators.add(LookAheadResultIterator.wrap(tableResultIterator));
             }
-            ResultIterator iterator = queryPlan.useRoundRobinIterator() ? RoundRobinResultIterator.newIterator(iterators, queryPlan) : ConcatResultIterator.newIterator(iterators);
+            ResultIterator iterator = ConcatResultIterator.newIterator(iterators);
             if (context.getSequenceManager().getSequenceCount() > 0) {
                 iterator = new SequenceResultIterator(iterator, context.getSequenceManager());
             }

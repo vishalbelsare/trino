@@ -13,56 +13,85 @@
  */
 package io.trino.plugin.kudu;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.io.Closer;
 import com.google.common.net.HostAndPort;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
+import org.testcontainers.containers.ToxiproxyContainer;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.List;
+
+import static java.lang.String.format;
 
 public class TestingKuduServer
         implements Closeable
 {
+    private static final String KUDU_IMAGE = "apache/kudu";
+    public static final String EARLIEST_TAG = "1.13.0";
+    public static final String LATEST_TAG = "1.17";
+
     private static final Integer KUDU_MASTER_PORT = 7051;
     private static final Integer KUDU_TSERVER_PORT = 7050;
-    private static final Integer NUMBER_OF_REPLICA = 3;
 
+    private static final String TOXIPROXY_IMAGE = "ghcr.io/shopify/toxiproxy:2.4.0";
+    private static final String TOXIPROXY_NETWORK_ALIAS = "toxiproxy";
+
+    private final Network network;
+    private final ToxiproxyContainer toxiProxy;
     private final GenericContainer<?> master;
-    private final List<GenericContainer<?>> tServers;
+    private final GenericContainer<?> tabletServer;
 
     public TestingKuduServer()
     {
-        Network network = Network.newNetwork();
-        ImmutableList.Builder<GenericContainer<?>> tServersBuilder = ImmutableList.builder();
-        this.master = new GenericContainer<>("apache/kudu:1.10.0")
+        this(LATEST_TAG);
+    }
+
+    /**
+     * Kudu tablets needs to know the host/mapped port it will be bound to in order to configure --rpc_advertised_addresses
+     * However when using non-fixed ports in testcontainers, we only know the mapped port after the container starts up
+     * In order to workaround this, create a proxy to forward traffic from the host to the underlying tablets
+     * Since the ToxiProxy container starts up *before* kudu, we know the mapped port when configuring the kudu tablets
+     */
+    public TestingKuduServer(String kuduVersion)
+    {
+        network = Network.newNetwork();
+        String masterContainerAlias = "kudu-master";
+        this.master = new GenericContainer<>(format("%s:%s", KUDU_IMAGE, kuduVersion))
                 .withExposedPorts(KUDU_MASTER_PORT)
                 .withCommand("master")
+                .withEnv("MASTER_ARGS", "--default_num_replicas=1 --unlock_unsafe_flags --use_hybrid_clock=false")
                 .withNetwork(network)
-                .withNetworkAliases("kudu-master");
+                .withNetworkAliases(masterContainerAlias);
 
-        for (int instance = 0; instance < NUMBER_OF_REPLICA; instance++) {
-            String instanceName = "kudu-tserver-" + instance;
-            GenericContainer<?> tableServer = new GenericContainer<>("apache/kudu:1.10.0")
-                    .withExposedPorts(KUDU_TSERVER_PORT)
-                    .withCommand("tserver")
-                    .withEnv("KUDU_MASTERS", "kudu-master:" + KUDU_MASTER_PORT)
-                    .withNetwork(network)
-                    .withNetworkAliases("kudu-tserver-" + instance)
-                    .dependsOn(master)
-                    .withEnv("TSERVER_ARGS", "--fs_wal_dir=/var/lib/kudu/tserver --use_hybrid_clock=false --rpc_advertised_addresses=" + instanceName);
-            tServersBuilder.add(tableServer);
-        }
-        this.tServers = tServersBuilder.build();
+        toxiProxy = new ToxiproxyContainer(TOXIPROXY_IMAGE)
+                .withNetwork(network)
+                .withNetworkAliases(TOXIPROXY_NETWORK_ALIAS);
+        toxiProxy.start();
+
+        String instanceName = "kudu-tserver";
+        @SuppressWarnings("deprecation")
+        ToxiproxyContainer.ContainerProxy proxy = toxiProxy.getProxy(instanceName, KUDU_TSERVER_PORT);
+        tabletServer = new GenericContainer<>(format("%s:%s", KUDU_IMAGE, kuduVersion))
+                .withExposedPorts(KUDU_TSERVER_PORT)
+                .withCommand("tserver")
+                .withEnv("KUDU_MASTERS", format("%s:%s", masterContainerAlias, KUDU_MASTER_PORT))
+                .withEnv("TSERVER_ARGS", format("--fs_wal_dir=/var/lib/kudu/tserver --logtostderr --use_hybrid_clock=false --unlock_unsafe_flags --rpc_bind_addresses=%s:%s --rpc_advertised_addresses=%s:%s", instanceName, KUDU_TSERVER_PORT, TOXIPROXY_NETWORK_ALIAS, proxy.getOriginalProxyPort()))
+                .withNetwork(network)
+                .withNetworkAliases(instanceName)
+                .waitingFor(new KuduTabletWaitStrategy(master))
+                .dependsOn(master);
+
         master.start();
-        tServers.forEach(GenericContainer::start);
+        tabletServer.start();
     }
 
     public HostAndPort getMasterAddress()
     {
-        return HostAndPort.fromParts(master.getContainerIpAddress(), master.getMappedPort(KUDU_MASTER_PORT));
+        // Do not use master.getHost(), it returns "localhost" which the kudu client resolves to:
+        // localhost/127.0.0.1, localhost/0:0:0:0:0:0:0:1
+        // Instead explicitly list only the ipv4 loopback address 127.0.0.1
+        return HostAndPort.fromParts("127.0.0.1", master.getMappedPort(KUDU_MASTER_PORT));
     }
 
     @Override
@@ -70,7 +99,9 @@ public class TestingKuduServer
     {
         try (Closer closer = Closer.create()) {
             closer.register(master::stop);
-            tServers.forEach(tabletServer -> closer.register(tabletServer::stop));
+            closer.register(tabletServer::stop);
+            closer.register(toxiProxy::stop);
+            closer.register(network::close);
         }
         catch (IOException e) {
             throw new RuntimeException(e);

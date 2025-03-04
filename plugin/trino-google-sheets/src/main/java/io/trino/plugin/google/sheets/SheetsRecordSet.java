@@ -27,14 +27,14 @@ public class SheetsRecordSet
 {
     private final List<SheetsColumnHandle> columnHandles;
     private final List<Type> columnTypes;
-    private final List<List<Object>> values;
+    private final List<List<String>> values;
 
     public SheetsRecordSet(SheetsSplit split, List<SheetsColumnHandle> columnHandles)
     {
         requireNonNull(split, "split is null");
         this.columnHandles = requireNonNull(columnHandles, "columnHandles is null");
-        this.values = split.getValues();
-        this.columnTypes = columnHandles.stream().map(SheetsColumnHandle::getColumnType).collect(Collectors.toList());
+        this.values = split.values();
+        this.columnTypes = columnHandles.stream().map(SheetsColumnHandle::columnType).collect(Collectors.toList());
     }
 
     @Override

@@ -13,11 +13,11 @@
  */
 package io.trino.plugin.sqlserver;
 
+import dev.failsafe.Failsafe;
+import dev.failsafe.RetryPolicy;
+import dev.failsafe.Timeout;
 import io.airlift.log.Logger;
 import io.trino.testing.sql.SqlExecutor;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.RetryPolicy;
-import net.jodah.failsafe.Timeout;
 import org.testcontainers.containers.MSSQLServerContainer;
 import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
 import org.testcontainers.utility.DockerImageName;
@@ -51,19 +51,19 @@ public final class TestingSqlServer
         executor.execute(format("ALTER DATABASE %s SET READ_COMMITTED_SNAPSHOT ON", databaseName));
     };
 
-    private static final RetryPolicy<InitializedState> CONTAINER_RETRY_POLICY = new RetryPolicy<InitializedState>()
+    private static final RetryPolicy<InitializedState> CONTAINER_RETRY_POLICY = RetryPolicy.<InitializedState>builder()
             .withBackoff(1, 5, ChronoUnit.SECONDS)
             .withMaxRetries(5)
             .handleIf(throwable -> getCausalChain(throwable).stream()
-                    .anyMatch(SQLException.class::isInstance))
+                    .anyMatch(SQLException.class::isInstance) || throwable.getMessage().contains("Container exited with code"))
             .onRetry(event -> log.warn(
                     "Query failed on attempt %s, will retry. Exception: %s",
                     event.getAttemptCount(),
-                    event.getLastFailure().getMessage()));
+                    event.getLastException().getMessage()))
+            .build();
 
     private static final DockerImageName IMAGE_NAME = DockerImageName.parse("mcr.microsoft.com/mssql/server");
-    public static final String DEFAULT_VERSION = "2017-CU13";
-    public static final String LATEST_VERSION = "2019-CU13-ubuntu-20.04";
+    public static final String LATEST_VERSION = "2019-CU28-ubuntu-20.04";
 
     private final MSSQLServerContainer<?> container;
     private final String databaseName;
@@ -71,7 +71,7 @@ public final class TestingSqlServer
 
     public TestingSqlServer()
     {
-        this(DEFAULT_VERSION, DEFAULT_DATABASE_SETUP);
+        this(LATEST_VERSION, DEFAULT_DATABASE_SETUP);
     }
 
     public TestingSqlServer(String version)
@@ -81,7 +81,7 @@ public final class TestingSqlServer
 
     public TestingSqlServer(BiConsumer<SqlExecutor, String> databaseSetUp)
     {
-        this(DEFAULT_VERSION, databaseSetUp);
+        this(LATEST_VERSION, databaseSetUp);
     }
 
     public TestingSqlServer(String version, BiConsumer<SqlExecutor, String> databaseSetUp)
@@ -135,16 +135,27 @@ public final class TestingSqlServer
         // enable case sensitive (see the CS below) collation for SQL identifiers
         container.addEnv("MSSQL_COLLATION", "Latin1_General_CS_AS");
 
-        Closeable cleanup = startOrReuse(container);
-        try {
-            setUpDatabase(sqlExecutorForContainer(container), databaseName, databaseSetUp);
-        }
-        catch (Exception e) {
-            closeAllSuppress(e, cleanup);
-            throw e;
-        }
+        // TLS and certificate validation are on by default, and need
+        // to be disabled for tests.
+        container.withUrlParam("encrypt", "false");
 
-        return new InitializedState(container, databaseName, cleanup);
+        try {
+            Closeable cleanup = startOrReuse(container);
+            try {
+                setUpDatabase(sqlExecutorForContainer(container), databaseName, databaseSetUp);
+            }
+            catch (Exception e) {
+                closeAllSuppress(e, cleanup);
+                throw e;
+            }
+
+            return new InitializedState(container, databaseName, cleanup);
+        }
+        catch (Throwable e) {
+            try (container) {
+                throw e;
+            }
+        }
     }
 
     private static void setUpDatabase(SqlExecutor executor, String databaseName, BiConsumer<SqlExecutor, String> databaseSetUp)

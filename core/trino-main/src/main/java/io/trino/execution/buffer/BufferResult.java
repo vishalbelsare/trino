@@ -14,6 +14,7 @@
 package io.trino.execution.buffer;
 
 import com.google.common.collect.ImmutableList;
+import io.airlift.slice.Slice;
 
 import java.util.List;
 import java.util.Objects;
@@ -34,9 +35,9 @@ public class BufferResult
     private final long token;
     private final long nextToken;
     private final boolean bufferComplete;
-    private final List<SerializedPage> serializedPages;
+    private final List<Slice> serializedPages;
 
-    public BufferResult(String taskInstanceId, long token, long nextToken, boolean bufferComplete, List<SerializedPage> serializedPages)
+    public BufferResult(String taskInstanceId, long token, long nextToken, boolean bufferComplete, List<Slice> serializedPages)
     {
         checkArgument(!isNullOrEmpty(taskInstanceId), "taskInstanceId is null");
 
@@ -62,7 +63,7 @@ public class BufferResult
         return bufferComplete;
     }
 
-    public List<SerializedPage> getSerializedPages()
+    public List<Slice> getSerializedPages()
     {
         return serializedPages;
     }
@@ -92,10 +93,10 @@ public class BufferResult
             return false;
         }
         BufferResult that = (BufferResult) o;
-        return Objects.equals(token, that.token) &&
-                Objects.equals(nextToken, that.nextToken) &&
+        return token == that.token &&
+                nextToken == that.nextToken &&
                 Objects.equals(taskInstanceId, that.taskInstanceId) &&
-                Objects.equals(bufferComplete, that.bufferComplete) &&
+                bufferComplete == that.bufferComplete &&
                 Objects.equals(serializedPages, that.serializedPages);
     }
 

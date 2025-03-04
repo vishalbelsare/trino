@@ -36,12 +36,12 @@ public class SheetsRecordCursor
 {
     private final List<SheetsColumnHandle> columnHandles;
     private final long totalBytes;
-    private final List<List<Object>> dataValues;
+    private final List<List<String>> dataValues;
 
     private List<String> fields;
     private int currentIndex;
 
-    public SheetsRecordCursor(List<SheetsColumnHandle> columnHandles, List<List<Object>> dataValues)
+    public SheetsRecordCursor(List<SheetsColumnHandle> columnHandles, List<List<String>> dataValues)
     {
         requireNonNull(columnHandles, "columnHandles is null");
         requireNonNull(dataValues, "dataValues is null");
@@ -49,9 +49,9 @@ public class SheetsRecordCursor
         this.columnHandles = ImmutableList.copyOf(columnHandles);
         this.dataValues = ImmutableList.copyOf(dataValues);
         long inputLength = 0;
-        for (List<Object> objList : dataValues) {
-            for (Object obj : objList) {
-                inputLength += String.valueOf(obj).length();
+        for (List<String> objList : dataValues) {
+            for (String obj : objList) {
+                inputLength += obj.length();
             }
         }
         totalBytes = inputLength;
@@ -73,15 +73,15 @@ public class SheetsRecordCursor
     public Type getType(int field)
     {
         checkArgument(field < columnHandles.size(), "Invalid field index");
-        return columnHandles.get(field).getColumnType();
+        return columnHandles.get(field).columnType();
     }
 
     @Override
     public boolean advanceNextPosition()
     {
-        List<Object> currentVals = null;
+        List<String> currentVals = null;
         // Skip empty rows from sheet
-        while (currentVals == null || currentVals.size() == 0) {
+        while (currentVals == null || currentVals.isEmpty()) {
             if (currentIndex == dataValues.size()) {
                 return false;
             }
@@ -91,9 +91,9 @@ public class SheetsRecordCursor
         String[] allFields = new String[columnHandles.size()];
 
         for (int i = 0; i < allFields.length; i++) {
-            int ordinalPos = columnHandles.get(i).getOrdinalPosition();
+            int ordinalPos = columnHandles.get(i).ordinalPosition();
             if (currentVals.size() > ordinalPos) {
-                allFields[i] = String.valueOf(currentVals.get(ordinalPos));
+                allFields[i] = currentVals.get(ordinalPos);
             }
         }
         fields = Arrays.asList(allFields);
@@ -154,7 +154,5 @@ public class SheetsRecordCursor
     }
 
     @Override
-    public void close()
-    {
-    }
+    public void close() {}
 }

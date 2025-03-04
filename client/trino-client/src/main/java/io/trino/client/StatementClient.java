@@ -13,10 +13,11 @@
  */
 package io.trino.client;
 
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.io.Closeable;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -40,15 +41,27 @@ public interface StatementClient
 
     QueryStatusInfo currentStatusInfo();
 
+    // For backward compatibility and migration path
     QueryData currentData();
 
+    ResultRows currentRows();
+
     QueryStatusInfo finalStatusInfo();
+
+    default Optional<String> getEncoding()
+    {
+        return Optional.empty();
+    }
 
     Optional<String> getSetCatalog();
 
     Optional<String> getSetSchema();
 
-    Optional<String> getSetPath();
+    Optional<List<String>> getSetPath();
+
+    Optional<String> getSetAuthorizationUser();
+
+    boolean isResetAuthorizationUser();
 
     Map<String, String> getSetSessionProperties();
 

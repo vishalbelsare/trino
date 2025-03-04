@@ -13,16 +13,25 @@
  */
 package io.trino.plugin.base.util;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonFactoryBuilder;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.core.StreamWriteFeature;
+import com.fasterxml.jackson.core.util.JsonRecyclerPools;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.annotations.VisibleForTesting;
 import io.airlift.json.ObjectMapperProvider;
+import org.gaul.modernizer_maven_annotations.SuppressModernizer;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -30,6 +39,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.String.format;
 import static java.nio.file.Files.exists;
 import static java.nio.file.Files.isReadable;
+import static java.util.Objects.requireNonNull;
 
 public final class JsonUtils
 {
@@ -52,18 +62,64 @@ public final class JsonUtils
             byte[] json = Files.readAllBytes(path);
             return parseJson(json, javaType);
         }
-        catch (IOException e) {
+        catch (IOException | RuntimeException e) {
             throw new IllegalArgumentException(format("Invalid JSON file '%s' for '%s'", path, javaType), e);
         }
     }
 
-    public static JsonNode parseJson(String json)
+    public static <T> T parseJson(String json, Class<T> javaType)
     {
-        try {
-            return OBJECT_MAPPER.readTree(json);
+        return parseJson(OBJECT_MAPPER, json, javaType);
+    }
+
+    public static <T> T parseJson(ObjectMapper mapper, String json, Class<T> javaType)
+    {
+        return parseJson(mapper, ObjectMapper::createParser, json, javaType);
+    }
+
+    public static <T> T parseJson(byte[] jsonBytes, Class<T> javaType)
+    {
+        return parseJson(OBJECT_MAPPER, jsonBytes, javaType);
+    }
+
+    public static <T> T parseJson(ObjectMapper mapper, byte[] jsonBytes, Class<T> javaType)
+    {
+        return parseJson(mapper, ObjectMapper::createParser, jsonBytes, javaType);
+    }
+
+    public static <T> T parseJson(InputStream inputStream, Class<T> javaType)
+    {
+        return parseJson(OBJECT_MAPPER, inputStream, javaType);
+    }
+
+    public static <T> T parseJson(ObjectMapper mapper, InputStream inputStream, Class<T> javaType)
+    {
+        return parseJson(mapper, ObjectMapper::createParser, inputStream, javaType);
+    }
+
+    public static <T> T parseJson(URL url, Class<T> javaType)
+    {
+        return parseJson(OBJECT_MAPPER, url, javaType);
+    }
+
+    public static <T> T parseJson(ObjectMapper mapper, URL url, Class<T> javaType)
+    {
+        return parseJson(mapper, ObjectMapper::createParser, url, javaType);
+    }
+
+    private static <I, T> T parseJson(ObjectMapper mapper, ParserConstructor<I> parserConstructor, I input, Class<T> javaType)
+    {
+        requireNonNull(mapper, "mapper is null");
+        requireNonNull(parserConstructor, "parserConstructor is null");
+        requireNonNull(input, "input is null");
+        requireNonNull(javaType, "javaType is null");
+        try (JsonParser parser = parserConstructor.createParser(mapper, input)) {
+            T value = mapper.readValue(parser, javaType);
+            checkArgument(parser.nextToken() == null, "Found characters after the expected end of input");
+            return value;
         }
         catch (IOException e) {
-            throw new UncheckedIOException("Could not parse JSON node from given byte array", e);
+            throw new UncheckedIOException("Could not parse JSON", e);
         }
     }
 
@@ -73,14 +129,54 @@ public final class JsonUtils
             return OBJECT_MAPPER.treeToValue(treeNode, javaType);
         }
         catch (JsonProcessingException e) {
-            throw new UncheckedIOException("Failed to parse JSON tree node", e);
+            throw new UncheckedIOException("Failed to convert JSON tree node", e);
         }
     }
 
-    @VisibleForTesting
-    static <T> T parseJson(byte[] jsonBytes, Class<T> javaType)
-            throws IOException
+    public static <T> T parseJson(String json, String jsonPointer, Class<T> javaType)
     {
-        return OBJECT_MAPPER.readValue(jsonBytes, javaType);
+        JsonNode node = parseJson(json, JsonNode.class);
+        return parseJson(node, jsonPointer, javaType);
+    }
+
+    public static <T> T parseJson(Path path, String jsonPointer, Class<T> javaType)
+    {
+        JsonNode node = parseJson(path, JsonNode.class);
+        return parseJson(node, jsonPointer, javaType);
+    }
+
+    private static <T> T parseJson(JsonNode node, String jsonPointer, Class<T> javaType)
+    {
+        JsonNode mappingsNode = node.at(jsonPointer);
+        return jsonTreeToValue(mappingsNode, javaType);
+    }
+
+    public static JsonFactory jsonFactory()
+    {
+        return jsonFactoryBuilder().build();
+    }
+
+    @SuppressModernizer
+    // JsonFactoryBuilder usage is intentional as we need to disable read constraints
+    // due to the limits introduced by Jackson 2.15
+    public static JsonFactoryBuilder jsonFactoryBuilder()
+    {
+        // https://github.com/FasterXML/jackson-core/issues/1256
+        return new JsonFactoryBuilder()
+                .streamReadConstraints(StreamReadConstraints.builder()
+                        .maxStringLength(Integer.MAX_VALUE)
+                        .maxNestingDepth(Integer.MAX_VALUE)
+                        .maxNumberLength(Integer.MAX_VALUE)
+                        .build())
+                .enable(StreamReadFeature.USE_FAST_BIG_NUMBER_PARSER)
+                .enable(StreamReadFeature.USE_FAST_DOUBLE_PARSER)
+                .enable(StreamWriteFeature.USE_FAST_DOUBLE_WRITER)
+                .recyclerPool(JsonRecyclerPools.threadLocalPool());
+    }
+
+    private interface ParserConstructor<I>
+    {
+        JsonParser createParser(ObjectMapper mapper, I input)
+                throws IOException;
     }
 }

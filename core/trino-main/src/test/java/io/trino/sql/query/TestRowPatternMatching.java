@@ -13,29 +13,26 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestRowPatternMatching
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -820,12 +817,12 @@ public class TestRowPatternMatching
                         "     (6, 2, 80, 'C') ");
 
         // Exception: trying to resume matching from the first row of the match. If uncaught, it would cause an infinite loop.
-        assertThatThrownBy(() -> assertions.query(format(query, "AFTER MATCH SKIP TO A")))
-                .hasMessage("AFTER MATCH SKIP failed: cannot skip to first row of match");
+        assertThat(assertions.query(format(query, "AFTER MATCH SKIP TO A")))
+                .failure().hasMessage("AFTER MATCH SKIP failed: cannot skip to first row of match");
 
         // Exception: trying to skip to label which was not matched
-        assertThatThrownBy(() -> assertions.query(format(query, "AFTER MATCH SKIP TO D")))
-                .hasMessage("AFTER MATCH SKIP failed: pattern variable is not present in match");
+        assertThat(assertions.query(format(query, "AFTER MATCH SKIP TO D")))
+                .failure().hasMessage("AFTER MATCH SKIP failed: pattern variable is not present in match");
     }
 
     @Test
@@ -1527,5 +1524,38 @@ public class TestRowPatternMatching
 
                 "                ) AS m"))
                 .matches("VALUES (VARCHAR 'B'), ('B'), ('B'), ('B'), ('B'), ('B'), ('B'), ('B'), ('LAST') ");
+    }
+
+    @Test
+    public void testProperties()
+    {
+        assertThat(assertions.query(
+                """
+                WITH
+                    t(a, b) AS (VALUES (1, 1)),
+                    u AS (SELECT * FROM t WHERE b = 1)
+                SELECT *
+                FROM u
+                  MATCH_RECOGNIZE (
+                   PARTITION BY a
+                   PATTERN (X)
+                   DEFINE X AS (b = 1))
+                """))
+                .matches("VALUES 1");
+    }
+
+    @Test
+    public void testKillThread()
+    {
+        assertThat(assertions.query(
+                """
+                SELECT *
+                FROM (VALUES 1, 2, 3, 4, 5)
+                  MATCH_RECOGNIZE (
+                      MEASURES 'foo' AS foo
+                      PATTERN ((Y?){2,})
+                      DEFINE Y AS true)
+                """))
+                .matches("VALUES 'foo'");
     }
 }

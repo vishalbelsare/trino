@@ -34,7 +34,7 @@ import java.util.TreeMap;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static java.lang.Math.abs;
 import static java.lang.Math.max;
-import static java.lang.String.format;
+import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 public final class TimeZoneKey
@@ -118,7 +118,7 @@ public final class TimeZoneKey
 
             short maxZoneKey = 0;
             for (Entry<Object, Object> entry : data.entrySet()) {
-                short zoneKey = Short.valueOf(((String) entry.getKey()).trim());
+                short zoneKey = Short.parseShort(((String) entry.getKey()).trim());
                 String zoneId = ((String) entry.getValue()).trim();
 
                 maxZoneKey = (short) max(maxZoneKey, zoneKey);
@@ -156,7 +156,9 @@ public final class TimeZoneKey
     @JsonCreator
     public static TimeZoneKey getTimeZoneKey(short timeZoneKey)
     {
-        checkArgument(timeZoneKey < TIME_ZONE_KEYS.length && TIME_ZONE_KEYS[timeZoneKey] != null, "Invalid time zone key %s", timeZoneKey);
+        if ((timeZoneKey >= TIME_ZONE_KEYS.length) || (TIME_ZONE_KEYS[timeZoneKey] == null)) {
+            throw new IllegalArgumentException("Invalid time zone key: " + timeZoneKey);
+        }
         return TIME_ZONE_KEYS[timeZoneKey];
     }
 
@@ -166,7 +168,9 @@ public final class TimeZoneKey
     public static TimeZoneKey getTimeZoneKey(String zoneId)
     {
         requireNonNull(zoneId, "zoneId is null");
-        checkArgument(!zoneId.isEmpty(), "Zone id is an empty string");
+        if (zoneId.isEmpty()) {
+            throw new IllegalArgumentException("Zone id is an empty string");
+        }
 
         TimeZoneKey zoneKey = ZONE_ID_TO_KEY.get(zoneId);
         if (zoneKey == null) {
@@ -239,7 +243,8 @@ public final class TimeZoneKey
             return false;
         }
         TimeZoneKey other = (TimeZoneKey) obj;
-        return Objects.equals(this.id, other.id) && Objects.equals(this.key, other.key);
+        return this.key == other.key &&
+               Objects.equals(this.id, other.id);
     }
 
     @Override
@@ -298,7 +303,7 @@ public final class TimeZoneKey
                     hour = -hour;
                 }
 
-                return formatZoneOffset(hour, minute);
+                return formatZoneOffset(hour >= 0, abs(hour), minute);
             }
         }
 
@@ -317,13 +322,12 @@ public final class TimeZoneKey
         return zoneId;
     }
 
-    private static String formatZoneOffset(int hour, int minute)
+    private static String formatZoneOffset(boolean positive, int hour, int minute)
     {
-        StringBuilder builder = new StringBuilder();
+        StringBuilder builder = new StringBuilder(6);
 
-        builder.append(hour >= 0 ? '+' : '-');
+        builder.append(positive ? '+' : '-');
 
-        hour = abs(hour);
         if (hour < 10) {
             builder.append('0');
         }
@@ -343,15 +347,8 @@ public final class TimeZoneKey
         return UTC_EQUIVALENTS.contains(zoneId);
     }
 
-    private static String zoneIdForOffset(long offset)
+    private static String zoneIdForOffset(long offsetMinutes)
     {
-        return format("%s%02d:%02d", offset < 0 ? "-" : "+", abs(offset / 60), abs(offset % 60));
-    }
-
-    private static void checkArgument(boolean check, String message, Object... args)
-    {
-        if (!check) {
-            throw new IllegalArgumentException(format(message, args));
-        }
+        return formatZoneOffset(offsetMinutes >= 0, toIntExact(abs(offsetMinutes / 60)), (int) abs(offsetMinutes % 60));
     }
 }

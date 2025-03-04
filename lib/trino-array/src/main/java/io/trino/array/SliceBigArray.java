@@ -14,12 +14,13 @@
 package io.trino.array;
 
 import io.airlift.slice.Slice;
-import org.openjdk.jol.info.ClassLayout;
+
+import static io.airlift.slice.SizeOf.instanceSize;
 
 public final class SliceBigArray
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(SliceBigArray.class).instanceSize();
-    private static final int SLICE_INSTANCE_SIZE = ClassLayout.parseClass(Slice.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(SliceBigArray.class);
+    private static final int SLICE_INSTANCE_SIZE = instanceSize(Slice.class);
     private final ObjectBigArray<Slice> array;
     private final ReferenceCountMap trackedSlices = new ReferenceCountMap();
     private long sizeOfSlices;
@@ -60,8 +61,7 @@ public final class SliceBigArray
      */
     public void set(long index, Slice value)
     {
-        updateRetainedSize(index, value);
-        array.set(index, value);
+        updateRetainedSize(array.getAndSet(index, value), value);
     }
 
     /**
@@ -73,27 +73,26 @@ public final class SliceBigArray
         array.ensureCapacity(length);
     }
 
-    private void updateRetainedSize(long index, Slice value)
+    private void updateRetainedSize(Slice oldValue, Slice newValue)
     {
-        Slice currentValue = array.get(index);
-        if (currentValue != null) {
-            int baseReferenceCount = trackedSlices.decrementAndGet(currentValue.getBase());
-            int sliceReferenceCount = trackedSlices.decrementAndGet(currentValue);
+        if (oldValue != null) {
+            int baseReferenceCount = trackedSlices.decrementAndGet(oldValue.byteArray());
+            int sliceReferenceCount = trackedSlices.decrementAndGet(oldValue);
             if (baseReferenceCount == 0) {
                 // it is the last referenced base
-                sizeOfSlices -= currentValue.getRetainedSize();
+                sizeOfSlices -= oldValue.getRetainedSize();
             }
             else if (sliceReferenceCount == 0) {
                 // it is the last referenced slice
                 sizeOfSlices -= SLICE_INSTANCE_SIZE;
             }
         }
-        if (value != null) {
-            int baseReferenceCount = trackedSlices.incrementAndGet(value.getBase());
-            int sliceReferenceCount = trackedSlices.incrementAndGet(value);
+        if (newValue != null) {
+            int baseReferenceCount = trackedSlices.incrementAndGet(newValue.byteArray());
+            int sliceReferenceCount = trackedSlices.incrementAndGet(newValue);
             if (baseReferenceCount == 1) {
                 // it is the first referenced base
-                sizeOfSlices += value.getRetainedSize();
+                sizeOfSlices += newValue.getRetainedSize();
             }
             else if (sliceReferenceCount == 1) {
                 // it is the first referenced slice

@@ -17,13 +17,20 @@ import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.DefunctConfig;
 import io.airlift.configuration.LegacyConfig;
+import io.airlift.units.Duration;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import java.util.concurrent.TimeUnit;
 
 import static java.util.Locale.ENGLISH;
 
-@DefunctConfig({"node-scheduler.location-aware-scheduling-enabled", "node-scheduler.multiple-tasks-per-node-enabled"})
+@DefunctConfig({
+        "node-scheduler.allocator-type",
+        "node-scheduler.location-aware-scheduling-enabled",
+        "node-scheduler.multiple-tasks-per-node-enabled",
+        "node-scheduler.max-fraction-full-nodes-per-query",
+        "node-scheduler.max-absolute-full-nodes-per-query"})
 public class NodeSchedulerConfig
 {
     public enum NodeSchedulerPolicy
@@ -31,13 +38,22 @@ public class NodeSchedulerConfig
         UNIFORM, TOPOLOGY
     }
 
+    public enum SplitsBalancingPolicy
+    {
+        NODE, STAGE
+    }
+
     private int minCandidates = 10;
     private boolean includeCoordinator = true;
-    private int maxSplitsPerNode = 100;
-    private int maxPendingSplitsPerTask = 10;
+    private int maxSplitsPerNode = 256;
+    private int minPendingSplitsPerTask = 16;
+    private int maxAdjustedPendingSplitsWeightPerTask = 2000;
     private NodeSchedulerPolicy nodeSchedulerPolicy = NodeSchedulerPolicy.UNIFORM;
     private boolean optimizedLocalScheduling = true;
-    private int maxUnacknowledgedSplitsPerTask = 500;
+    private SplitsBalancingPolicy splitsBalancingPolicy = SplitsBalancingPolicy.STAGE;
+    private int maxUnacknowledgedSplitsPerTask = 2000;
+    private Duration allowedNoMatchingNodePeriod = new Duration(2, TimeUnit.MINUTES);
+    private Duration exhaustedNodeWaitPeriod = new Duration(2, TimeUnit.MINUTES);
 
     @NotNull
     public NodeSchedulerPolicy getNodeSchedulerPolicy()
@@ -56,16 +72,11 @@ public class NodeSchedulerConfig
     private static NodeSchedulerPolicy toNodeSchedulerPolicy(String nodeSchedulerPolicy)
     {
         // "legacy" and "flat" are here for backward compatibility
-        switch (nodeSchedulerPolicy.toLowerCase(ENGLISH)) {
-            case "legacy":
-            case "uniform":
-                return NodeSchedulerPolicy.UNIFORM;
-            case "flat":
-            case "topology":
-                return NodeSchedulerPolicy.TOPOLOGY;
-            default:
-                throw new IllegalArgumentException("Unknown node scheduler policy: " + nodeSchedulerPolicy);
-        }
+        return switch (nodeSchedulerPolicy.toLowerCase(ENGLISH)) {
+            case "legacy", "uniform" -> NodeSchedulerPolicy.UNIFORM;
+            case "flat", "topology" -> NodeSchedulerPolicy.TOPOLOGY;
+            default -> throw new IllegalArgumentException("Unknown node scheduler policy: " + nodeSchedulerPolicy);
+        };
     }
 
     @Min(1)
@@ -93,17 +104,30 @@ public class NodeSchedulerConfig
         return this;
     }
 
-    @Config("node-scheduler.max-pending-splits-per-task")
-    @LegacyConfig({"node-scheduler.max-pending-splits-per-node-per-task", "node-scheduler.max-pending-splits-per-node-per-stage"})
-    public NodeSchedulerConfig setMaxPendingSplitsPerTask(int maxPendingSplitsPerTask)
+    @Config("node-scheduler.min-pending-splits-per-task")
+    @LegacyConfig({"node-scheduler.max-pending-splits-per-task", "node-scheduler.max-pending-splits-per-node-per-task", "node-scheduler.max-pending-splits-per-node-per-stage"})
+    public NodeSchedulerConfig setMinPendingSplitsPerTask(int minPendingSplitsPerTask)
     {
-        this.maxPendingSplitsPerTask = maxPendingSplitsPerTask;
+        this.minPendingSplitsPerTask = minPendingSplitsPerTask;
         return this;
     }
 
-    public int getMaxPendingSplitsPerTask()
+    public int getMinPendingSplitsPerTask()
     {
-        return maxPendingSplitsPerTask;
+        return minPendingSplitsPerTask;
+    }
+
+    @Config("node-scheduler.max-adjusted-pending-splits-per-task")
+    public NodeSchedulerConfig setMaxAdjustedPendingSplitsWeightPerTask(int maxAdjustedPendingSplitsWeightPerTask)
+    {
+        this.maxAdjustedPendingSplitsWeightPerTask = maxAdjustedPendingSplitsWeightPerTask;
+        return this;
+    }
+
+    @Min(0)
+    public int getMaxAdjustedPendingSplitsWeightPerTask()
+    {
+        return maxAdjustedPendingSplitsWeightPerTask;
     }
 
     public int getMaxSplitsPerNode()
@@ -132,6 +156,20 @@ public class NodeSchedulerConfig
         return this;
     }
 
+    @NotNull
+    public SplitsBalancingPolicy getSplitsBalancingPolicy()
+    {
+        return splitsBalancingPolicy;
+    }
+
+    @Config("node-scheduler.splits-balancing-policy")
+    @ConfigDescription("Strategy for balancing new splits on worker nodes")
+    public NodeSchedulerConfig setSplitsBalancingPolicy(SplitsBalancingPolicy splitsBalancingPolicy)
+    {
+        this.splitsBalancingPolicy = splitsBalancingPolicy;
+        return this;
+    }
+
     public boolean getOptimizedLocalScheduling()
     {
         return optimizedLocalScheduling;
@@ -142,5 +180,33 @@ public class NodeSchedulerConfig
     {
         this.optimizedLocalScheduling = optimizedLocalScheduling;
         return this;
+    }
+
+    // TODO: respect in pipelined mode
+    @Config("node-scheduler.allowed-no-matching-node-period")
+    @ConfigDescription("How long scheduler should wait before failing a query for which hard task requirements (e.g. node exposing specific catalog) cannot be satisfied. Relevant for TASK retry policy only.")
+    public NodeSchedulerConfig setAllowedNoMatchingNodePeriod(Duration allowedNoMatchingNodePeriod)
+    {
+        this.allowedNoMatchingNodePeriod = allowedNoMatchingNodePeriod;
+        return this;
+    }
+
+    public Duration getAllowedNoMatchingNodePeriod()
+    {
+        return allowedNoMatchingNodePeriod;
+    }
+
+    // TODO: respect in pipelined mode
+    @Config("node-scheduler.exhausted-node-wait-period")
+    @ConfigDescription("Maximum time to wait for resource availability on preferred nodes before scheduling a remotely accessible split on other nodes. Relevant for TASK retry policy only.")
+    public NodeSchedulerConfig setExhaustedNodeWaitPeriod(Duration exhaustedNodeWaitPeriod)
+    {
+        this.exhaustedNodeWaitPeriod = exhaustedNodeWaitPeriod;
+        return this;
+    }
+
+    public Duration getExhaustedNodeWaitPeriod()
+    {
+        return exhaustedNodeWaitPeriod;
     }
 }

@@ -13,14 +13,15 @@
  */
 package io.trino.plugin.redis;
 
+import com.google.inject.Inject;
+import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorRecordSetProvider;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
-
-import javax.inject.Inject;
 
 import static io.trino.spi.transaction.IsolationLevel.READ_COMMITTED;
 import static io.trino.spi.transaction.IsolationLevel.checkConnectorSupports;
@@ -32,6 +33,7 @@ import static java.util.Objects.requireNonNull;
 public class RedisConnector
         implements Connector
 {
+    private final LifeCycleManager lifeCycleManager;
     private final RedisMetadata metadata;
 
     private final RedisSplitManager splitManager;
@@ -39,10 +41,12 @@ public class RedisConnector
 
     @Inject
     public RedisConnector(
+            LifeCycleManager lifeCycleManager,
             RedisMetadata metadata,
             RedisSplitManager splitManager,
             RedisRecordSetProvider recordSetProvider)
     {
+        this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.recordSetProvider = requireNonNull(recordSetProvider, "recordSetProvider is null");
@@ -56,7 +60,7 @@ public class RedisConnector
     }
 
     @Override
-    public ConnectorMetadata getMetadata(ConnectorTransactionHandle transaction)
+    public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transaction)
     {
         return metadata;
     }
@@ -71,5 +75,11 @@ public class RedisConnector
     public ConnectorRecordSetProvider getRecordSetProvider()
     {
         return recordSetProvider;
+    }
+
+    @Override
+    public void shutdown()
+    {
+        lifeCycleManager.stop();
     }
 }

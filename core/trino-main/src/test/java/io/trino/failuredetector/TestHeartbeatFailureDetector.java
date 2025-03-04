@@ -26,14 +26,13 @@ import io.airlift.jmx.testing.TestingJmxModule;
 import io.airlift.json.JsonModule;
 import io.airlift.json.ObjectMapperProvider;
 import io.airlift.node.testing.TestingNodeModule;
-import io.airlift.tracetoken.TraceTokenModule;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.failuredetector.HeartbeatFailureDetector.Stats;
 import io.trino.server.InternalCommunicationConfig;
-import org.testng.annotations.Test;
-
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
+import io.trino.server.security.SecurityConfig;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import org.junit.jupiter.api.Test;
 
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -42,9 +41,7 @@ import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.discovery.client.DiscoveryBinder.discoveryBinder;
 import static io.airlift.discovery.client.ServiceTypes.serviceType;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHeartbeatFailureDetector
 {
@@ -56,11 +53,11 @@ public class TestHeartbeatFailureDetector
                 new TestingJmxModule(),
                 new TestingDiscoveryModule(),
                 new TestingHttpServerModule(),
-                new TraceTokenModule(),
                 new JsonModule(),
                 new JaxrsModule(),
                 new FailureDetectorModule(),
                 binder -> {
+                    configBinder(binder).bindConfig(SecurityConfig.class);
                     configBinder(binder).bindConfig(InternalCommunicationConfig.class);
                     configBinder(binder).bindConfig(QueryManagerConfig.class);
                     discoveryBinder(binder).bindSelector("trino");
@@ -77,15 +74,15 @@ public class TestHeartbeatFailureDetector
                 .initialize();
 
         ServiceSelector selector = injector.getInstance(Key.get(ServiceSelector.class, serviceType("trino")));
-        assertEquals(selector.selectAllServices().size(), 1);
+        assertThat(selector.selectAllServices()).hasSize(1);
 
         HeartbeatFailureDetector detector = injector.getInstance(HeartbeatFailureDetector.class);
         detector.updateMonitoredServices();
 
-        assertEquals(detector.getTotalCount(), 0);
-        assertEquals(detector.getActiveCount(), 0);
-        assertEquals(detector.getFailedCount(), 0);
-        assertTrue(detector.getFailed().isEmpty());
+        assertThat(detector.getTotalCount()).isEqualTo(0);
+        assertThat(detector.getActiveCount()).isEqualTo(0);
+        assertThat(detector.getFailedCount()).isEqualTo(0);
+        assertThat(detector.getFailed()).isEmpty();
     }
 
     @Test
@@ -96,13 +93,13 @@ public class TestHeartbeatFailureDetector
         Stats stats = new Stats(new URI("http://example.com"));
         String serialized = objectMapper.writeValueAsString(stats);
         JsonNode deserialized = objectMapper.readTree(serialized);
-        assertFalse(deserialized.has("lastFailureInfo"));
+        assertThat(deserialized.has("lastFailureInfo")).isFalse();
 
         stats.recordFailure(new SocketTimeoutException("timeout"));
         serialized = objectMapper.writeValueAsString(stats);
         deserialized = objectMapper.readTree(serialized);
-        assertFalse(deserialized.get("lastFailureInfo").isNull());
-        assertEquals(deserialized.get("lastFailureInfo").get("type").asText(), SocketTimeoutException.class.getName());
+        assertThat(deserialized.get("lastFailureInfo").isNull()).isFalse();
+        assertThat(deserialized.get("lastFailureInfo").get("type").asText()).isEqualTo(SocketTimeoutException.class.getName());
     }
 
     @Path("/foo")

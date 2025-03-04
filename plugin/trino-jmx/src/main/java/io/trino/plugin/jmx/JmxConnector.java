@@ -13,12 +13,12 @@
  */
 package io.trino.plugin.jmx;
 
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.spi.connector.Connector;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
-
-import javax.inject.Inject;
 
 import static io.trino.spi.transaction.IsolationLevel.READ_COMMITTED;
 import static io.trino.spi.transaction.IsolationLevel.checkConnectorSupports;
@@ -48,7 +48,7 @@ public class JmxConnector
     }
 
     @Override
-    public JmxMetadata getMetadata(ConnectorTransactionHandle transactionHandle)
+    public JmxMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle)
     {
         return jmxMetadata;
     }

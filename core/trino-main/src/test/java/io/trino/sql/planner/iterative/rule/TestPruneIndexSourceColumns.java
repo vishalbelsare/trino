@@ -17,25 +17,21 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import io.trino.connector.CatalogName;
-import io.trino.metadata.TableHandle;
 import io.trino.plugin.tpch.TpchColumnHandle;
-import io.trino.plugin.tpch.TpchTableHandle;
-import io.trino.plugin.tpch.TpchTransactionHandle;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.PlanNode;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import java.util.Optional;
 import java.util.function.Predicate;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.plugin.tpch.TpchMetadata.TINY_SCALE_FACTOR;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.constrainedIndexSource;
@@ -49,10 +45,10 @@ public class TestPruneIndexSourceColumns
     public void testNotAllOutputsReferenced()
     {
         tester().assertThat(new PruneIndexSourceColumns())
-                .on(p -> buildProjectedIndexSource(p, symbol -> symbol.getName().equals("orderkey")))
+                .on(p -> buildProjectedIndexSource(p, symbol -> symbol.name().equals("orderkey")))
                 .matches(
                         strictProject(
-                                ImmutableMap.of("x", expression("orderkey")),
+                                ImmutableMap.of("x", expression(new Reference(BIGINT, "orderkey"))),
                                 constrainedIndexSource(
                                         "orders",
                                         ImmutableMap.of("orderkey", "orderkey"))));
@@ -66,14 +62,14 @@ public class TestPruneIndexSourceColumns
                 .doesNotFire();
     }
 
-    private static PlanNode buildProjectedIndexSource(PlanBuilder p, Predicate<Symbol> projectionFilter)
+    private PlanNode buildProjectedIndexSource(PlanBuilder p, Predicate<Symbol> projectionFilter)
     {
         Symbol orderkey = p.symbol("orderkey", INTEGER);
         Symbol custkey = p.symbol("custkey", INTEGER);
         Symbol totalprice = p.symbol("totalprice", DOUBLE);
-        ColumnHandle orderkeyHandle = new TpchColumnHandle(orderkey.getName(), INTEGER);
-        ColumnHandle custkeyHandle = new TpchColumnHandle(custkey.getName(), INTEGER);
-        ColumnHandle totalpriceHandle = new TpchColumnHandle(totalprice.getName(), DOUBLE);
+        ColumnHandle orderkeyHandle = new TpchColumnHandle(orderkey.name(), INTEGER);
+        ColumnHandle custkeyHandle = new TpchColumnHandle(custkey.name(), INTEGER);
+        ColumnHandle totalpriceHandle = new TpchColumnHandle(totalprice.name(), DOUBLE);
 
         return p.project(
                 Assignments.identity(
@@ -81,11 +77,7 @@ public class TestPruneIndexSourceColumns
                                 .filter(projectionFilter)
                                 .collect(toImmutableList())),
                 p.indexSource(
-                        new TableHandle(
-                                new CatalogName("local"),
-                                new TpchTableHandle(TINY_SCHEMA_NAME, "orders", TINY_SCALE_FACTOR),
-                                TpchTransactionHandle.INSTANCE,
-                                Optional.empty()),
+                        tester().getCurrentCatalogTableHandle(TINY_SCHEMA_NAME, "orders"),
                         ImmutableSet.of(orderkey, custkey),
                         ImmutableList.of(orderkey, custkey, totalprice),
                         ImmutableMap.of(

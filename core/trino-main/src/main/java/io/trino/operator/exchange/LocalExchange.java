@@ -16,50 +16,49 @@ package io.trino.operator.exchange;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.slice.XxHash64;
 import io.airlift.units.DataSize;
 import io.trino.Session;
-import io.trino.execution.Lifespan;
 import io.trino.operator.BucketPartitionFunction;
 import io.trino.operator.HashGenerator;
-import io.trino.operator.InterpretedHashGenerator;
 import io.trino.operator.PartitionFunction;
-import io.trino.operator.PipelineExecutionStrategy;
 import io.trino.operator.PrecomputedHashGenerator;
+import io.trino.operator.output.SkewedPartitionRebalancer;
 import io.trino.spi.Page;
-import io.trino.spi.connector.ConnectorBucketNodeMap;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
+import io.trino.sql.planner.MergePartitioningHandle;
 import io.trino.sql.planner.NodePartitioningManager;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.SystemPartitioningHandle;
-import io.trino.type.BlockTypeOperators;
-
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
 
 import java.io.Closeable;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.stream.Stream;
+import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.operator.PipelineExecutionStrategy.UNGROUPED_EXECUTION;
+import static io.trino.SystemSessionProperties.getQueryMaxMemoryPerNode;
+import static io.trino.SystemSessionProperties.getSkewedPartitionMinDataProcessedRebalanceThreshold;
+import static io.trino.operator.InterpretedHashGenerator.createChannelsHashGenerator;
 import static io.trino.operator.exchange.LocalExchangeSink.finishedLocalExchangeSink;
+import static io.trino.sql.planner.PartitioningHandle.isScaledWriterHashDistribution;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_BROADCAST_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_PASSTHROUGH_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
@@ -67,20 +66,17 @@ import static java.util.function.Function.identity;
 @ThreadSafe
 public class LocalExchange
 {
+    public static final int SCALE_WRITERS_MAX_PARTITIONS_PER_WRITER = 128;
+
     private final Supplier<LocalExchanger> exchangerSupplier;
 
     private final List<LocalExchangeSource> sources;
-
-    private final LocalExchangeMemoryManager memoryManager;
 
     @GuardedBy("this")
     private boolean allSourcesFinished;
 
     @GuardedBy("this")
     private boolean noMoreSinkFactories;
-
-    @GuardedBy("this")
-    private final List<LocalExchangeSinkFactory> allSinkFactories;
 
     @GuardedBy("this")
     private final Set<LocalExchangeSinkFactory> openSinkFactories = new HashSet<>();
@@ -94,71 +90,109 @@ public class LocalExchange
     public LocalExchange(
             NodePartitioningManager nodePartitioningManager,
             Session session,
-            int sinkFactoryCount,
-            int bufferCount,
+            int defaultConcurrency,
             PartitioningHandle partitioning,
             List<Integer> partitionChannels,
             List<Type> partitionChannelTypes,
             Optional<Integer> partitionHashChannel,
             DataSize maxBufferedBytes,
-            BlockTypeOperators blockTypeOperators)
+            TypeOperators typeOperators,
+            DataSize writerScalingMinDataProcessed,
+            Supplier<Long> totalMemoryUsed)
     {
-        this.allSinkFactories = Stream.generate(() -> new LocalExchangeSinkFactory(LocalExchange.this))
-                .limit(sinkFactoryCount)
-                .collect(toImmutableList());
-        openSinkFactories.addAll(allSinkFactories);
-        noMoreSinkFactories();
+        int bufferCount = computeBufferCount(partitioning, defaultConcurrency, partitionChannels);
 
-        ImmutableList.Builder<LocalExchangeSource> sources = ImmutableList.builder();
-        for (int i = 0; i < bufferCount; i++) {
-            sources.add(new LocalExchangeSource(source -> checkAllSourcesFinished()));
-        }
-        this.sources = sources.build();
-
-        List<Consumer<PageReference>> buffers = this.sources.stream()
-                .map(buffer -> (Consumer<PageReference>) buffer::addPage)
-                .collect(toImmutableList());
-
-        this.memoryManager = new LocalExchangeMemoryManager(maxBufferedBytes.toBytes());
-        if (partitioning.equals(SINGLE_DISTRIBUTION)) {
-            exchangerSupplier = () -> new BroadcastExchanger(buffers, memoryManager);
-        }
-        else if (partitioning.equals(FIXED_BROADCAST_DISTRIBUTION)) {
-            exchangerSupplier = () -> new BroadcastExchanger(buffers, memoryManager);
-        }
-        else if (partitioning.equals(FIXED_ARBITRARY_DISTRIBUTION)) {
-            exchangerSupplier = () -> new RandomExchanger(buffers, memoryManager);
+        if (partitioning.equals(SINGLE_DISTRIBUTION) || partitioning.equals(FIXED_ARBITRARY_DISTRIBUTION)) {
+            LocalExchangeMemoryManager memoryManager = new LocalExchangeMemoryManager(maxBufferedBytes.toBytes());
+            sources = IntStream.range(0, bufferCount)
+                    .mapToObj(i -> new LocalExchangeSource(memoryManager, source -> checkAllSourcesFinished()))
+                    .collect(toImmutableList());
+            exchangerSupplier = () -> new RandomExchanger(asPageConsumers(sources), memoryManager);
         }
         else if (partitioning.equals(FIXED_PASSTHROUGH_DISTRIBUTION)) {
-            Iterator<LocalExchangeSource> sourceIterator = this.sources.iterator();
+            List<LocalExchangeMemoryManager> memoryManagers = IntStream.range(0, bufferCount)
+                    .mapToObj(i -> new LocalExchangeMemoryManager(maxBufferedBytes.toBytes() / bufferCount))
+                    .collect(toImmutableList());
+            sources = memoryManagers.stream()
+                    .map(memoryManager -> new LocalExchangeSource(memoryManager, source -> checkAllSourcesFinished()))
+                    .collect(toImmutableList());
+            AtomicInteger nextSource = new AtomicInteger();
             exchangerSupplier = () -> {
-                checkState(sourceIterator.hasNext(), "no more sources");
-                return new PassthroughExchanger(sourceIterator.next(), maxBufferedBytes.toBytes() / bufferCount, memoryManager::updateMemoryUsage);
+                int currentSource = nextSource.getAndIncrement();
+                checkState(currentSource < sources.size(), "no more sources");
+                return new PassthroughExchanger(sources.get(currentSource), memoryManagers.get(currentSource));
             };
         }
-        else if (partitioning.equals(FIXED_HASH_DISTRIBUTION) || partitioning.getConnectorId().isPresent()) {
+        else if (partitioning.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION)) {
+            LocalExchangeMemoryManager memoryManager = new LocalExchangeMemoryManager(maxBufferedBytes.toBytes());
+            sources = IntStream.range(0, bufferCount)
+                    .mapToObj(i -> new LocalExchangeSource(memoryManager, source -> checkAllSourcesFinished()))
+                    .collect(toImmutableList());
+            AtomicLong dataProcessed = new AtomicLong(0);
+            exchangerSupplier = () -> new ScaleWriterExchanger(
+                    asPageConsumers(sources),
+                    memoryManager,
+                    maxBufferedBytes.toBytes(),
+                    dataProcessed,
+                    writerScalingMinDataProcessed,
+                    totalMemoryUsed,
+                    getQueryMaxMemoryPerNode(session).toBytes());
+        }
+        else if (isScaledWriterHashDistribution(partitioning)) {
+            int partitionCount = bufferCount * SCALE_WRITERS_MAX_PARTITIONS_PER_WRITER;
+            SkewedPartitionRebalancer skewedPartitionRebalancer = new SkewedPartitionRebalancer(
+                    partitionCount,
+                    bufferCount,
+                    1,
+                    writerScalingMinDataProcessed.toBytes(),
+                    getSkewedPartitionMinDataProcessedRebalanceThreshold(session).toBytes());
+            LocalExchangeMemoryManager memoryManager = new LocalExchangeMemoryManager(maxBufferedBytes.toBytes());
+            sources = IntStream.range(0, bufferCount)
+                    .mapToObj(i -> new LocalExchangeSource(memoryManager, source -> checkAllSourcesFinished()))
+                    .collect(toImmutableList());
+
             exchangerSupplier = () -> {
                 PartitionFunction partitionFunction = createPartitionFunction(
                         nodePartitioningManager,
                         session,
-                        blockTypeOperators,
+                        typeOperators,
+                        partitioning,
+                        partitionCount,
+                        partitionChannels,
+                        partitionChannelTypes,
+                        partitionHashChannel);
+                return new ScaleWriterPartitioningExchanger(
+                        asPageConsumers(sources),
+                        memoryManager,
+                        maxBufferedBytes.toBytes(),
+                        createPartitionPagePreparer(partitioning, partitionChannels),
+                        partitionFunction,
+                        partitionCount,
+                        skewedPartitionRebalancer,
+                        totalMemoryUsed,
+                        getQueryMaxMemoryPerNode(session).toBytes());
+            };
+        }
+        else if (partitioning.equals(FIXED_HASH_DISTRIBUTION) || partitioning.getCatalogHandle().isPresent() ||
+                (partitioning.getConnectorHandle() instanceof MergePartitioningHandle)) {
+            LocalExchangeMemoryManager memoryManager = new LocalExchangeMemoryManager(maxBufferedBytes.toBytes());
+            sources = IntStream.range(0, bufferCount)
+                    .mapToObj(i -> new LocalExchangeSource(memoryManager, source -> checkAllSourcesFinished()))
+                    .collect(toImmutableList());
+            exchangerSupplier = () -> {
+                PartitionFunction partitionFunction = createPartitionFunction(
+                        nodePartitioningManager,
+                        session,
+                        typeOperators,
                         partitioning,
                         bufferCount,
                         partitionChannels,
                         partitionChannelTypes,
                         partitionHashChannel);
-                Function<Page, Page> partitionPagePreparer;
-                if (isSystemPartitioning(partitioning)) {
-                    partitionPagePreparer = identity();
-                }
-                else {
-                    int[] partitionChannelsArray = Ints.toArray(partitionChannels);
-                    partitionPagePreparer = page -> page.getColumns(partitionChannelsArray);
-                }
                 return new PartitioningExchanger(
-                        buffers,
+                        asPageConsumers(sources),
                         memoryManager,
-                        partitionPagePreparer,
+                        createPartitionPagePreparer(partitioning, partitionChannels),
                         partitionFunction);
             };
         }
@@ -172,22 +206,12 @@ public class LocalExchange
         return sources.size();
     }
 
-    public long getBufferedBytes()
-    {
-        return memoryManager.getBufferedBytes();
-    }
-
     public synchronized LocalExchangeSinkFactory createSinkFactory()
     {
         checkState(!noMoreSinkFactories, "No more sink factories already set");
         LocalExchangeSinkFactory newFactory = new LocalExchangeSinkFactory(this);
         openSinkFactories.add(newFactory);
         return newFactory;
-    }
-
-    public synchronized LocalExchangeSinkFactory getSinkFactory(LocalExchangeSinkFactoryId id)
-    {
-        return allSinkFactories.get(id.id);
     }
 
     public synchronized LocalExchangeSource getNextSource()
@@ -198,16 +222,23 @@ public class LocalExchange
         return result;
     }
 
-    @VisibleForTesting
-    LocalExchangeSource getSource(int partitionIndex)
+    private static Function<Page, Page> createPartitionPagePreparer(PartitioningHandle partitioning, List<Integer> partitionChannels)
     {
-        return sources.get(partitionIndex);
+        Function<Page, Page> partitionPagePreparer;
+        if (partitioning.getConnectorHandle() instanceof SystemPartitioningHandle) {
+            partitionPagePreparer = identity();
+        }
+        else {
+            int[] partitionChannelsArray = Ints.toArray(partitionChannels);
+            partitionPagePreparer = page -> page.getColumns(partitionChannelsArray);
+        }
+        return partitionPagePreparer;
     }
 
     private static PartitionFunction createPartitionFunction(
             NodePartitioningManager nodePartitioningManager,
             Session session,
-            BlockTypeOperators blockTypeOperators,
+            TypeOperators typeOperators,
             PartitioningHandle partitioning,
             int partitionCount,
             List<Integer> partitionChannels,
@@ -222,7 +253,7 @@ public class LocalExchange
                 hashGenerator = new PrecomputedHashGenerator(partitionHashChannel.get());
             }
             else {
-                hashGenerator = new InterpretedHashGenerator(partitionChannelTypes, Ints.toArray(partitionChannels), blockTypeOperators);
+                hashGenerator = createChannelsHashGenerator(partitionChannelTypes, Ints.toArray(partitionChannels), typeOperators);
             }
             return new LocalPartitionGenerator(hashGenerator, partitionCount);
         }
@@ -231,18 +262,34 @@ public class LocalExchange
         // The same bucket function (with the same bucket count) as for node
         // partitioning must be used. This way rows within a single bucket
         // will be being processed by single thread.
-        ConnectorBucketNodeMap connectorBucketNodeMap = nodePartitioningManager.getConnectorBucketNodeMap(session, partitioning);
-        int bucketCount = connectorBucketNodeMap.getBucketCount();
+        int bucketCount = getBucketCount(session, nodePartitioningManager, partitioning);
         int[] bucketToPartition = new int[bucketCount];
+
         for (int bucket = 0; bucket < bucketCount; bucket++) {
             // mix the bucket bits so we don't use the same bucket number used to distribute between stages
             int hashedBucket = (int) XxHash64.hash(Long.reverse(bucket));
             bucketToPartition[bucket] = hashedBucket & (partitionCount - 1);
         }
 
+        if (partitioning.getConnectorHandle() instanceof MergePartitioningHandle handle) {
+            return handle.getPartitionFunction(
+                    (scheme, types) -> nodePartitioningManager.getPartitionFunction(session, scheme, types, bucketToPartition),
+                    partitionChannelTypes,
+                    bucketToPartition);
+        }
+
         return new BucketPartitionFunction(
                 nodePartitioningManager.getBucketFunction(session, partitioning, partitionChannelTypes, bucketCount),
                 bucketToPartition);
+    }
+
+    public static int getBucketCount(Session session, NodePartitioningManager nodePartitioningManager, PartitioningHandle partitioning)
+    {
+        if (partitioning.getConnectorHandle() instanceof MergePartitioningHandle) {
+            // TODO: can we always use this code path?
+            return nodePartitioningManager.getNodePartitioningMap(session, partitioning, 1000).getBucketToPartition().length;
+        }
+        return nodePartitioningManager.getBucketCount(session, partitioning);
     }
 
     private static boolean isSystemPartitioning(PartitioningHandle partitioning)
@@ -336,118 +383,15 @@ public class LocalExchange
         sources.forEach(LocalExchangeSource::finish);
     }
 
+    @VisibleForTesting
+    LocalExchangeSource getSource(int partitionIndex)
+    {
+        return sources.get(partitionIndex);
+    }
+
     private static void checkNotHoldsLock(Object lock)
     {
         checkState(!Thread.holdsLock(lock), "Cannot execute this method while holding a lock");
-    }
-
-    @ThreadSafe
-    public static class LocalExchangeFactory
-    {
-        private final NodePartitioningManager nodePartitioningManager;
-        private final Session session;
-        private final PartitioningHandle partitioning;
-        private final List<Integer> partitionChannels;
-        private final List<Type> partitionChannelTypes;
-        private final Optional<Integer> partitionHashChannel;
-        private final PipelineExecutionStrategy exchangeSourcePipelineExecutionStrategy;
-        private final DataSize maxBufferedBytes;
-        private final BlockTypeOperators blockTypeOperators;
-        private final int bufferCount;
-
-        @GuardedBy("this")
-        private boolean noMoreSinkFactories;
-        // The number of total sink factories are tracked at planning time
-        // so that the exact number of sink factory is known by the time execution starts.
-        @GuardedBy("this")
-        private int numSinkFactories;
-
-        @GuardedBy("this")
-        private final Map<Lifespan, LocalExchange> localExchangeMap = new HashMap<>();
-        @GuardedBy("this")
-        private final List<LocalExchangeSinkFactoryId> closedSinkFactories = new ArrayList<>();
-
-        public LocalExchangeFactory(
-                NodePartitioningManager nodePartitioningManager,
-                Session session,
-                PartitioningHandle partitioning,
-                int defaultConcurrency,
-                List<Type> types,
-                List<Integer> partitionChannels,
-                Optional<Integer> partitionHashChannel,
-                PipelineExecutionStrategy exchangeSourcePipelineExecutionStrategy,
-                DataSize maxBufferedBytes,
-                BlockTypeOperators blockTypeOperators)
-        {
-            this.nodePartitioningManager = requireNonNull(nodePartitioningManager, "nodePartitioningManager is null");
-            this.session = requireNonNull(session, "session is null");
-            this.partitioning = requireNonNull(partitioning, "partitioning is null");
-            this.partitionChannels = requireNonNull(partitionChannels, "partitionChannels is null");
-            requireNonNull(types, "types is null");
-            this.partitionChannelTypes = partitionChannels.stream()
-                    .map(types::get)
-                    .collect(toImmutableList());
-            this.partitionHashChannel = requireNonNull(partitionHashChannel, "partitionHashChannel is null");
-            this.exchangeSourcePipelineExecutionStrategy = requireNonNull(exchangeSourcePipelineExecutionStrategy, "exchangeSourcePipelineExecutionStrategy is null");
-            this.maxBufferedBytes = requireNonNull(maxBufferedBytes, "maxBufferedBytes is null");
-            this.blockTypeOperators = requireNonNull(blockTypeOperators, "blockTypeOperators is null");
-
-            this.bufferCount = computeBufferCount(partitioning, defaultConcurrency, partitionChannels);
-        }
-
-        public synchronized LocalExchangeSinkFactoryId newSinkFactoryId()
-        {
-            checkState(!noMoreSinkFactories);
-            LocalExchangeSinkFactoryId result = new LocalExchangeSinkFactoryId(numSinkFactories);
-            numSinkFactories++;
-            return result;
-        }
-
-        public synchronized void noMoreSinkFactories()
-        {
-            noMoreSinkFactories = true;
-        }
-
-        public int getBufferCount()
-        {
-            return bufferCount;
-        }
-
-        public synchronized LocalExchange getLocalExchange(Lifespan lifespan)
-        {
-            if (exchangeSourcePipelineExecutionStrategy == UNGROUPED_EXECUTION) {
-                checkArgument(lifespan.isTaskWide(), "LocalExchangeFactory is declared as UNGROUPED_EXECUTION. Driver-group exchange cannot be created.");
-            }
-            else {
-                checkArgument(!lifespan.isTaskWide(), "LocalExchangeFactory is declared as GROUPED_EXECUTION. Task-wide exchange cannot be created.");
-            }
-            return localExchangeMap.computeIfAbsent(lifespan, ignored -> {
-                checkState(noMoreSinkFactories);
-                LocalExchange localExchange = new LocalExchange(
-                        nodePartitioningManager,
-                        session,
-                        numSinkFactories,
-                        bufferCount,
-                        partitioning,
-                        partitionChannels,
-                        partitionChannelTypes,
-                        partitionHashChannel,
-                        maxBufferedBytes,
-                        blockTypeOperators);
-                for (LocalExchangeSinkFactoryId closedSinkFactoryId : closedSinkFactories) {
-                    localExchange.getSinkFactory(closedSinkFactoryId).close();
-                }
-                return localExchange;
-            });
-        }
-
-        public synchronized void closeSinks(LocalExchangeSinkFactoryId sinkFactoryId)
-        {
-            closedSinkFactories.add(sinkFactoryId);
-            for (LocalExchange localExchange : localExchangeMap.values()) {
-                localExchange.getSinkFactory(sinkFactoryId).close();
-            }
-        }
     }
 
     private static int computeBufferCount(PartitioningHandle partitioning, int defaultConcurrency, List<Integer> partitionChannels)
@@ -469,7 +413,19 @@ public class LocalExchange
             bufferCount = defaultConcurrency;
             checkArgument(partitionChannels.isEmpty(), "Passthrough exchange must not have partition channels");
         }
-        else if (partitioning.equals(FIXED_HASH_DISTRIBUTION) || partitioning.getConnectorId().isPresent()) {
+        else if (partitioning.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION)) {
+            // Even when scale writers is enabled, the buffer count or the number of drivers will remain constant.
+            // However, only some of them are actively doing the work.
+            bufferCount = defaultConcurrency;
+            checkArgument(partitionChannels.isEmpty(), "Scaled writer exchange must not have partition channels");
+        }
+        else if (isScaledWriterHashDistribution(partitioning)) {
+            // Even when scale writers is enabled, the buffer count or the number of drivers will remain constant.
+            // However, only some of them might be actively doing the work.
+            bufferCount = defaultConcurrency;
+        }
+        else if (partitioning.equals(FIXED_HASH_DISTRIBUTION) || partitioning.getCatalogHandle().isPresent() ||
+                (partitioning.getConnectorHandle() instanceof MergePartitioningHandle)) {
             // partitioned exchange
             bufferCount = defaultConcurrency;
         }
@@ -479,14 +435,11 @@ public class LocalExchange
         return bufferCount;
     }
 
-    public static class LocalExchangeSinkFactoryId
+    private static List<Consumer<Page>> asPageConsumers(List<LocalExchangeSource> sources)
     {
-        private final int id;
-
-        public LocalExchangeSinkFactoryId(int id)
-        {
-            this.id = id;
-        }
+        return sources.stream()
+                .map(buffer -> (Consumer<Page>) buffer::addPage)
+                .collect(toImmutableList());
     }
 
     // Sink factory is entirely a pass thought to LocalExchange.

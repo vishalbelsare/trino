@@ -17,13 +17,13 @@ import io.airlift.stats.GcMonitor;
 import io.airlift.stats.TestingGcMonitor;
 import io.airlift.units.DataSize;
 import io.trino.Session;
+import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskStateMachine;
 import io.trino.memory.MemoryPool;
 import io.trino.memory.QueryContext;
 import io.trino.operator.TaskContext;
 import io.trino.spi.QueryId;
-import io.trino.spi.memory.MemoryPoolId;
 import io.trino.spiller.SpillSpaceTracker;
 
 import java.util.concurrent.Executor;
@@ -39,28 +39,28 @@ public final class TestingTaskContext
 
     private TestingTaskContext() {}
 
-    public static TaskContext createTaskContext(Executor notificationExecutor, ScheduledExecutorService yieldExecutor, Session session)
+    public static TaskContext createTaskContext(Executor notificationExecutor, ScheduledExecutorService scheduledExecutor, Session session)
     {
-        return builder(notificationExecutor, yieldExecutor, session).build();
+        return builder(notificationExecutor, scheduledExecutor, session).build();
     }
 
-    public static TaskContext createTaskContext(Executor notificationExecutor, ScheduledExecutorService yieldExecutor, Session session, DataSize maxMemory)
+    public static TaskContext createTaskContext(Executor notificationExecutor, ScheduledExecutorService scheduledExecutor, Session session, DataSize maxMemory)
     {
-        return builder(notificationExecutor, yieldExecutor, session)
+        return builder(notificationExecutor, scheduledExecutor, session)
                 .setQueryMaxMemory(maxMemory)
                 .build();
     }
 
-    public static TaskContext createTaskContext(Executor notificationExecutor, ScheduledExecutorService yieldExecutor, Session session, TaskStateMachine taskStateMachine)
+    public static TaskContext createTaskContext(Executor notificationExecutor, ScheduledExecutorService scheduledExecutor, Session session, TaskStateMachine taskStateMachine)
     {
-        return builder(notificationExecutor, yieldExecutor, session)
+        return builder(notificationExecutor, scheduledExecutor, session)
                 .setTaskStateMachine(taskStateMachine)
                 .build();
     }
 
     public static TaskContext createTaskContext(QueryContext queryContext, Executor executor, Session session)
     {
-        return createTaskContext(queryContext, session, new TaskStateMachine(new TaskId("query", 0, 0), executor));
+        return createTaskContext(queryContext, session, new TaskStateMachine(new TaskId(new StageId(queryContext.getQueryId(), 0), 0, 0), executor));
     }
 
     private static TaskContext createTaskContext(QueryContext queryContext, Session session, TaskStateMachine taskStateMachine)
@@ -73,30 +73,28 @@ public final class TestingTaskContext
                 true);
     }
 
-    public static Builder builder(Executor notificationExecutor, ScheduledExecutorService yieldExecutor, Session session)
+    public static Builder builder(Executor notificationExecutor, ScheduledExecutorService scheduledExecutor, Session session)
     {
-        return new Builder(notificationExecutor, yieldExecutor, session);
+        return new Builder(notificationExecutor, scheduledExecutor, session);
     }
 
     public static class Builder
     {
         private final Executor notificationExecutor;
-        private final ScheduledExecutorService yieldExecutor;
+        private final ScheduledExecutorService scheduledExecutor;
         private final Session session;
         private QueryId queryId = new QueryId("test_query");
         private TaskStateMachine taskStateMachine;
         private DataSize queryMaxMemory = DataSize.of(256, MEGABYTE);
-        private final DataSize queryMaxTotalMemory = DataSize.of(512, MEGABYTE);
         private DataSize memoryPoolSize = DataSize.of(1, GIGABYTE);
         private DataSize maxSpillSize = DataSize.of(1, GIGABYTE);
         private DataSize queryMaxSpillSize = DataSize.of(1, GIGABYTE);
 
-        private Builder(Executor notificationExecutor, ScheduledExecutorService yieldExecutor, Session session)
+        private Builder(Executor notificationExecutor, ScheduledExecutorService scheduledExecutor, Session session)
         {
             this.notificationExecutor = notificationExecutor;
-            this.yieldExecutor = yieldExecutor;
+            this.scheduledExecutor = scheduledExecutor;
             this.session = session;
-            this.taskStateMachine = new TaskStateMachine(new TaskId("query", 0, 0), notificationExecutor);
         }
 
         public Builder setTaskStateMachine(TaskStateMachine taskStateMachine)
@@ -137,16 +135,21 @@ public final class TestingTaskContext
 
         public TaskContext build()
         {
-            MemoryPool memoryPool = new MemoryPool(new MemoryPoolId("test"), memoryPoolSize);
+            if (taskStateMachine == null) {
+                taskStateMachine = new TaskStateMachine(new TaskId(new StageId(queryId, 0), 0, 0), notificationExecutor);
+            }
+
+            MemoryPool memoryPool = new MemoryPool(memoryPoolSize);
             SpillSpaceTracker spillSpaceTracker = new SpillSpaceTracker(maxSpillSize);
             QueryContext queryContext = new QueryContext(
                     queryId,
                     queryMaxMemory,
-                    queryMaxTotalMemory,
                     memoryPool,
+                    0L,
                     GC_MONITOR,
                     notificationExecutor,
-                    yieldExecutor,
+                    scheduledExecutor,
+                    scheduledExecutor,
                     queryMaxSpillSize,
                     spillSpaceTracker);
 

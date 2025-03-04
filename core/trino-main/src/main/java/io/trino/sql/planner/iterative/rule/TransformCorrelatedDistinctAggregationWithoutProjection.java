@@ -19,7 +19,7 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.PlanNodeDecorrelator;
@@ -27,6 +27,7 @@ import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
 import io.trino.sql.planner.plan.JoinNode;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.Patterns;
 import io.trino.sql.planner.plan.PlanNode;
 
@@ -35,15 +36,15 @@ import java.util.Optional;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.matching.Pattern.nonEmpty;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.planner.iterative.rule.Util.restrictOutputs;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
-import static io.trino.sql.planner.plan.CorrelatedJoinNode.Type.LEFT;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.filter;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.subquery;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.type;
 import static io.trino.sql.planner.plan.Patterns.aggregation;
 import static io.trino.sql.planner.plan.Patterns.correlatedJoin;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -51,21 +52,21 @@ import static java.util.Objects.requireNonNull;
  * It is similar to TransformCorrelatedDistinctAggregationWithProjection rule, but does not support projection over aggregation in the subquery
  * <p>
  * Transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin LEFT (correlation: [c], filter: true, output: a, b)
  *      - Input (a, c)
  *      - Aggregation "distinct operator" group by [b]
  *           - Source (b) with correlated filter (b > c)
- * </pre>
+ * }</pre>
  * Into:
- * <pre>
+ * <pre>{@code
  * - Project (a <- a, b <- b)
  *      - Aggregation "distinct operator" group by [a, c, unique, b]
  *           - LEFT join (filter: b > c)
  *                - UniqueId (unique)
  *                     - Input (a, c)
  *                - Source (b) decorrelated
- * </pre>
+ * }</pre>
  */
 public class TransformCorrelatedDistinctAggregationWithoutProjection
         implements Rule<CorrelatedJoinNode>
@@ -75,16 +76,16 @@ public class TransformCorrelatedDistinctAggregationWithoutProjection
     private static final Pattern<CorrelatedJoinNode> PATTERN = correlatedJoin()
             .with(type().equalTo(LEFT))
             .with(nonEmpty(Patterns.CorrelatedJoin.correlation()))
-            .with(filter().equalTo(TRUE_LITERAL))
+            .with(filter().equalTo(TRUE))
             .with(subquery().matching(aggregation()
                     .matching(AggregationDecorrelation::isDistinctOperator)
                     .capturedAs(AGGREGATION)));
 
-    private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
-    public TransformCorrelatedDistinctAggregationWithoutProjection(Metadata metadata)
+    public TransformCorrelatedDistinctAggregationWithoutProjection(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     @Override
@@ -97,7 +98,7 @@ public class TransformCorrelatedDistinctAggregationWithoutProjection
     public Result apply(CorrelatedJoinNode correlatedJoinNode, Captures captures, Context context)
     {
         // decorrelate nested plan
-        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(metadata, context.getSymbolAllocator(), context.getLookup());
+        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(plannerContext, context.getSymbolAllocator(), context.getLookup());
         Optional<PlanNodeDecorrelator.DecorrelatedNode> decorrelatedSource = decorrelator.decorrelateFilters(captures.get(AGGREGATION).getSource(), correlatedJoinNode.getCorrelation());
         if (decorrelatedSource.isEmpty()) {
             return Result.empty();
@@ -113,7 +114,7 @@ public class TransformCorrelatedDistinctAggregationWithoutProjection
 
         JoinNode join = new JoinNode(
                 context.getIdAllocator().getNextId(),
-                JoinNode.Type.LEFT,
+                JoinType.LEFT,
                 inputWithUniqueId,
                 source,
                 ImmutableList.of(),
@@ -130,18 +131,19 @@ public class TransformCorrelatedDistinctAggregationWithoutProjection
 
         // restore aggregation
         AggregationNode aggregation = captures.get(AGGREGATION);
-        aggregation = new AggregationNode(
-                aggregation.getId(),
-                join,
-                aggregation.getAggregations(),
-                singleGroupingSet(ImmutableList.<Symbol>builder()
-                        .addAll(join.getLeftOutputSymbols())
-                        .addAll(aggregation.getGroupingKeys())
-                        .build()),
-                ImmutableList.of(),
-                aggregation.getStep(),
-                Optional.empty(),
-                Optional.empty());
+        aggregation = AggregationNode.builderFrom(aggregation)
+                .setSource(join)
+                .setGroupingSets(
+                        singleGroupingSet(ImmutableList.<Symbol>builder()
+                                .addAll(join.getLeftOutputSymbols())
+                                .addAll(aggregation.getGroupingKeys())
+                                .build()))
+                .setPreGroupedSymbols(
+                        ImmutableList.of())
+                .setHashSymbol(
+                        Optional.empty())
+                .setGroupIdSymbol(Optional.empty())
+                .build();
 
         // restrict outputs
         Optional<PlanNode> project = restrictOutputs(context.getIdAllocator(), aggregation, ImmutableSet.copyOf(correlatedJoinNode.getOutputSymbols()));

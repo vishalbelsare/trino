@@ -14,7 +14,6 @@
 package io.trino.sql.tree;
 
 import com.google.common.collect.ImmutableList;
-import org.checkerframework.checker.units.qual.C;
 
 import java.util.List;
 import java.util.Objects;
@@ -32,26 +31,7 @@ public class TableExecute
     private final Optional<Expression> where;
 
     public TableExecute(
-            Table table,
-            Identifier procedureName,
-            List<CallArgument> properties,
-            Optional<Expression> where)
-    {
-        this(Optional.empty(), table, procedureName, properties, where);
-    }
-
-    public TableExecute(
             NodeLocation location,
-            Table table,
-            Identifier procedureName,
-            List<CallArgument> arguments,
-            Optional<Expression> where)
-    {
-        this(Optional.of(location), table, procedureName, arguments, where);
-    }
-
-    private TableExecute(
-            Optional<NodeLocation> location,
             Table table,
             Identifier procedureName,
             List<CallArgument> arguments,
@@ -126,7 +106,7 @@ public class TableExecute
     {
         return toStringHelper(this)
                 .add("table", table)
-                .add("procedureNaem", procedureName)
+                .add("procedureName", procedureName)
                 .add("arguments", arguments)
                 .add("where", where)
                 .toString();

@@ -16,11 +16,17 @@ package io.trino.util;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import io.trino.metadata.Metadata;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.RowValueBuilder;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.SqlDecimal;
@@ -31,14 +37,13 @@ import io.trino.spi.type.TypeSignatureParameter;
 import java.math.BigDecimal;
 import java.util.Map;
 
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.type.RealType.REAL;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.lang.Float.floatToRawIntBits;
 
 public final class StructuralTestUtil
 {
-    private static final Metadata METADATA = createTestMetadataManager();
-
     private StructuralTestUtil() {}
 
     public static Block arrayBlockOf(Type elementType, Object... values)
@@ -50,24 +55,33 @@ public final class StructuralTestUtil
         return blockBuilder.build();
     }
 
-    public static Block mapBlockOf(Type keyType, Type valueType, Map<?, ?> value)
+    public static SqlMap sqlMapOf(Type keyType, Type valueType, Map<?, ?> map)
     {
-        MapType mapType = mapType(keyType, valueType);
-        BlockBuilder mapArrayBuilder = mapType.createBlockBuilder(null, 1);
-        BlockBuilder singleMapWriter = mapArrayBuilder.beginBlockEntry();
-        for (Map.Entry<?, ?> entry : value.entrySet()) {
-            appendToBlockBuilder(keyType, entry.getKey(), singleMapWriter);
-            appendToBlockBuilder(valueType, entry.getValue(), singleMapWriter);
-        }
-        mapArrayBuilder.closeEntry();
-        return mapType.getObject(mapArrayBuilder, 0);
+        return buildMapValue(
+                mapType(keyType, valueType),
+                map.size(),
+                (keyBuilder, valueBuilder) -> {
+                    map.forEach((key, value) -> {
+                        appendToBlockBuilder(keyType, key, keyBuilder);
+                        appendToBlockBuilder(valueType, value, valueBuilder);
+                    });
+                });
     }
 
     public static MapType mapType(Type keyType, Type valueType)
     {
-        return (MapType) METADATA.getParameterizedType(StandardTypes.MAP, ImmutableList.of(
+        return (MapType) TESTING_TYPE_MANAGER.getParameterizedType(StandardTypes.MAP, ImmutableList.of(
                 TypeSignatureParameter.typeParameter(keyType.getTypeSignature()),
                 TypeSignatureParameter.typeParameter(valueType.getTypeSignature())));
+    }
+
+    public static SqlRow sqlRowOf(RowType rowType, Object... values)
+    {
+        return RowValueBuilder.buildRowValue(rowType, fieldBuilders -> {
+            for (int i = 0; i < values.length; i++) {
+                appendToBlockBuilder(rowType.getTypeParameters().get(i), values[i], fieldBuilders.get(i));
+            }
+        });
     }
 
     public static void appendToBlockBuilder(Type type, Object element, BlockBuilder blockBuilder)
@@ -77,28 +91,28 @@ public final class StructuralTestUtil
             blockBuilder.appendNull();
         }
         else if (type instanceof ArrayType && element instanceof Iterable<?>) {
-            BlockBuilder subBlockBuilder = blockBuilder.beginBlockEntry();
-            for (Object subElement : (Iterable<?>) element) {
-                appendToBlockBuilder(type.getTypeParameters().get(0), subElement, subBlockBuilder);
-            }
-            blockBuilder.closeEntry();
+            ((ArrayBlockBuilder) blockBuilder).buildEntry(elementBuilder -> {
+                for (Object subElement : (Iterable<?>) element) {
+                    appendToBlockBuilder(type.getTypeParameters().get(0), subElement, elementBuilder);
+                }
+            });
         }
         else if (type instanceof RowType && element instanceof Iterable<?>) {
-            BlockBuilder subBlockBuilder = blockBuilder.beginBlockEntry();
-            int field = 0;
-            for (Object subElement : (Iterable<?>) element) {
-                appendToBlockBuilder(type.getTypeParameters().get(field), subElement, subBlockBuilder);
-                field++;
-            }
-            blockBuilder.closeEntry();
+            ((RowBlockBuilder) blockBuilder).buildEntry(fieldBuilders -> {
+                int field = 0;
+                for (Object subElement : (Iterable<?>) element) {
+                    appendToBlockBuilder(type.getTypeParameters().get(field), subElement, fieldBuilders.get(field));
+                    field++;
+                }
+            });
         }
-        else if (type instanceof MapType && element instanceof Map<?, ?>) {
-            BlockBuilder subBlockBuilder = blockBuilder.beginBlockEntry();
-            for (Map.Entry<?, ?> entry : ((Map<?, ?>) element).entrySet()) {
-                appendToBlockBuilder(type.getTypeParameters().get(0), entry.getKey(), subBlockBuilder);
-                appendToBlockBuilder(type.getTypeParameters().get(1), entry.getValue(), subBlockBuilder);
-            }
-            blockBuilder.closeEntry();
+        else if (type instanceof MapType mapType && element instanceof Map<?, ?>) {
+            ((MapBlockBuilder) blockBuilder).buildEntry((keyBuilder, valueBuilder) -> {
+                for (Map.Entry<?, ?> entry : ((Map<?, ?>) element).entrySet()) {
+                    appendToBlockBuilder(mapType.getKeyType(), entry.getKey(), keyBuilder);
+                    appendToBlockBuilder(mapType.getValueType(), entry.getValue(), valueBuilder);
+                }
+            });
         }
         else if (javaType == boolean.class) {
             type.writeBoolean(blockBuilder, (Boolean) element);
@@ -124,18 +138,20 @@ public final class StructuralTestUtil
             else if (element instanceof byte[]) {
                 type.writeSlice(blockBuilder, Slices.wrappedBuffer((byte[]) element));
             }
-            else if (element instanceof SqlDecimal) {
-                type.writeSlice(blockBuilder, Decimals.encodeUnscaledValue(((SqlDecimal) element).getUnscaledValue()));
-            }
-            else if (element instanceof BigDecimal) {
-                type.writeSlice(blockBuilder, Decimals.encodeScaledValue((BigDecimal) element));
-            }
             else {
                 type.writeSlice(blockBuilder, (Slice) element);
             }
         }
         else {
-            type.writeObject(blockBuilder, element);
+            if (element instanceof SqlDecimal) {
+                type.writeObject(blockBuilder, Int128.valueOf(((SqlDecimal) element).getUnscaledValue()));
+            }
+            else if (element instanceof BigDecimal) {
+                type.writeObject(blockBuilder, Decimals.valueOf((BigDecimal) element));
+            }
+            else {
+                type.writeObject(blockBuilder, element);
+            }
         }
     }
 }

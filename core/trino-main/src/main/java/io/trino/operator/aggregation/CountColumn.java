@@ -13,99 +13,103 @@
  */
 package io.trino.operator.aggregation;
 
-import com.google.common.collect.ImmutableList;
-import io.trino.metadata.AggregationFunctionMetadata;
-import io.trino.metadata.BoundSignature;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
-import io.trino.metadata.SqlAggregationFunction;
-import io.trino.operator.aggregation.AggregationMetadata.AccumulatorStateDescriptor;
+import io.trino.annotation.UsedByGeneratedCode;
 import io.trino.operator.aggregation.state.LongState;
-import io.trino.operator.aggregation.state.StateCompiler;
-import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.function.AccumulatorStateFactory;
-import io.trino.spi.function.AccumulatorStateSerializer;
-import io.trino.spi.type.TypeSignature;
+import io.trino.spi.block.ValueBlock;
+import io.trino.spi.function.AggregationFunction;
+import io.trino.spi.function.AggregationState;
+import io.trino.spi.function.BlockIndex;
+import io.trino.spi.function.BlockPosition;
+import io.trino.spi.function.CombineFunction;
+import io.trino.spi.function.Description;
+import io.trino.spi.function.InputFunction;
+import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlType;
+import io.trino.spi.function.TypeParameter;
+import io.trino.spi.function.WindowAccumulator;
+import io.trino.spi.function.WindowIndex;
 
-import java.lang.invoke.MethodHandle;
-import java.util.Optional;
-
-import static io.trino.metadata.FunctionKind.AGGREGATE;
-import static io.trino.metadata.Signature.typeVariable;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.BLOCK_INDEX;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.BLOCK_INPUT_CHANNEL;
-import static io.trino.operator.aggregation.AggregationMetadata.AggregationParameterKind.STATE;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.util.Reflection.methodHandle;
 
-public class CountColumn
-        extends SqlAggregationFunction
+@AggregationFunction(value = "count", windowAccumulator = CountColumn.CountColumnWindowAccumulator.class)
+@Description("Counts the non-null values")
+public final class CountColumn
 {
-    public static final CountColumn COUNT_COLUMN = new CountColumn();
-    private static final String NAME = "count";
-    private static final MethodHandle INPUT_FUNCTION = methodHandle(CountColumn.class, "input", LongState.class, Block.class, int.class);
-    private static final MethodHandle REMOVE_INPUT_FUNCTION = methodHandle(CountColumn.class, "removeInput", LongState.class, Block.class, int.class);
-    private static final MethodHandle COMBINE_FUNCTION = methodHandle(CountColumn.class, "combine", LongState.class, LongState.class);
-    private static final MethodHandle OUTPUT_FUNCTION = methodHandle(CountColumn.class, "output", LongState.class, BlockBuilder.class);
+    private CountColumn() {}
 
-    public CountColumn()
-    {
-        super(
-                new FunctionMetadata(
-                        new Signature(
-                                NAME,
-                                ImmutableList.of(typeVariable("T")),
-                                ImmutableList.of(),
-                                BIGINT.getTypeSignature(),
-                                ImmutableList.of(new TypeSignature("T")),
-                                false),
-                        new FunctionNullability(true, ImmutableList.of(false)),
-                        false,
-                        true,
-                        "Counts the non-null values",
-                        AGGREGATE),
-                new AggregationFunctionMetadata(
-                        false,
-                        BIGINT.getTypeSignature()));
-    }
-
-    @Override
-    public AggregationMetadata specialize(BoundSignature boundSignature)
-    {
-        AccumulatorStateSerializer<LongState> stateSerializer = StateCompiler.generateStateSerializer(LongState.class);
-        AccumulatorStateFactory<LongState> stateFactory = StateCompiler.generateStateFactory(LongState.class);
-
-        return new AggregationMetadata(
-                ImmutableList.of(STATE, BLOCK_INPUT_CHANNEL, BLOCK_INDEX),
-                INPUT_FUNCTION,
-                Optional.of(REMOVE_INPUT_FUNCTION),
-                COMBINE_FUNCTION,
-                OUTPUT_FUNCTION,
-                ImmutableList.of(new AccumulatorStateDescriptor<>(
-                        LongState.class,
-                        stateSerializer,
-                        stateFactory)));
-    }
-
-    public static void input(LongState state, Block block, int index)
+    @InputFunction
+    @TypeParameter("T")
+    public static void input(
+            @AggregationState LongState state,
+            @BlockPosition @SqlType("T") ValueBlock block,
+            @BlockIndex int position)
     {
         state.setValue(state.getValue() + 1);
     }
 
-    public static void removeInput(LongState state, Block block, int index)
-    {
-        state.setValue(state.getValue() - 1);
-    }
-
-    public static void combine(LongState state, LongState otherState)
+    @CombineFunction
+    public static void combine(@AggregationState LongState state, LongState otherState)
     {
         state.setValue(state.getValue() + otherState.getValue());
     }
 
-    public static void output(LongState state, BlockBuilder out)
+    @OutputFunction("BIGINT")
+    public static void output(@AggregationState LongState state, BlockBuilder out)
     {
         BIGINT.writeLong(out, state.getValue());
+    }
+
+    public static class CountColumnWindowAccumulator
+            implements WindowAccumulator
+    {
+        private long count;
+
+        @UsedByGeneratedCode
+        public CountColumnWindowAccumulator() {}
+
+        private CountColumnWindowAccumulator(long count)
+        {
+            this.count = count;
+        }
+
+        @Override
+        public long getEstimatedSize()
+        {
+            return Long.BYTES;
+        }
+
+        @Override
+        public WindowAccumulator copy()
+        {
+            return new CountColumnWindowAccumulator(count);
+        }
+
+        @Override
+        public void addInput(WindowIndex index, int startPosition, int endPosition)
+        {
+            for (int i = startPosition; i <= endPosition; i++) {
+                if (!index.isNull(0, i)) {
+                    count++;
+                }
+            }
+        }
+
+        @Override
+        public boolean removeInput(WindowIndex index, int startPosition, int endPosition)
+        {
+            for (int i = startPosition; i <= endPosition; i++) {
+                if (!index.isNull(0, i)) {
+                    count--;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public void output(BlockBuilder blockBuilder)
+        {
+            BIGINT.writeLong(blockBuilder, count);
+        }
     }
 }

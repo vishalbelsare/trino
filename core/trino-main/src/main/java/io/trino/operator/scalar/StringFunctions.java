@@ -22,6 +22,7 @@ import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.function.Constraint;
 import io.trino.spi.function.Description;
 import io.trino.spi.function.LiteralParameter;
 import io.trino.spi.function.LiteralParameters;
@@ -30,9 +31,9 @@ import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.ScalarOperator;
 import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
+import io.trino.spi.type.Chars;
 import io.trino.spi.type.StandardTypes;
 import io.trino.type.CodePointsType;
-import io.trino.type.Constraint;
 import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import org.apache.commons.codec.language.Soundex;
 
@@ -200,6 +201,15 @@ public final class StringFunctions
     public static Slice reverse(@SqlType("varchar(x)") Slice slice)
     {
         return SliceUtf8.reverse(slice);
+    }
+
+    @Description("Reverse all code points in a given string")
+    @ScalarFunction(value = "reverse")
+    @LiteralParameters("x")
+    @SqlType("char(x)")
+    public static Slice charReverse(@LiteralParameter("x") long x, @SqlType("char(x)") Slice slice)
+    {
+        return SliceUtf8.reverse(padSpaces(slice, (int) x));
     }
 
     @Description("Returns index of first occurrence of a substring (or 0 if not found)")
@@ -483,7 +493,7 @@ public final class StringFunctions
     @Description("Removes whitespace from the beginning of a string")
     @ScalarFunction("ltrim")
     @LiteralParameters("x")
-    @SqlType("char(x)")
+    @SqlType("varchar(x)")
     public static Slice charLeftTrim(@SqlType("char(x)") Slice slice)
     {
         return SliceUtf8.leftTrim(slice);
@@ -501,7 +511,7 @@ public final class StringFunctions
     @Description("Removes whitespace from the end of a string")
     @ScalarFunction("rtrim")
     @LiteralParameters("x")
-    @SqlType("char(x)")
+    @SqlType("varchar(x)")
     public static Slice charRightTrim(@SqlType("char(x)") Slice slice)
     {
         return rightTrim(slice);
@@ -519,7 +529,7 @@ public final class StringFunctions
     @Description("Removes whitespace from the beginning and end of a string")
     @ScalarFunction("trim")
     @LiteralParameters("x")
-    @SqlType("char(x)")
+    @SqlType("varchar(x)")
     public static Slice charTrim(@SqlType("char(x)") Slice slice)
     {
         return trim(slice);
@@ -537,7 +547,7 @@ public final class StringFunctions
     @Description("Remove the longest string containing only given characters from the beginning of a string")
     @ScalarFunction("ltrim")
     @LiteralParameters("x")
-    @SqlType("char(x)")
+    @SqlType("varchar(x)")
     public static Slice charLeftTrim(@SqlType("char(x)") Slice slice, @SqlType(CodePointsType.NAME) int[] codePointsToTrim)
     {
         return leftTrim(slice, codePointsToTrim);
@@ -555,7 +565,7 @@ public final class StringFunctions
     @Description("Remove the longest string containing only given characters from the end of a string")
     @ScalarFunction("rtrim")
     @LiteralParameters("x")
-    @SqlType("char(x)")
+    @SqlType("varchar(x)")
     public static Slice charRightTrim(@SqlType("char(x)") Slice slice, @SqlType(CodePointsType.NAME) int[] codePointsToTrim)
     {
         return trimTrailingSpaces(rightTrim(slice, codePointsToTrim));
@@ -573,7 +583,7 @@ public final class StringFunctions
     @Description("Remove the longest string containing only given characters from the beginning and end of a string")
     @ScalarFunction("trim")
     @LiteralParameters("x")
-    @SqlType("char(x)")
+    @SqlType("varchar(x)")
     public static Slice charTrim(@SqlType("char(x)") Slice slice, @SqlType(CodePointsType.NAME) int[] codePointsToTrim)
     {
         return trimTrailingSpaces(trim(slice, codePointsToTrim));
@@ -707,6 +717,16 @@ public final class StringFunctions
         // handle the tail: at most we assign padStringLength - 1 code points
         buffer.setBytes(byteIndex, padString.getBytes(0, paddingOffset + countBytes - byteIndex));
         return buffer;
+    }
+
+    @Description("Pads a string on the left")
+    @ScalarFunction("lpad")
+    @LiteralParameters({"x", "y"})
+    @SqlType(StandardTypes.VARCHAR)
+    public static Slice leftPad(@LiteralParameter("x") long x, @SqlType("char(x)") Slice text, @SqlType(StandardTypes.BIGINT) long targetLength, @SqlType("varchar(y)") Slice padString)
+    {
+        text = padSpaces(text, toIntExact(x));
+        return leftPad(text, targetLength, padString);
     }
 
     @Description("Pads a string on the left")
@@ -878,6 +898,15 @@ public final class StringFunctions
     public static Slice toUtf8(@SqlType("varchar(x)") Slice slice)
     {
         return slice;
+    }
+
+    @Description("Encodes the string to UTF-8")
+    @ScalarFunction
+    @LiteralParameters("x")
+    @SqlType(StandardTypes.VARBINARY)
+    public static Slice toUtf8(@LiteralParameter("x") long x, @SqlType("char(x)") Slice slice)
+    {
+        return Chars.padSpaces(slice, toIntExact(x));
     }
 
     // TODO: implement N arguments char concat

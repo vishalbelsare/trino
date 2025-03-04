@@ -18,18 +18,15 @@ import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.Session;
-import io.trino.metadata.Metadata;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.plan.DynamicFilterId;
-
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.HashMap;
 import java.util.List;
@@ -50,7 +47,6 @@ import static io.trino.sql.planner.DomainCoercer.applySaturatedCasts;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
-@ThreadSafe
 public class LocalDynamicFiltersCollector
 {
     private final Session session;
@@ -94,9 +90,7 @@ public class LocalDynamicFiltersCollector
     public DynamicFilter createDynamicFilter(
             List<Descriptor> descriptors,
             Map<Symbol, ColumnHandle> columnsMap,
-            TypeProvider typeProvider,
-            Metadata metadata,
-            TypeOperators typeOperators)
+            PlannerContext plannerContext)
     {
         Multimap<DynamicFilterId, Descriptor> descriptorMap = extractSourceSymbols(descriptors);
 
@@ -118,10 +112,17 @@ public class LocalDynamicFiltersCollector
                                                         return requireNonNull(columnsMap.get(probeSymbol), () -> format("Missing probe column for %s", probeSymbol));
                                                     },
                                                     descriptor -> {
-                                                        Type targetType = typeProvider.get(Symbol.from(descriptor.getInput()));
+                                                        Symbol symbol = Symbol.from(descriptor.getInput());
+                                                        Type targetType = symbol.type();
                                                         Domain updatedDomain = descriptor.applyComparison(domain);
                                                         if (!updatedDomain.getType().equals(targetType)) {
-                                                            return applySaturatedCasts(metadata, typeOperators, session, updatedDomain, targetType);
+                                                            return applySaturatedCasts(
+                                                                    plannerContext.getMetadata(),
+                                                                    plannerContext.getFunctionManager(),
+                                                                    plannerContext.getTypeOperators(),
+                                                                    session,
+                                                                    updatedDomain,
+                                                                    targetType);
                                                         }
                                                         return updatedDomain;
                                                     }))),
@@ -158,7 +159,7 @@ public class LocalDynamicFiltersCollector
             this.futuresLeft = predicateFutures.size();
             this.isBlocked = predicateFutures.isEmpty() ? NOT_BLOCKED : new CompletableFuture<>();
             this.currentPredicate = TupleDomain.all();
-            predicateFutures.stream().forEach(future -> addSuccessCallback(future, this::update, directExecutor()));
+            predicateFutures.forEach(future -> addSuccessCallback(future, this::update, directExecutor()));
         }
 
         private void update(TupleDomain<ColumnHandle> predicate)

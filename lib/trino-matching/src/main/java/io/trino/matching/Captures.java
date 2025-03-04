@@ -14,6 +14,7 @@
 package io.trino.matching;
 
 import java.util.NoSuchElementException;
+import java.util.Objects;
 
 public class Captures
 {
@@ -45,9 +46,7 @@ public class Captures
         if (this == NIL) {
             return other;
         }
-        else {
-            return new Captures(capture, value, tail.addAll(other));
-        }
+        return new Captures(capture, value, tail.addAll(other));
     }
 
     @SuppressWarnings("unchecked cast")
@@ -56,12 +55,10 @@ public class Captures
         if (this.equals(NIL)) {
             throw new NoSuchElementException("Requested value for unknown Capture. Was it registered in the Pattern?");
         }
-        else if (this.capture.equals(capture)) {
+        if (this.capture.equals(capture)) {
             return (T) value;
         }
-        else {
-            return tail.get(capture);
-        }
+        return tail.get(capture);
     }
 
     @Override
@@ -75,14 +72,9 @@ public class Captures
         }
 
         Captures captures = (Captures) o;
-
-        if (capture != null ? !capture.equals(captures.capture) : captures.capture != null) {
-            return false;
-        }
-        if (value != null ? !value.equals(captures.value) : captures.value != null) {
-            return false;
-        }
-        return tail != null ? tail.equals(captures.tail) : captures.tail == null;
+        return Objects.equals(capture, captures.capture)
+                && Objects.equals(value, captures.value)
+                && Objects.equals(tail, captures.tail);
     }
 
     @Override

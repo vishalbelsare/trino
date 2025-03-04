@@ -14,34 +14,32 @@
 package io.trino.split;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
-import io.trino.connector.CatalogName;
-import io.trino.execution.Lifespan;
+import com.google.errorprone.annotations.ThreadSafe;
 import io.trino.metadata.Split;
-import io.trino.spi.HostAddress;
-import io.trino.spi.connector.ConnectorPartitionHandle;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorSplit;
-
-import javax.annotation.concurrent.NotThreadSafe;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
-import static io.trino.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
 import static io.trino.split.MockSplitSource.Action.DO_NOTHING;
 import static io.trino.split.MockSplitSource.Action.FINISH;
+import static io.trino.testing.TestingHandles.TEST_CATALOG_HANDLE;
 
-@NotThreadSafe
+@ThreadSafe
 public class MockSplitSource
         implements SplitSource
 {
-    private static final Split SPLIT = new Split(new CatalogName("test"), new MockConnectorSplit(), Lifespan.taskWide());
+    private static final Split SPLIT = new Split(TEST_CATALOG_HANDLE, new MockConnectorSplit());
     private static final SettableFuture<List<Split>> COMPLETED_FUTURE = SettableFuture.create();
 
     static {
@@ -58,18 +56,16 @@ public class MockSplitSource
     private SettableFuture<List<Split>> nextBatchFuture = COMPLETED_FUTURE;
     private int nextBatchMaxSize;
 
-    public MockSplitSource()
-    {
-    }
+    public MockSplitSource() {}
 
-    public MockSplitSource setBatchSize(int batchSize)
+    public synchronized MockSplitSource setBatchSize(int batchSize)
     {
         checkArgument(atSplitDepletion == DO_NOTHING, "cannot modify batch size once split completion action is set");
         this.batchSize = batchSize;
         return this;
     }
 
-    public MockSplitSource increaseAvailableSplits(int count)
+    public synchronized MockSplitSource increaseAvailableSplits(int count)
     {
         checkArgument(atSplitDepletion == DO_NOTHING, "cannot increase available splits once split completion action is set");
         totalSplits += count;
@@ -77,7 +73,7 @@ public class MockSplitSource
         return this;
     }
 
-    public MockSplitSource atSplitCompletion(Action action)
+    public synchronized MockSplitSource atSplitCompletion(Action action)
     {
         atSplitDepletion = action;
         doGetNextBatch();
@@ -85,14 +81,18 @@ public class MockSplitSource
     }
 
     @Override
-    public CatalogName getCatalogName()
+    public CatalogHandle getCatalogHandle()
     {
         throw new UnsupportedOperationException();
     }
 
-    private void doGetNextBatch()
+    private synchronized void doGetNextBatch()
     {
         checkState(splitsProduced <= totalSplits);
+        if (nextBatchFuture.isDone()) {
+            // if nextBatchFuture is already done, we need to wait until new future is created through getNextBatch to produce splits
+            return;
+        }
         if (splitsProduced == totalSplits) {
             switch (atSplitDepletion) {
                 case FAIL:
@@ -115,13 +115,8 @@ public class MockSplitSource
     }
 
     @Override
-    public ListenableFuture<SplitBatch> getNextBatch(ConnectorPartitionHandle partitionHandle, Lifespan lifespan, int maxSize)
+    public synchronized ListenableFuture<SplitBatch> getNextBatch(int maxSize)
     {
-        if (partitionHandle != NOT_PARTITIONED) {
-            throw new UnsupportedOperationException();
-        }
-        checkArgument(Lifespan.taskWide().equals(lifespan));
-
         checkState(nextBatchFuture.isDone(), "concurrent getNextBatch invocation");
         nextBatchFuture = SettableFuture.create();
         nextBatchMaxSize = maxSize;
@@ -132,12 +127,10 @@ public class MockSplitSource
     }
 
     @Override
-    public void close()
-    {
-    }
+    public void close() {}
 
     @Override
-    public boolean isFinished()
+    public synchronized boolean isFinished()
     {
         return splitsProduced == totalSplits && atSplitDepletion == FINISH;
     }
@@ -148,7 +141,7 @@ public class MockSplitSource
         return Optional.empty();
     }
 
-    public int getNextBatchInvocationCount()
+    public synchronized int getNextBatchInvocationCount()
     {
         return nextBatchInvocationCount;
     }
@@ -157,21 +150,15 @@ public class MockSplitSource
             implements ConnectorSplit
     {
         @Override
-        public boolean isRemotelyAccessible()
+        public Map<String, String> getSplitInfo()
         {
-            return false;
+            return ImmutableMap.of("name", "A mock split");
         }
 
         @Override
-        public List<HostAddress> getAddresses()
+        public long getRetainedSizeInBytes()
         {
-            return ImmutableList.of();
-        }
-
-        @Override
-        public Object getInfo()
-        {
-            return "A mock split";
+            return 0;
         }
     }
 

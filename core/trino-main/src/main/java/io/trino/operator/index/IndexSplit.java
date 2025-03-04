@@ -18,6 +18,7 @@ import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.RecordSet;
 
 import java.util.List;
+import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
@@ -44,9 +45,16 @@ public class IndexSplit
     }
 
     @Override
-    public Object getInfo()
+    public Map<String, String> getSplitInfo()
     {
-        return null;
+        return Map.of();
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        // IndexSplit is expected to be short lived and is not expected to be queried for the memory it retains
+        throw new UnsupportedOperationException();
     }
 
     public RecordSet getKeyRecordSet()

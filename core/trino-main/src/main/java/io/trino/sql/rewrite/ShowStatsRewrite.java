@@ -14,12 +14,16 @@
 package io.trino.sql.rewrite;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.Session;
 import io.trino.cost.CachingStatsProvider;
+import io.trino.cost.CachingTableStatsProvider;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.cost.StatsCalculator;
 import io.trino.cost.SymbolStatsEstimate;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
+import io.trino.metadata.Metadata;
 import io.trino.operator.scalar.timestamp.TimestampToVarcharCast;
 import io.trino.operator.scalar.timestamptz.TimestampWithTimeZoneToVarcharCast;
 import io.trino.spi.type.BigintType;
@@ -57,8 +61,6 @@ import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
 import io.trino.sql.tree.Values;
 
-import javax.inject.Inject;
-
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -87,12 +89,14 @@ public class ShowStatsRewrite
     private static final Expression NULL_DOUBLE = new Cast(new NullLiteral(), toSqlType(DOUBLE));
     private static final Expression NULL_VARCHAR = new Cast(new NullLiteral(), toSqlType(VARCHAR));
 
+    private final Metadata metadata;
     private final QueryExplainerFactory queryExplainerFactory;
     private final StatsCalculator statsCalculator;
 
     @Inject
-    public ShowStatsRewrite(QueryExplainerFactory queryExplainerFactory, StatsCalculator statsCalculator)
+    public ShowStatsRewrite(Metadata metadata, QueryExplainerFactory queryExplainerFactory, StatsCalculator statsCalculator)
     {
+        this.metadata = requireNonNull(metadata, "metadata is null");
         this.queryExplainerFactory = requireNonNull(queryExplainerFactory, "queryExplainerFactory is null");
         this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
     }
@@ -104,9 +108,10 @@ public class ShowStatsRewrite
             Statement node,
             List<Expression> parameters,
             Map<NodeRef<Parameter>, Expression> parameterLookup,
-            WarningCollector warningCollector)
+            WarningCollector warningCollector,
+            PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
-        return (Statement) new Visitor(session, parameters, queryExplainerFactory.createQueryExplainer(analyzerFactory), warningCollector, statsCalculator).process(node, null);
+        return (Statement) new Visitor(session, parameters, metadata, queryExplainerFactory.createQueryExplainer(analyzerFactory), warningCollector, planOptimizersStatsCollector, statsCalculator).process(node, null);
     }
 
     private static class Visitor
@@ -114,16 +119,27 @@ public class ShowStatsRewrite
     {
         private final Session session;
         private final List<Expression> parameters;
+        private final Metadata metadata;
         private final QueryExplainer queryExplainer;
         private final WarningCollector warningCollector;
+        private final PlanOptimizersStatsCollector planOptimizersStatsCollector;
         private final StatsCalculator statsCalculator;
 
-        private Visitor(Session session, List<Expression> parameters, QueryExplainer queryExplainer, WarningCollector warningCollector, StatsCalculator statsCalculator)
+        private Visitor(
+                Session session,
+                List<Expression> parameters,
+                Metadata metadata,
+                QueryExplainer queryExplainer,
+                WarningCollector warningCollector,
+                PlanOptimizersStatsCollector planOptimizersStatsCollector,
+                StatsCalculator statsCalculator)
         {
             this.session = requireNonNull(session, "session is null");
             this.parameters = requireNonNull(parameters, "parameters is null");
+            this.metadata = requireNonNull(metadata, "metadata is null");
             this.queryExplainer = requireNonNull(queryExplainer, "queryExplainer is null");
             this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
+            this.planOptimizersStatsCollector = requireNonNull(planOptimizersStatsCollector, "planOptimizersStatsCollector is null");
             this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
         }
 
@@ -131,8 +147,8 @@ public class ShowStatsRewrite
         protected Node visitShowStats(ShowStats node, Void context)
         {
             Query query = getRelation(node);
-            Plan plan = queryExplainer.getLogicalPlan(session, query, parameters, warningCollector);
-            CachingStatsProvider cachingStatsProvider = new CachingStatsProvider(statsCalculator, session, plan.getTypes());
+            Plan plan = queryExplainer.getLogicalPlan(session, query, parameters, warningCollector, planOptimizersStatsCollector);
+            CachingStatsProvider cachingStatsProvider = new CachingStatsProvider(statsCalculator, session, new CachingTableStatsProvider(metadata, session));
             PlanNodeStatsEstimate stats = cachingStatsProvider.getStats(plan.getRoot());
             return rewriteShowStats(plan, stats);
         }
@@ -158,7 +174,7 @@ public class ShowStatsRewrite
             for (int columnIndex = 0; columnIndex < root.getOutputSymbols().size(); columnIndex++) {
                 Symbol outputSymbol = root.getOutputSymbols().get(columnIndex);
                 String columnName = root.getColumnNames().get(columnIndex);
-                Type columnType = plan.getTypes().get(outputSymbol);
+                Type columnType = outputSymbol.type();
                 SymbolStatsEstimate symbolStatistics = planNodeStatsEstimate.getSymbolStatistics(outputSymbol);
                 ImmutableList.Builder<Expression> rowValues = ImmutableList.builder();
                 rowValues.add(new StringLiteral(columnName));

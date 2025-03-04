@@ -21,8 +21,11 @@ import okhttp3.Request;
 import okhttp3.Response;
 import org.assertj.core.api.ListAssert;
 import org.assertj.core.api.ThrowableAssert;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -46,19 +49,21 @@ import static io.trino.client.auth.external.ExternalAuthenticator.TOKEN_URI_FIEL
 import static io.trino.client.auth.external.ExternalAuthenticator.toAuthentication;
 import static io.trino.client.auth.external.MockTokenPoller.onPoll;
 import static io.trino.client.auth.external.TokenPollResult.successful;
-import static java.lang.String.format;
 import static java.net.HttpURLConnection.HTTP_UNAUTHORIZED;
 import static java.net.URI.create;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(SAME_THREAD)
 public class TestExternalAuthenticator
 {
     private static final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(TestExternalAuthenticator.class.getName() + "-%d"));
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void shutDownThreadPool()
     {
         executor.shutdownNow();
@@ -126,7 +131,7 @@ public class TestExternalAuthenticator
     {
         assertThatThrownBy(() -> buildAuthentication("Bearer x_token_server=\"http://[1.1.1.1]\""))
                 .isInstanceOf(ClientException.class)
-                .hasMessageContaining(format("Failed to parse URI for field '%s'", TOKEN_URI_FIELD))
+                .hasMessageContaining("Failed to parse URI for field '%s'", TOKEN_URI_FIELD)
                 .hasRootCauseInstanceOf(URISyntaxException.class)
                 .hasRootCauseMessage("Malformed IPv6 address at index 8: http://[1.1.1.1]");
     }
@@ -140,8 +145,7 @@ public class TestExternalAuthenticator
 
         Request authenticated = authenticator.authenticate(null, getUnauthorizedResponse("Bearer x_token_server=\"http://token.uri\""));
 
-        assertThat(authenticated.headers())
-                .extracting(headers -> headers.get(AUTHORIZATION))
+        assertThat(authenticated.headers().get(AUTHORIZATION))
                 .isEqualTo("Bearer valid-token");
     }
 
@@ -160,7 +164,8 @@ public class TestExternalAuthenticator
                 .containsExactly("Bearer second-token");
     }
 
-    @Test(timeOut = 2000)
+    @Test
+    @Timeout(2)
     public void testAuthenticationFromMultipleThreadsWithLocallyStoredToken()
     {
         MockTokenPoller tokenPoller = new MockTokenPoller()
@@ -186,7 +191,8 @@ public class TestExternalAuthenticator
         assertThat(redirectHandler.getRedirectionCount()).isEqualTo(4);
     }
 
-    @Test(timeOut = 2000)
+    @Test
+    @Timeout(2)
     public void testAuthenticationFromMultipleThreadsWithCachedToken()
     {
         MockTokenPoller tokenPoller = new MockTokenPoller()
@@ -210,7 +216,8 @@ public class TestExternalAuthenticator
         assertThat(redirectHandler.getRedirectionCount()).isEqualTo(1);
     }
 
-    @Test(timeOut = 2000)
+    @Test
+    @Timeout(2)
     public void testAuthenticationFromMultipleThreadsWithCachedTokenAfterAuthenticateFails()
     {
         MockTokenPoller tokenPoller = new MockTokenPoller()
@@ -237,7 +244,8 @@ public class TestExternalAuthenticator
         assertThat(redirectHandler.getRedirectionCount()).isEqualTo(2);
     }
 
-    @Test(timeOut = 2000)
+    @Test
+    @Timeout(2)
     public void testAuthenticationFromMultipleThreadsWithCachedTokenAfterAuthenticateTimesOut()
     {
         MockRedirectHandler redirectHandler = new MockRedirectHandler()
@@ -257,7 +265,8 @@ public class TestExternalAuthenticator
         assertThat(redirectHandler.getRedirectionCount()).isEqualTo(1);
     }
 
-    @Test(timeOut = 2000)
+    @Test
+    @Timeout(2)
     public void testAuthenticationFromMultipleThreadsWithCachedTokenAfterAuthenticateIsInterrupted()
             throws Exception
     {
@@ -345,12 +354,12 @@ public class TestExternalAuthenticator
             }
         }
 
-        ThrowableAssert firstException()
+        ThrowableAssert<Throwable> firstException()
         {
             return exceptions.stream()
                     .findFirst()
                     .map(ThrowableAssert::new)
-                    .orElseGet(() -> new ThrowableAssert(() -> null));
+                    .orElseGet(() -> new ThrowableAssert<Throwable>(() -> null));
         }
 
         void assertThatNoExceptionsHasBeenThrown()

@@ -23,7 +23,6 @@ import java.util.Map;
 import java.util.function.Predicate;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
-import static java.lang.String.format;
 import static java.util.function.Function.identity;
 
 class TableStatisticsRecorder
@@ -59,24 +58,18 @@ class TableStatisticsRecorder
     private <E extends TpchEntity> Map<TpchColumn<E>, ColumnStatisticsRecorder> createStatisticsRecorders(List<TpchColumn<E>> columns)
     {
         return columns.stream()
-                .collect(toImmutableMap(identity(), (column) -> new ColumnStatisticsRecorder(column.getType())));
+                .collect(toImmutableMap(identity(), column -> new ColumnStatisticsRecorder(column.getType())));
     }
 
     private <E extends TpchEntity> Comparable<?> getTpchValue(E row, TpchColumn<E> column)
     {
         TpchColumnType.Base baseType = column.getType().getBase();
-        switch (baseType) {
-            case IDENTIFIER:
-                return column.getIdentifier(row);
-            case INTEGER:
-                return column.getInteger(row);
-            case DATE:
-                return column.getDate(row);
-            case DOUBLE:
-                return column.getDouble(row);
-            case VARCHAR:
-                return column.getString(row);
-        }
-        throw new UnsupportedOperationException(format("Unsupported TPCH base type [%s]", baseType));
+        return switch (baseType) {
+            case IDENTIFIER -> column.getIdentifier(row);
+            case INTEGER -> column.getInteger(row);
+            case DATE -> column.getDate(row);
+            case DOUBLE -> column.getDouble(row);
+            case VARCHAR -> column.getString(row);
+        };
     }
 }

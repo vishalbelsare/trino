@@ -20,6 +20,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
 import org.elasticsearch.search.SearchHit;
 
+import java.util.Objects;
 import java.util.function.Supplier;
 
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
@@ -47,11 +48,10 @@ public class RealDecoder
         }
 
         float decoded;
-        if (value instanceof Number) {
-            decoded = ((Number) value).floatValue();
+        if (value instanceof Number number) {
+            decoded = number.floatValue();
         }
-        else if (value instanceof String) {
-            String stringValue = (String) value;
+        else if (value instanceof String stringValue) {
             if (stringValue.isEmpty()) {
                 output.appendNull();
                 return;
@@ -91,6 +91,25 @@ public class RealDecoder
         public Decoder createDecoder()
         {
             return new RealDecoder(path);
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            Descriptor that = (Descriptor) o;
+            return Objects.equals(this.path, that.path);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return path.hashCode();
         }
     }
 }

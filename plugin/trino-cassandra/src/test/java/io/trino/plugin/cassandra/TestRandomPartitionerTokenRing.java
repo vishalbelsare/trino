@@ -13,13 +13,15 @@
  */
 package io.trino.plugin.cassandra;
 
-import org.testng.annotations.Test;
+import com.datastax.oss.driver.internal.core.metadata.token.RandomToken;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 
 import static java.math.BigInteger.ONE;
 import static java.math.BigInteger.ZERO;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.offset;
 
 public class TestRandomPartitionerTokenRing
 {
@@ -28,24 +30,34 @@ public class TestRandomPartitionerTokenRing
     @Test
     public void testGetRingFraction()
     {
-        assertEquals(tokenRing.getTokenCountInRange("0", "1"), ONE);
-        assertEquals(tokenRing.getTokenCountInRange("0", "200"), new BigInteger("200"));
-        assertEquals(tokenRing.getTokenCountInRange("0", "10"), new BigInteger("10"));
-        assertEquals(tokenRing.getTokenCountInRange("1", "11"), new BigInteger("10"));
-        assertEquals(tokenRing.getTokenCountInRange("0", "0"), ZERO);
-        assertEquals(tokenRing.getTokenCountInRange("-1", "-1"), BigInteger.valueOf(2).pow(127).add(ONE));
-        assertEquals(tokenRing.getTokenCountInRange("1", "0"), BigInteger.valueOf(2).pow(127));
+        assertThat(tokenRing.getTokenCountInRange(randomToken(0), randomToken(1))).isEqualTo(ONE);
+        assertThat(tokenRing.getTokenCountInRange(randomToken(0), randomToken(200))).isEqualTo(new BigInteger("200"));
+        assertThat(tokenRing.getTokenCountInRange(randomToken(0), randomToken(10))).isEqualTo(new BigInteger("10"));
+        assertThat(tokenRing.getTokenCountInRange(randomToken(1), randomToken(11))).isEqualTo(new BigInteger("10"));
+        assertThat(tokenRing.getTokenCountInRange(randomToken(0), randomToken(0))).isEqualTo(ZERO);
+        assertThat(tokenRing.getTokenCountInRange(randomToken(-1), randomToken(-1))).isEqualTo(BigInteger.valueOf(2).pow(127).add(ONE));
+        assertThat(tokenRing.getTokenCountInRange(randomToken(1), randomToken(0))).isEqualTo(BigInteger.valueOf(2).pow(127));
     }
 
     @Test
     public void testGetTokenCountInRange()
     {
-        assertEquals(tokenRing.getRingFraction("0", "0"), 0.0, 0.001);
-        assertEquals(tokenRing.getRingFraction("1", "0"), 1.0, 0.001);
-        assertEquals(tokenRing.getRingFraction("-1", "-1"), 1.0, 0.001);
-        assertEquals(tokenRing.getRingFraction("0", BigInteger.valueOf(2).pow(126).toString()), 0.5, 0.001);
-        assertEquals(tokenRing.getRingFraction(BigInteger.valueOf(2).pow(126).toString(), BigInteger.valueOf(2).pow(127).toString()), 0.5, 0.001);
-        assertEquals(tokenRing.getRingFraction("0", BigInteger.valueOf(2).pow(126).toString()), 0.5, 0.001);
-        assertEquals(tokenRing.getRingFraction("0", BigInteger.valueOf(2).pow(127).toString()), 1.0, 0.001);
+        assertThat(tokenRing.getRingFraction(randomToken(0), randomToken(0))).isCloseTo(0.0, offset(0.001));
+        assertThat(tokenRing.getRingFraction(randomToken(1), randomToken(0))).isCloseTo(1.0, offset(0.001));
+        assertThat(tokenRing.getRingFraction(randomToken(-1), randomToken(-1))).isCloseTo(1.0, offset(0.001));
+        assertThat(tokenRing.getRingFraction(randomToken(0), randomToken(BigInteger.valueOf(2).pow(126)))).isCloseTo(0.5, offset(0.001));
+        assertThat(tokenRing.getRingFraction(randomToken(BigInteger.valueOf(2).pow(126)), randomToken(BigInteger.valueOf(2).pow(127)))).isCloseTo(0.5, offset(0.001));
+        assertThat(tokenRing.getRingFraction(randomToken(0), randomToken(BigInteger.valueOf(2).pow(126)))).isCloseTo(0.5, offset(0.001));
+        assertThat(tokenRing.getRingFraction(randomToken(0), randomToken(BigInteger.valueOf(2).pow(127)))).isCloseTo(1.0, offset(0.001));
+    }
+
+    private static RandomToken randomToken(long value)
+    {
+        return randomToken(BigInteger.valueOf(value));
+    }
+
+    private static RandomToken randomToken(BigInteger value)
+    {
+        return new RandomToken(value);
     }
 }

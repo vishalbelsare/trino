@@ -13,51 +13,119 @@
  */
 package io.trino.operator.aggregation;
 
+import io.trino.annotation.UsedByGeneratedCode;
+import io.trino.operator.aggregation.state.NullableDoubleState;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.AggregationFunction;
 import io.trino.spi.function.AggregationState;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
-import io.trino.spi.function.RemoveInputFunction;
 import io.trino.spi.function.SqlType;
-import io.trino.spi.type.DoubleType;
+import io.trino.spi.function.WindowAccumulator;
+import io.trino.spi.function.WindowIndex;
 import io.trino.spi.type.StandardTypes;
 
-@AggregationFunction("sum")
+import static io.trino.spi.type.DoubleType.DOUBLE;
+
+@AggregationFunction(value = "sum", windowAccumulator = DoubleSumAggregation.DoubleSumWindowAccumulator.class)
 public final class DoubleSumAggregation
 {
     private DoubleSumAggregation() {}
 
     @InputFunction
-    public static void sum(@AggregationState LongDoubleState state, @SqlType(StandardTypes.DOUBLE) double value)
+    public static void sum(@AggregationState NullableDoubleState state, @SqlType(StandardTypes.DOUBLE) double value)
     {
-        state.setFirst(state.getFirst() + 1);
-        state.setSecond(state.getSecond() + value);
-    }
-
-    @RemoveInputFunction
-    public static void removeInput(@AggregationState LongDoubleState state, @SqlType(StandardTypes.DOUBLE) double value)
-    {
-        state.setFirst(state.getFirst() - 1);
-        state.setSecond(state.getSecond() - value);
+        state.setNull(false);
+        state.setValue(state.getValue() + value);
     }
 
     @CombineFunction
-    public static void combine(@AggregationState LongDoubleState state, @AggregationState LongDoubleState otherState)
+    public static void combine(@AggregationState NullableDoubleState state, @AggregationState NullableDoubleState otherState)
     {
-        state.setFirst(state.getFirst() + otherState.getFirst());
-        state.setSecond(state.getSecond() + otherState.getSecond());
+        if (state.isNull()) {
+            if (otherState.isNull()) {
+                return;
+            }
+            state.set(otherState);
+            return;
+        }
+
+        if (!otherState.isNull()) {
+            state.setValue(state.getValue() + otherState.getValue());
+        }
     }
 
     @OutputFunction(StandardTypes.DOUBLE)
-    public static void output(@AggregationState LongDoubleState state, BlockBuilder out)
+    public static void output(@AggregationState NullableDoubleState state, BlockBuilder out)
     {
-        if (state.getFirst() == 0) {
-            out.appendNull();
+        NullableDoubleState.write(DOUBLE, state, out);
+    }
+
+    public static class DoubleSumWindowAccumulator
+            implements WindowAccumulator
+    {
+        private long count;
+        private double sum;
+
+        @UsedByGeneratedCode
+        public DoubleSumWindowAccumulator() {}
+
+        private DoubleSumWindowAccumulator(long count, double sum)
+        {
+            this.count = count;
+            this.sum = sum;
         }
-        else {
-            DoubleType.DOUBLE.writeDouble(out, state.getSecond());
+
+        @Override
+        public long getEstimatedSize()
+        {
+            return Long.BYTES + Double.BYTES;
+        }
+
+        @Override
+        public WindowAccumulator copy()
+        {
+            return new DoubleSumWindowAccumulator(count, sum);
+        }
+
+        @Override
+        public void addInput(WindowIndex index, int startPosition, int endPosition)
+        {
+            for (int i = startPosition; i <= endPosition; i++) {
+                if (!index.isNull(0, i)) {
+                    sum += index.getDouble(0, i);
+                    count++;
+                }
+            }
+        }
+
+        @Override
+        public boolean removeInput(WindowIndex index, int startPosition, int endPosition)
+        {
+            // If the sum is finite, all values to be removed are finite
+            if (!Double.isFinite(sum)) {
+                return false;
+            }
+
+            for (int i = startPosition; i <= endPosition; i++) {
+                if (!index.isNull(0, i)) {
+                    sum -= index.getDouble(0, i);
+                    count--;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public void output(BlockBuilder blockBuilder)
+        {
+            if (count == 0) {
+                blockBuilder.appendNull();
+            }
+            else {
+                DOUBLE.writeDouble(blockBuilder, sum);
+            }
         }
     }
 }

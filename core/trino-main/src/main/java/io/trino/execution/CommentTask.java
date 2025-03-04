@@ -14,18 +14,21 @@
 package io.trino.execution;
 
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
 import io.trino.Session;
 import io.trino.execution.warnings.WarningCollector;
+import io.trino.metadata.MaterializedViewDefinition;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.RedirectionAwareTableHandle;
 import io.trino.metadata.TableHandle;
+import io.trino.metadata.ViewColumn;
+import io.trino.metadata.ViewDefinition;
 import io.trino.security.AccessControl;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.sql.tree.Comment;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.QualifiedName;
-
-import javax.inject.Inject;
 
 import java.util.List;
 import java.util.Map;
@@ -69,42 +72,113 @@ public class CommentTask
         Session session = stateMachine.getSession();
 
         if (statement.getType() == Comment.Type.TABLE) {
-            QualifiedObjectName tableName = createQualifiedObjectName(session, statement, statement.getName());
-            Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
-            if (tableHandle.isEmpty()) {
-                throw semanticException(TABLE_NOT_FOUND, statement, "Table does not exist: %s", tableName);
-            }
-
-            accessControl.checkCanSetTableComment(session.toSecurityContext(), tableName);
-
-            metadata.setTableComment(session, tableHandle.get(), statement.getComment());
+            commentOnTable(statement, session);
+        }
+        else if (statement.getType() == Comment.Type.VIEW) {
+            commentOnView(statement, session);
         }
         else if (statement.getType() == Comment.Type.COLUMN) {
-            Optional<QualifiedName> prefix = statement.getName().getPrefix();
-            if (prefix.isEmpty()) {
-                throw semanticException(MISSING_TABLE, statement, "Table must be specified");
-            }
-
-            QualifiedObjectName tableName = createQualifiedObjectName(session, statement, prefix.get());
-            Optional<TableHandle> tableHandle = metadata.getTableHandle(session, tableName);
-            if (tableHandle.isEmpty()) {
-                throw semanticException(TABLE_NOT_FOUND, statement, "Table does not exist: " + tableName);
-            }
-
-            String columnName = statement.getName().getSuffix();
-            Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(session, tableHandle.get());
-            if (!columnHandles.containsKey(columnName)) {
-                throw semanticException(COLUMN_NOT_FOUND, statement, "Column does not exist: " + columnName);
-            }
-
-            accessControl.checkCanSetColumnComment(session.toSecurityContext(), tableName);
-
-            metadata.setColumnComment(session, tableHandle.get(), columnHandles.get(columnName), statement.getComment());
+            commentOnColumn(statement, session);
         }
         else {
             throw semanticException(NOT_SUPPORTED, statement, "Unsupported comment type: %s", statement.getType());
         }
 
         return immediateVoidFuture();
+    }
+
+    private void commentOnTable(Comment statement, Session session)
+    {
+        QualifiedObjectName originalTableName = createQualifiedObjectName(session, statement, statement.getName());
+        if (metadata.isMaterializedView(session, originalTableName)) {
+            throw semanticException(
+                    TABLE_NOT_FOUND,
+                    statement,
+                    "Table '%s' does not exist, but a materialized view with that name exists. Setting comments on materialized views is unsupported.", originalTableName);
+        }
+
+        if (metadata.isView(session, originalTableName)) {
+            throw semanticException(
+                    TABLE_NOT_FOUND,
+                    statement,
+                    "Table '%1$s' does not exist, but a view with that name exists. Did you mean COMMENT ON VIEW %1$s IS ...?", originalTableName);
+        }
+
+        RedirectionAwareTableHandle redirectionAwareTableHandle = metadata.getRedirectionAwareTableHandle(session, originalTableName);
+        if (redirectionAwareTableHandle.tableHandle().isEmpty()) {
+            throw semanticException(TABLE_NOT_FOUND, statement, "Table does not exist: %s", originalTableName);
+        }
+
+        accessControl.checkCanSetTableComment(session.toSecurityContext(), redirectionAwareTableHandle.redirectedTableName().orElse(originalTableName));
+        TableHandle tableHandle = redirectionAwareTableHandle.tableHandle().get();
+        metadata.setTableComment(session, tableHandle, statement.getComment());
+    }
+
+    private void commentOnView(Comment statement, Session session)
+    {
+        QualifiedObjectName viewName = createQualifiedObjectName(session, statement, statement.getName());
+        if (!metadata.isView(session, viewName)) {
+            String additionalInformation;
+            if (metadata.getMaterializedView(session, viewName).isPresent()) {
+                additionalInformation = ", but a materialized view with that name exists. Setting comments on materialized views is unsupported.";
+            }
+            else if (metadata.getTableHandle(session, viewName).isPresent()) {
+                additionalInformation = ", but a table with that name exists. Did you mean COMMENT ON TABLE " + viewName + " IS ...?";
+            }
+            else {
+                additionalInformation = "";
+            }
+            throw semanticException(TABLE_NOT_FOUND, statement, "View '%s' does not exist%s", viewName, additionalInformation);
+        }
+
+        accessControl.checkCanSetViewComment(session.toSecurityContext(), viewName);
+        metadata.setViewComment(session, viewName, statement.getComment());
+    }
+
+    private void commentOnColumn(Comment statement, Session session)
+    {
+        QualifiedName prefix = statement.getName().getPrefix()
+                .orElseThrow(() -> semanticException(MISSING_TABLE, statement, "Table must be specified"));
+
+        QualifiedObjectName originalObjectName = createQualifiedObjectName(session, statement, prefix);
+        Optional<ViewDefinition> view = metadata.getView(session, originalObjectName);
+        if (view.isPresent()) {
+            ViewDefinition viewDefinition = view.get();
+            ViewColumn viewColumn = findAndCheckViewColumn(statement, session, viewDefinition, originalObjectName);
+            metadata.setViewColumnComment(session, originalObjectName, viewColumn.name(), statement.getComment());
+        }
+        else if (metadata.isMaterializedView(session, originalObjectName)) {
+            MaterializedViewDefinition materializedViewDefinition = metadata.getMaterializedView(session, originalObjectName).get();
+            ViewColumn viewColumn = findAndCheckViewColumn(statement, session, materializedViewDefinition, originalObjectName);
+            metadata.setMaterializedViewColumnComment(session, originalObjectName, viewColumn.name(), statement.getComment());
+        }
+        else {
+            RedirectionAwareTableHandle redirectionAwareTableHandle = metadata.getRedirectionAwareTableHandle(session, originalObjectName);
+            if (redirectionAwareTableHandle.tableHandle().isEmpty()) {
+                throw semanticException(TABLE_NOT_FOUND, statement, "Table does not exist: %s", originalObjectName);
+            }
+            TableHandle tableHandle = redirectionAwareTableHandle.tableHandle().get();
+
+            String columnName = statement.getName().getSuffix();
+            Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(session, tableHandle);
+            if (!columnHandles.containsKey(columnName)) {
+                throw semanticException(COLUMN_NOT_FOUND, statement, "Column does not exist: %s", columnName);
+            }
+
+            accessControl.checkCanSetColumnComment(session.toSecurityContext(), redirectionAwareTableHandle.redirectedTableName().orElse(originalObjectName));
+
+            metadata.setColumnComment(session, tableHandle, columnHandles.get(columnName), statement.getComment());
+        }
+    }
+
+    private ViewColumn findAndCheckViewColumn(Comment statement, Session session, ViewDefinition viewDefinition, QualifiedObjectName originalObjectName)
+    {
+        String columnName = statement.getName().getSuffix();
+        ViewColumn viewColumn = viewDefinition.getColumns().stream()
+                .filter(column -> column.name().equals(columnName))
+                .findAny()
+                .orElseThrow(() -> semanticException(COLUMN_NOT_FOUND, statement, "Column does not exist: %s", columnName));
+        accessControl.checkCanSetColumnComment(session.toSecurityContext(), originalObjectName);
+        return viewColumn;
     }
 }

@@ -13,14 +13,15 @@
  */
 package io.trino.sql.planner.assertions;
 
+import io.airlift.slice.Slice;
 import io.trino.Session;
 import io.trino.cost.StatsProvider;
 import io.trino.metadata.Metadata;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.SpatialJoinNode;
 import io.trino.sql.planner.plan.SpatialJoinNode.Type;
-import io.trino.sql.tree.Expression;
 
 import java.util.List;
 import java.util.Optional;
@@ -37,10 +38,10 @@ public class SpatialJoinMatcher
 {
     private final Type type;
     private final Expression filter;
-    private final Optional<String> kdbTree;
+    private final Optional<Slice> kdbTree;
     private final Optional<List<String>> outputSymbols;
 
-    public SpatialJoinMatcher(Type type, Expression filter, Optional<String> kdbTree, Optional<List<String>> outputSymbols)
+    public SpatialJoinMatcher(Type type, Expression filter, Optional<Slice> kdbTree, Optional<List<String>> outputSymbols)
     {
         this.type = type;
         this.filter = requireNonNull(filter, "filter cannot be null");
@@ -51,11 +52,10 @@ public class SpatialJoinMatcher
     @Override
     public boolean shapeMatches(PlanNode node)
     {
-        if (!(node instanceof SpatialJoinNode)) {
+        if (!(node instanceof SpatialJoinNode joinNode)) {
             return false;
         }
 
-        SpatialJoinNode joinNode = (SpatialJoinNode) node;
         return joinNode.getType() == type;
     }
 

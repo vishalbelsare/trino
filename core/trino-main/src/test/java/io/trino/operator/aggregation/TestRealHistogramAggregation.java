@@ -16,16 +16,17 @@ package io.trino.operator.aggregation;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.AggregationMetrics;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.type.MapType;
-import io.trino.sql.tree.QualifiedName;
-import org.testng.annotations.Test;
+import io.trino.sql.planner.plan.AggregationNode.Step;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
-import java.util.Optional;
+import java.util.OptionalInt;
 
 import static io.trino.operator.aggregation.AggregationTestUtils.getFinalBlock;
 import static io.trino.operator.aggregation.AggregationTestUtils.getIntermediateBlock;
@@ -33,22 +34,21 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.planner.plan.AggregationNode.Step.FINAL;
+import static io.trino.sql.planner.plan.AggregationNode.Step.PARTIAL;
+import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static io.trino.util.StructuralTestUtil.mapType;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
 
 public class TestRealHistogramAggregation
 {
-    private final AccumulatorFactory factory;
+    private final TestingAggregationFunction function;
     private final Page input;
 
     public TestRealHistogramAggregation()
     {
-        TestingAggregationFunction function = new TestingFunctionResolution().getAggregateFunction(
-                QualifiedName.of("numeric_histogram"),
-                fromTypes(BIGINT, REAL, DOUBLE));
-        factory = function.bind(ImmutableList.of(0, 1, 2), Optional.empty());
+        function = new TestingFunctionResolution().getAggregateFunction("numeric_histogram", fromTypes(BIGINT, REAL, DOUBLE));
 
         input = makeInput(10);
     }
@@ -56,61 +56,67 @@ public class TestRealHistogramAggregation
     @Test
     public void test()
     {
-        Accumulator singleStep = factory.createAccumulator();
-        singleStep.addInput(input);
-        Block expected = getFinalBlock(singleStep);
+        Aggregator singleStep = createAggregator(SINGLE);
+        singleStep.processPage(input);
+        Block expected = getFinalBlock(function.getFinalType(), singleStep);
 
-        Accumulator partialStep = factory.createAccumulator();
-        partialStep.addInput(input);
-        Block partialBlock = getIntermediateBlock(partialStep);
+        Aggregator partialStep = createAggregator(PARTIAL);
+        partialStep.processPage(input);
+        Block partialBlock = getIntermediateBlock(function.getIntermediateType(), partialStep);
 
-        Accumulator finalStep = factory.createAccumulator();
-        finalStep.addIntermediate(partialBlock);
-        Block actual = getFinalBlock(finalStep);
+        Aggregator finalStep = createAggregator(FINAL);
+        finalStep.processPage(new Page(partialBlock));
+        Block actual = getFinalBlock(function.getFinalType(), finalStep);
 
-        assertEquals(extractSingleValue(actual), extractSingleValue(expected));
+        assertThat(extractSingleValue(actual)).isEqualTo(extractSingleValue(expected));
     }
 
     @Test
     public void testMerge()
     {
-        Accumulator singleStep = factory.createAccumulator();
-        singleStep.addInput(input);
-        Block singleStepResult = getFinalBlock(singleStep);
+        Aggregator singleStep = createAggregator(SINGLE);
+        singleStep.processPage(input);
+        Block singleStepResult = getFinalBlock(function.getFinalType(), singleStep);
 
-        Accumulator partialStep = factory.createAccumulator();
-        partialStep.addInput(input);
-        Block intermediate = getIntermediateBlock(partialStep);
+        Aggregator partialStep = createAggregator(PARTIAL);
+        partialStep.processPage(input);
+        Block intermediate = getIntermediateBlock(function.getIntermediateType(), partialStep);
 
-        Accumulator finalStep = factory.createAccumulator();
+        Aggregator finalStep = createAggregator(FINAL);
 
-        finalStep.addIntermediate(intermediate);
-        finalStep.addIntermediate(intermediate);
-        Block actual = getFinalBlock(finalStep);
+        finalStep.processPage(new Page(intermediate));
+        finalStep.processPage(new Page(intermediate));
+        Block actual = getFinalBlock(function.getFinalType(), finalStep);
 
         Map<Float, Float> expected = Maps.transformValues(extractSingleValue(singleStepResult), value -> value * 2);
 
-        assertEquals(extractSingleValue(actual), expected);
+        assertThat(extractSingleValue(actual)).isEqualTo(expected);
+    }
+
+    private Aggregator createAggregator(Step step)
+    {
+        return function.createAggregatorFactory(step, step.isInputRaw() ? ImmutableList.of(0, 1, 2) : ImmutableList.of(0), OptionalInt.empty())
+                .createAggregator(new AggregationMetrics());
     }
 
     @Test
     public void testNull()
     {
-        Accumulator accumulator = factory.createAccumulator();
-        Block result = getFinalBlock(accumulator);
+        Aggregator aggregator = createAggregator(SINGLE);
+        Block result = getFinalBlock(function.getFinalType(), aggregator);
 
-        assertTrue(result.getPositionCount() == 1);
-        assertTrue(result.isNull(0));
+        assertThat(result.getPositionCount()).isEqualTo(1);
+        assertThat(result.isNull(0)).isTrue();
     }
 
     @Test
     public void testBadNumberOfBuckets()
     {
-        Accumulator singleStep = factory.createAccumulator();
-        assertThatThrownBy(() -> singleStep.addInput(makeInput(0)))
+        Aggregator singleStep = createAggregator(SINGLE);
+        assertThatThrownBy(() -> singleStep.processPage(makeInput(0)))
                 .isInstanceOf(TrinoException.class)
                 .hasMessage("numeric_histogram bucket count must be greater than one");
-        getFinalBlock(singleStep);
+        getFinalBlock(function.getFinalType(), singleStep);
     }
 
     private static Map<Float, Float> extractSingleValue(Block block)

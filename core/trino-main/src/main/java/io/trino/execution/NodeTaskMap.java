@@ -14,12 +14,11 @@
 package io.trino.execution;
 
 import com.google.common.collect.Sets;
+import com.google.errorprone.annotations.ThreadSafe;
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.metadata.InternalNode;
 import io.trino.util.FinalizerService;
-
-import javax.annotation.concurrent.ThreadSafe;
-import javax.inject.Inject;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -97,16 +96,17 @@ public class NodeTaskMap
         private void addTask(RemoteTask task)
         {
             if (remoteTasks.add(task)) {
+                // Check if task state is already done before adding the listener
+                if (task.getTaskStatus().getState().isDone()) {
+                    remoteTasks.remove(task);
+                    return;
+                }
+
                 task.addStateChangeListener(taskStatus -> {
                     if (taskStatus.getState().isDone()) {
                         remoteTasks.remove(task);
                     }
                 });
-
-                // Check if task state is already done before adding the listener
-                if (task.getTaskStatus().getState().isDone()) {
-                    remoteTasks.remove(task);
-                }
             }
         }
 

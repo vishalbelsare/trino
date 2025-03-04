@@ -39,7 +39,7 @@ public class PassthroughQueryPageSource
         requireNonNull(table, "table is null");
 
         long start = System.nanoTime();
-        result = client.executeQuery(table.getIndex(), table.getQuery().get());
+        result = client.executeQuery(table.index(), table.query().get());
         readTimeNanos = System.nanoTime() - start;
     }
 
@@ -78,7 +78,7 @@ public class PassthroughQueryPageSource
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
         return 0;
     }

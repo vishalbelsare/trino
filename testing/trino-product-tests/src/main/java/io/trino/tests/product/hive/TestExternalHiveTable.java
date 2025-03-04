@@ -22,19 +22,19 @@ import io.trino.tempto.fulfillment.table.TableInstance;
 import io.trino.tempto.hadoop.hdfs.HdfsClient;
 import org.testng.annotations.Test;
 
+import static io.trino.plugin.hive.HiveMetadata.MODIFYING_NON_TRANSACTIONAL_TABLE_MESSAGE;
 import static io.trino.tempto.Requirements.compose;
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
 import static io.trino.tempto.assertions.QueryAssert.assertQueryFailure;
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
 import static io.trino.tempto.fulfillment.table.MutableTablesState.mutableTablesState;
 import static io.trino.tempto.fulfillment.table.TableRequirements.mutableTable;
 import static io.trino.tempto.fulfillment.table.hive.tpch.TpchTableDefinitions.NATION;
-import static io.trino.tempto.query.QueryExecutor.query;
 import static io.trino.tests.product.hive.HiveTableDefinitions.NATION_PARTITIONED_BY_BIGINT_REGIONKEY;
 import static io.trino.tests.product.hive.HiveTableDefinitions.NATION_PARTITIONED_BY_REGIONKEY_NUMBER_OF_LINES_PER_SPLIT;
 import static io.trino.tests.product.utils.QueryExecutors.onHive;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
 import static java.lang.String.format;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestExternalHiveTable
         extends ProductTest
@@ -63,7 +63,7 @@ public class TestExternalHiveTable
         insertNationPartition(nation, 1);
 
         onHive().executeQuery("ANALYZE TABLE " + EXTERNAL_TABLE_NAME + " PARTITION (p_regionkey) COMPUTE STATISTICS");
-        assertThat(query("SHOW STATS FOR " + EXTERNAL_TABLE_NAME)).containsOnly(
+        assertThat(onTrino().executeQuery("SHOW STATS FOR " + EXTERNAL_TABLE_NAME)).containsOnly(
                 row("p_nationkey", null, null, null, null, null, null),
                 row("p_name", null, null, null, null, null, null),
                 row("p_comment", null, null, null, null, null, null),
@@ -71,7 +71,8 @@ public class TestExternalHiveTable
                 row(null, null, null, null, 5.0, null, null));
 
         onHive().executeQuery("ANALYZE TABLE " + EXTERNAL_TABLE_NAME + " PARTITION (p_regionkey) COMPUTE STATISTICS FOR COLUMNS");
-        assertThat(query("SHOW STATS FOR " + EXTERNAL_TABLE_NAME)).containsOnly(
+        onTrino().executeQuery("CALL system.flush_metadata_cache()");
+        assertThat(onTrino().executeQuery("SHOW STATS FOR " + EXTERNAL_TABLE_NAME)).containsOnly(
                 row("p_nationkey", null, 5.0, 0.0, null, "1", "24"),
                 row("p_name", 38.0, 5.0, 0.0, null, null, null),
                 row("p_comment", 499.0, 5.0, 0.0, null, null, null),
@@ -88,7 +89,7 @@ public class TestExternalHiveTable
         insertNationPartition(nation, 1);
 
         // Running ANALYZE on an external table is allowed as long as the user has the privileges.
-        assertThat(query("ANALYZE hive.default." + EXTERNAL_TABLE_NAME)).containsExactlyInOrder(row(5));
+        assertThat(onTrino().executeQuery("ANALYZE hive.default." + EXTERNAL_TABLE_NAME)).containsExactlyInOrder(row(5));
     }
 
     @Test
@@ -125,7 +126,7 @@ public class TestExternalHiveTable
                 .hasRowsCount(3 * NATION_PARTITIONED_BY_REGIONKEY_NUMBER_OF_LINES_PER_SPLIT);
 
         assertQueryFailure(() -> onTrino().executeQuery("DELETE FROM hive.default." + EXTERNAL_TABLE_NAME + " WHERE p_name IS NOT NULL"))
-                .hasMessageContaining("Deletes must match whole partitions for non-transactional tables");
+                .hasMessageContaining(MODIFYING_NON_TRANSACTIONAL_TABLE_MESSAGE);
 
         onTrino().executeQuery("DELETE FROM hive.default." + EXTERNAL_TABLE_NAME + " WHERE p_regionkey = 1");
         assertThat(onTrino().executeQuery("SELECT * FROM " + EXTERNAL_TABLE_NAME))
@@ -141,13 +142,13 @@ public class TestExternalHiveTable
         String schema = "schema_without_location";
         String schemaLocation = "/tmp/" + schema;
         hdfsClient.createDirectory(schemaLocation);
-        query(format("CREATE SCHEMA %s.%s WITH (location='%s')", HIVE_CATALOG_WITH_EXTERNAL_WRITES, schema, schemaLocation));
+        onTrino().executeQuery(format("CREATE SCHEMA %s.%s WITH (location='%s')", HIVE_CATALOG_WITH_EXTERNAL_WRITES, schema, schemaLocation));
 
         hdfsClient.delete(schemaLocation);
 
         String table = "test_create_external";
         String tableLocation = "/tmp/" + table;
-        query(format("CREATE TABLE %s.%s.%s WITH (external_location = '%s') AS SELECT * FROM tpch.tiny.nation", HIVE_CATALOG_WITH_EXTERNAL_WRITES, schema, table, tableLocation));
+        onTrino().executeQuery(format("CREATE TABLE %s.%s.%s WITH (external_location = '%s') AS SELECT * FROM tpch.tiny.nation", HIVE_CATALOG_WITH_EXTERNAL_WRITES, schema, table, tableLocation));
     }
 
     private void insertNationPartition(TableInstance<?> nation, int partition)

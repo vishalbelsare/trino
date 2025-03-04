@@ -18,12 +18,20 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.ByteArrayBlock;
 import io.trino.spi.block.ByteArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.function.BlockIndex;
+import io.trino.spi.function.BlockPosition;
+import io.trino.spi.function.FlatFixed;
+import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
 import java.util.Optional;
+import java.util.stream.LongStream;
+import java.util.stream.Stream;
 
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
@@ -31,6 +39,7 @@ import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
+import static io.trino.spi.function.OperatorType.READ_VALUE;
 import static io.trino.spi.function.OperatorType.XX_HASH_64;
 import static io.trino.spi.type.TypeOperatorDeclaration.extractOperatorDeclaration;
 import static java.lang.String.format;
@@ -46,7 +55,7 @@ public final class TinyintType
 
     private TinyintType()
     {
-        super(new TypeSignature(StandardTypes.TINYINT), long.class);
+        super(new TypeSignature(StandardTypes.TINYINT), long.class, ByteArrayBlock.class);
     }
 
     @Override
@@ -56,7 +65,7 @@ public final class TinyintType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -68,12 +77,6 @@ public final class TinyintType
         return new ByteArrayBlockBuilder(
                 blockBuilderStatus,
                 Math.min(expectedEntries, maxBlockSizeInBytes / Byte.BYTES));
-    }
-
-    @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, Byte.BYTES);
     }
 
     @Override
@@ -107,7 +110,7 @@ public final class TinyintType
             return null;
         }
 
-        return block.getByte(position, 0);
+        return getByte(block, position);
     }
 
     @Override
@@ -117,24 +120,68 @@ public final class TinyintType
     }
 
     @Override
+    public Optional<Object> getPreviousValue(Object object)
+    {
+        long value = (long) object;
+        checkValueValid(value);
+        if (value == Byte.MIN_VALUE) {
+            return Optional.empty();
+        }
+        return Optional.of(value - 1);
+    }
+
+    @Override
+    public Optional<Object> getNextValue(Object object)
+    {
+        long value = (long) object;
+        checkValueValid(value);
+        if (value == Byte.MAX_VALUE) {
+            return Optional.empty();
+        }
+        return Optional.of(value + 1);
+    }
+
+    @Override
+    public Optional<Stream<?>> getDiscreteValues(Range range)
+    {
+        return Optional.of(LongStream.rangeClosed((long) range.getMin(), (long) range.getMax()).boxed());
+    }
+
+    @Override
     public void appendTo(Block block, int position, BlockBuilder blockBuilder)
     {
         if (block.isNull(position)) {
             blockBuilder.appendNull();
         }
         else {
-            blockBuilder.writeByte(block.getByte(position, 0)).closeEntry();
+            writeByte(blockBuilder, getByte(block, position));
         }
     }
 
     @Override
     public long getLong(Block block, int position)
     {
-        return (long) block.getByte(position, 0);
+        return getByte(block, position);
+    }
+
+    public byte getByte(Block block, int position)
+    {
+        return readByte((ByteArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
     }
 
     @Override
     public void writeLong(BlockBuilder blockBuilder, long value)
+    {
+        checkValueValid(value);
+        writeByte(blockBuilder, (byte) value);
+    }
+
+    public void writeByte(BlockBuilder blockBuilder, byte value)
+    {
+        ((ByteArrayBlockBuilder) blockBuilder).writeByte(value);
+    }
+
+    private static void checkValueValid(long value)
     {
         if (value > Byte.MAX_VALUE) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Value %d exceeds MAX_BYTE", value));
@@ -142,8 +189,12 @@ public final class TinyintType
         if (value < Byte.MIN_VALUE) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Value %d is less than MIN_BYTE", value));
         }
+    }
 
-        blockBuilder.writeByte((int) value).closeEntry();
+    @Override
+    public int getFlatFixedSize()
+    {
+        return Byte.BYTES;
     }
 
     @Override
@@ -156,6 +207,37 @@ public final class TinyintType
     public int hashCode()
     {
         return getClass().hashCode();
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static long read(@BlockPosition ByteArrayBlock block, @BlockIndex int position)
+    {
+        return readByte(block, position);
+    }
+
+    private static byte readByte(ByteArrayBlock block, int position)
+    {
+        return block.getByte(position);
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static long readFlat(
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+    {
+        return fixedSizeSlice[fixedSizeOffset];
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static void writeFlat(
+            long value,
+            byte[] fixedSizeSlice,
+            int fixedSizeOffset,
+            byte[] unusedVariableSizeSlice,
+            int unusedVariableSizeOffset)
+    {
+        fixedSizeSlice[fixedSizeOffset] = (byte) value;
     }
 
     @ScalarOperator(EQUAL)

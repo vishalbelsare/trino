@@ -14,6 +14,7 @@
 package io.trino.testing.tpch;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.plugin.base.MappedRecordSet;
 import io.trino.plugin.tpch.TpchColumnHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorIndex;
@@ -25,7 +26,6 @@ import io.trino.spi.connector.RecordSet;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
-import io.trino.split.MappedRecordSet;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -70,7 +70,7 @@ public class TpchIndexProvider
         List<Type> rawFixedTypes = new ArrayList<>(fixedValueColumns.size());
         for (ColumnHandle fixedValueColumn : fixedValueColumns) {
             rawFixedValues.add(fixedValues.get(fixedValueColumn).getValue());
-            rawFixedTypes.add(((TpchColumnHandle) fixedValueColumn).getType());
+            rawFixedTypes.add(((TpchColumnHandle) fixedValueColumn).type());
         }
 
         // Establish the schema after we append the fixed values to the lookup keys.
@@ -109,7 +109,7 @@ public class TpchIndexProvider
     {
         return columnHandles.stream()
                 .map(TpchColumnHandle.class::cast)
-                .map(TpchColumnHandle::getColumnName)
+                .map(TpchColumnHandle::columnName)
                 .collect(toList());
     }
 }

@@ -17,6 +17,8 @@ import io.airlift.bytecode.ClassDefinition;
 import io.airlift.bytecode.DynamicClassLoader;
 import io.airlift.bytecode.ParameterizedType;
 import io.airlift.log.Logger;
+import io.trino.spi.TrinoException;
+import org.objectweb.asm.MethodTooLargeException;
 
 import java.lang.invoke.MethodHandle;
 import java.time.Instant;
@@ -28,6 +30,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static io.airlift.bytecode.BytecodeUtils.toJavaIdentifierString;
 import static io.airlift.bytecode.ClassGenerator.classGenerator;
 import static io.airlift.bytecode.ParameterizedType.typeFromJavaClassName;
+import static io.trino.spi.StandardErrorCode.QUERY_EXCEEDED_COMPILER_LIMIT;
 import static java.time.ZoneOffset.UTC;
 
 public final class CompilerUtils
@@ -36,15 +39,33 @@ public final class CompilerUtils
 
     private static final AtomicLong CLASS_ID = new AtomicLong();
     private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
+    private static final String PACKAGE_PREFIX = "io.trino.$gen.";
+    // Maximum symbol table entry allowed by the JVM class file format
+    private static final int MAX_SYMBOL_TABLE_ENTRY_LENGTH = 65535;
+    // Leave enough of a buffer between the maximum generated class name length and the symbol table limit
+    // so that method handles and other symbols that embed the class name can be encoded without failing
+    private static final int MAX_CLASS_NAME_LENGTH = MAX_SYMBOL_TABLE_ENTRY_LENGTH - 8192;
 
     private CompilerUtils() {}
 
     public static ParameterizedType makeClassName(String baseName, Optional<String> suffix)
     {
-        String className = baseName
-                + "_" + suffix.orElseGet(() -> Instant.now().atZone(UTC).format(TIMESTAMP_FORMAT))
-                + "_" + CLASS_ID.incrementAndGet();
-        return typeFromJavaClassName("io.trino.$gen." + toJavaIdentifierString(className));
+        String classNameSuffix = suffix.orElseGet(() -> Instant.now().atZone(UTC).format(TIMESTAMP_FORMAT));
+        String classUniqueId = String.valueOf(CLASS_ID.incrementAndGet());
+
+        int addedNameLength = PACKAGE_PREFIX.length() +
+                2 + // underscores
+                classNameSuffix.length() +
+                classUniqueId.length();
+
+        // truncate the baseName to ensure that we don't exceed the bytecode limit on class names, while also ensuring
+        // the class suffix and unique ID are fully preserved to avoid conflicts with other generated class names
+        if (baseName.length() + addedNameLength > MAX_CLASS_NAME_LENGTH) {
+            baseName = baseName.substring(0, MAX_CLASS_NAME_LENGTH - addedNameLength);
+        }
+
+        String className = baseName + "_" + classNameSuffix + "_" + classUniqueId;
+        return typeFromJavaClassName(PACKAGE_PREFIX + toJavaIdentifierString(className));
     }
 
     public static ParameterizedType makeClassName(String baseName)
@@ -60,6 +81,11 @@ public final class CompilerUtils
     public static <T> Class<? extends T> defineClass(ClassDefinition classDefinition, Class<T> superType, DynamicClassLoader classLoader)
     {
         log.debug("Defining class: %s", classDefinition.getName());
-        return classGenerator(classLoader).defineClass(classDefinition, superType);
+        try {
+            return classGenerator(classLoader).defineClass(classDefinition, superType);
+        }
+        catch (MethodTooLargeException e) {
+            throw new TrinoException(QUERY_EXCEEDED_COMPILER_LIMIT, "Query exceeded maximum method size.", e);
+        }
     }
 }

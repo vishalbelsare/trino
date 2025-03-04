@@ -17,13 +17,14 @@ package io.trino.type.setdigest;
 import io.trino.array.ObjectBigArray;
 import io.trino.spi.function.AccumulatorStateFactory;
 import io.trino.spi.function.GroupedAccumulatorState;
-import org.openjdk.jol.info.ClassLayout;
+
+import static io.airlift.slice.SizeOf.instanceSize;
 
 public class SetDigestStateFactory
         implements AccumulatorStateFactory<SetDigestState>
 {
-    private static final int SIZE_OF_SINGLE = ClassLayout.parseClass(SingleSetDigestState.class).instanceSize();
-    private static final int SIZE_OF_GROUPED = ClassLayout.parseClass(GroupedSetDigestState.class).instanceSize();
+    private static final int SIZE_OF_SINGLE = instanceSize(SingleSetDigestState.class);
+    private static final int SIZE_OF_GROUPED = instanceSize(GroupedSetDigestState.class);
 
     @Override
     public SetDigestState createSingleState()
@@ -41,17 +42,17 @@ public class SetDigestStateFactory
             implements GroupedAccumulatorState, SetDigestState
     {
         private final ObjectBigArray<SetDigest> digests = new ObjectBigArray<>();
-        private long groupId;
+        private int groupId;
         private long size;
 
         @Override
-        public void setGroupId(long groupId)
+        public void setGroupId(int groupId)
         {
             this.groupId = groupId;
         }
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             digests.ensureCapacity(size);
         }
@@ -65,11 +66,11 @@ public class SetDigestStateFactory
         @Override
         public void setDigest(SetDigest value)
         {
-            if (getDigest() != null) {
-                size -= getDigest().estimatedInMemorySize();
-            }
+            SetDigest previous = digests.getAndSet(groupId, value);
             size += value.estimatedInMemorySize();
-            digests.set(groupId, value);
+            if (previous != null) {
+                size -= previous.estimatedInMemorySize();
+            }
         }
 
         @Override

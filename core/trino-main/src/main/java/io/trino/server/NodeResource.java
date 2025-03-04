@@ -14,12 +14,11 @@
 package io.trino.server;
 
 import com.google.common.collect.Maps;
+import com.google.inject.Inject;
 import io.trino.failuredetector.HeartbeatFailureDetector;
 import io.trino.server.security.ResourceSecurity;
-
-import javax.inject.Inject;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
 
 import java.util.Collection;
 
@@ -27,6 +26,7 @@ import static com.google.common.base.Predicates.in;
 import static io.trino.server.security.ResourceSecurity.AccessType.MANAGEMENT_READ;
 
 @Path("/v1/node")
+@ResourceSecurity(MANAGEMENT_READ)
 public class NodeResource
 {
     private final HeartbeatFailureDetector failureDetector;
@@ -37,14 +37,12 @@ public class NodeResource
         this.failureDetector = failureDetector;
     }
 
-    @ResourceSecurity(MANAGEMENT_READ)
     @GET
     public Collection<HeartbeatFailureDetector.Stats> getNodeStats()
     {
         return failureDetector.getStats().values();
     }
 
-    @ResourceSecurity(MANAGEMENT_READ)
     @GET
     @Path("failed")
     public Collection<HeartbeatFailureDetector.Stats> getFailed()

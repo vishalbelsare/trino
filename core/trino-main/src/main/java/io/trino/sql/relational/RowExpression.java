@@ -13,20 +13,32 @@
  */
 package io.trino.sql.relational;
 
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import io.trino.spi.type.Type;
 
-public abstract class RowExpression
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME)
+@JsonSubTypes({
+        @JsonSubTypes.Type(value = CallExpression.class, name = "call"),
+        @JsonSubTypes.Type(value = ConstantExpression.class, name = "constant"),
+        @JsonSubTypes.Type(value = InputReferenceExpression.class, name = "input"),
+        @JsonSubTypes.Type(value = LambdaDefinitionExpression.class, name = "lambda"),
+        @JsonSubTypes.Type(value = SpecialForm.class, name = "special"),
+        @JsonSubTypes.Type(value = VariableReferenceExpression.class, name = "variable"),
+})
+public sealed interface RowExpression
+        permits CallExpression, ConstantExpression, InputReferenceExpression, LambdaDefinitionExpression, SpecialForm, VariableReferenceExpression
 {
-    public abstract Type getType();
+    Type type();
 
     @Override
-    public abstract boolean equals(Object other);
+    boolean equals(Object other);
 
     @Override
-    public abstract int hashCode();
+    int hashCode();
 
     @Override
-    public abstract String toString();
+    String toString();
 
-    public abstract <R, C> R accept(RowExpressionVisitor<R, C> visitor, C context);
+    <R, C> R accept(RowExpressionVisitor<R, C> visitor, C context);
 }

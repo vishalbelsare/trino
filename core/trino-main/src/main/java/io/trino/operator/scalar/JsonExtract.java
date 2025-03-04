@@ -14,7 +14,6 @@
 package io.trino.operator.scalar;
 
 import com.fasterxml.jackson.core.JsonFactory;
-import com.fasterxml.jackson.core.JsonFactoryBuilder;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonParser;
@@ -36,6 +35,7 @@ import static com.fasterxml.jackson.core.JsonToken.START_ARRAY;
 import static com.fasterxml.jackson.core.JsonToken.START_OBJECT;
 import static com.fasterxml.jackson.core.JsonToken.VALUE_NULL;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.base.util.JsonUtils.jsonFactoryBuilder;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.util.JsonUtil.createJsonGenerator;
 import static io.trino.util.JsonUtil.createJsonParser;
@@ -43,14 +43,14 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Extracts values from JSON
- * <p/>
+ * <p>
  * Supports the following JSON path primitives:
  * <pre>
  *    $ : Root object
  *    . or [] : Child operator
  *   [] : Subscript operator for array
  * </pre>
- * <p/>
+ * <p>
  * Supported JSON Path Examples:
  * <pre>
  *    { "store": {
@@ -76,7 +76,7 @@ import static java.util.Objects.requireNonNull;
  *      }
  *    }
  * </pre>
- * <p/>
+ * <p>
  * With only scalar values using dot-notation of path:
  * <pre>
  *    $.store.book[0].author => Nigel Rees
@@ -85,7 +85,7 @@ import static java.util.Objects.requireNonNull;
  *    $.store.book[1].last_owner => NULL (json null becomes java null)
  *    $.store.book[0].contributors[0][1] => Levine
  * </pre>
- * <p/>
+ * <p>
  * With json values using dot-notation of path:
  * <pre>
  *    $.store.book[0].author => "Nigel Rees"
@@ -103,7 +103,7 @@ import static java.util.Objects.requireNonNull;
  *    $["store"]["book"][1]["last_owner"] => NULL (json null becomes java null)
  *    $["store"]["book"][0]["contributors"][0][1] => Levine
  * </pre>
- * <p/>
+ * <p>
  * With json values using bracket-notation of path:
  * <pre>
  *    $["store"]["book"][0]["author"] => "Nigel Rees"
@@ -118,7 +118,7 @@ public final class JsonExtract
 {
     private static final int ESTIMATED_JSON_OUTPUT_SIZE = 512;
 
-    private static final JsonFactory JSON_FACTORY = new JsonFactoryBuilder()
+    private static final JsonFactory JSON_FACTORY = jsonFactoryBuilder()
             .disable(CANONICALIZE_FIELD_NAMES)
             .build();
 
@@ -127,15 +127,23 @@ public final class JsonExtract
     public static <T> T extract(Slice jsonInput, JsonExtractor<T> jsonExtractor)
     {
         requireNonNull(jsonInput, "jsonInput is null");
-        try {
-            try (JsonParser jsonParser = createJsonParser(JSON_FACTORY, jsonInput)) {
-                // Initialize by advancing to first token and make sure it exists
-                if (jsonParser.nextToken() == null) {
-                    return null;
-                }
+        try (JsonParser jsonParser = createJsonParser(JSON_FACTORY, jsonInput)) {
+            return extract(jsonParser, jsonExtractor);
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
 
-                return jsonExtractor.extract(jsonParser);
+    public static <T> T extract(JsonParser jsonParser, JsonExtractor<T> jsonExtractor)
+    {
+        requireNonNull(jsonParser, "jsonParser is null");
+        try {
+            // Initialize by advancing to first token and make sure it exists
+            if (jsonParser.nextToken() == null) {
+                return null;
             }
+            return jsonExtractor.extract(jsonParser);
         }
         catch (JsonParseException e) {
             // Return null if we failed to parse something
@@ -166,7 +174,7 @@ public final class JsonExtract
     {
         /**
          * Executes the extraction on the existing content of the JsonParser and outputs the match.
-         * <p/>
+         * <p>
          * Notes:
          * <ul>
          * <li>JsonParser must be on the FIRST token of the value to be processed when extract is called</li>
@@ -355,7 +363,7 @@ public final class JsonExtract
         try {
             index = Integer.parseInt(fieldName);
         }
-        catch (NumberFormatException ignored) {
+        catch (NumberFormatException _) {
         }
         return index;
     }

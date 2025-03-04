@@ -18,11 +18,9 @@ import com.google.common.collect.Iterators;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.trino.RowPagesBuilder;
-import io.trino.execution.Lifespan;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.operator.Driver;
 import io.trino.operator.DriverContext;
-import io.trino.operator.OperatorFactories;
 import io.trino.operator.OperatorFactory;
 import io.trino.operator.PagesIndex;
 import io.trino.operator.PipelineContext;
@@ -43,7 +41,6 @@ import io.trino.spiller.SingleStreamSpillerFactory;
 import io.trino.sql.gen.JoinFilterFunctionCompiler;
 import io.trino.sql.planner.NodePartitioningManager;
 import io.trino.sql.planner.plan.PlanNodeId;
-import io.trino.type.BlockTypeOperators;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -64,7 +61,8 @@ import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.trino.operator.HashArraySizeSupplier.incrementalLoadFactorHashArraySizeSupplier;
-import static io.trino.operator.PipelineExecutionStrategy.UNGROUPED_EXECUTION;
+import static io.trino.operator.JoinOperatorType.innerJoin;
+import static io.trino.operator.OperatorFactories.spillingJoin;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
 import static java.util.Objects.requireNonNull;
@@ -72,42 +70,36 @@ import static java.util.Objects.requireNonNull;
 public final class JoinTestUtils
 {
     private static final int PARTITION_COUNT = 4;
-    private static final BlockTypeOperators TYPE_OPERATOR_FACTORY = new BlockTypeOperators(new TypeOperators());
+    private static final TypeOperators TYPE_OPERATORS = new TypeOperators();
 
     private JoinTestUtils() {}
 
     public static OperatorFactory innerJoinOperatorFactory(
-            OperatorFactories operatorFactories,
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
-            PartitioningSpillerFactory partitioningSpillerFactory,
-            boolean hasFilter)
+            PartitioningSpillerFactory partitioningSpillerFactory)
     {
-        return innerJoinOperatorFactory(operatorFactories, lookupSourceFactoryManager, probePages, partitioningSpillerFactory, false, hasFilter);
+        return innerJoinOperatorFactory(lookupSourceFactoryManager, probePages, partitioningSpillerFactory, false);
     }
 
     public static OperatorFactory innerJoinOperatorFactory(
-            OperatorFactories operatorFactories,
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
             PartitioningSpillerFactory partitioningSpillerFactory,
-            boolean outputSingleMatch,
-            boolean hasFilter)
+            boolean outputSingleMatch)
     {
-        return operatorFactories.innerJoin(
+        return spillingJoin(
+                innerJoin(outputSingleMatch, false),
                 0,
                 new PlanNodeId("test"),
                 lookupSourceFactoryManager,
-                outputSingleMatch,
-                false,
-                hasFilter,
                 probePages.getTypes(),
                 probePages.getHashChannels().orElseThrow(),
                 getHashChannelAsInt(probePages),
                 Optional.empty(),
                 OptionalInt.of(1),
                 partitioningSpillerFactory,
-                TYPE_OPERATOR_FACTORY);
+                TYPE_OPERATORS);
     }
 
     public static void instantiateBuildDrivers(BuildSideSetup buildSideSetup, TaskContext taskContext)
@@ -143,36 +135,40 @@ public final class JoinTestUtils
 
         int partitionCount = parallelBuild ? PARTITION_COUNT : 1;
         List<Integer> hashChannels = buildPages.getHashChannels().orElseThrow();
-        LocalExchange.LocalExchangeFactory localExchangeFactory = new LocalExchange.LocalExchangeFactory(
+        List<Type> types = buildPages.getTypes();
+        List<Type> hashChannelTypes = hashChannels.stream()
+                .map(types::get)
+                .collect(toImmutableList());
+        LocalExchange localExchange = new LocalExchange(
                 nodePartitioningManager,
                 taskContext.getSession(),
-                FIXED_HASH_DISTRIBUTION,
                 partitionCount,
-                buildPages.getTypes(),
+                FIXED_HASH_DISTRIBUTION,
                 hashChannels,
+                hashChannelTypes,
                 buildPages.getHashChannel(),
-                UNGROUPED_EXECUTION,
                 DataSize.of(32, DataSize.Unit.MEGABYTE),
-                TYPE_OPERATOR_FACTORY);
-        LocalExchange.LocalExchangeSinkFactoryId localExchangeSinkFactoryId = localExchangeFactory.newSinkFactoryId();
-        localExchangeFactory.noMoreSinkFactories();
+                TYPE_OPERATORS,
+                DataSize.of(32, DataSize.Unit.MEGABYTE),
+                () -> 0L);
 
         // collect input data into the partitioned exchange
         DriverContext collectDriverContext = taskContext.addPipelineContext(0, true, true, false).addDriverContext();
         ValuesOperator.ValuesOperatorFactory valuesOperatorFactory = new ValuesOperator.ValuesOperatorFactory(0, new PlanNodeId("values"), buildPages.build());
-        LocalExchangeSinkOperator.LocalExchangeSinkOperatorFactory sinkOperatorFactory = new LocalExchangeSinkOperator.LocalExchangeSinkOperatorFactory(localExchangeFactory, 1, new PlanNodeId("sink"), localExchangeSinkFactoryId, Function.identity());
+        LocalExchangeSinkOperator.LocalExchangeSinkOperatorFactory sinkOperatorFactory = new LocalExchangeSinkOperator.LocalExchangeSinkOperatorFactory(localExchange.createSinkFactory(), 1, new PlanNodeId("sink"), Function.identity());
         Driver sourceDriver = Driver.createDriver(collectDriverContext,
                 valuesOperatorFactory.createOperator(collectDriverContext),
                 sinkOperatorFactory.createOperator(collectDriverContext));
         valuesOperatorFactory.noMoreOperators();
         sinkOperatorFactory.noMoreOperators();
+        sinkOperatorFactory.localPlannerComplete();
 
         while (!sourceDriver.isFinished()) {
-            sourceDriver.process();
+            sourceDriver.processUntilBlocked();
         }
 
         // build side operator factories
-        LocalExchangeSourceOperatorFactory sourceOperatorFactory = new LocalExchangeSourceOperatorFactory(0, new PlanNodeId("source"), localExchangeFactory);
+        LocalExchangeSourceOperatorFactory sourceOperatorFactory = new LocalExchangeSourceOperatorFactory(0, new PlanNodeId("source"), localExchange);
         JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager = JoinBridgeManager.lookupAllAtOnce(new PartitionedLookupSourceFactory(
                 buildPages.getTypes(),
                 rangeList(buildPages.getTypes().size()).stream()
@@ -183,7 +179,7 @@ public final class JoinTestUtils
                         .collect(toImmutableList()),
                 partitionCount,
                 false,
-                TYPE_OPERATOR_FACTORY));
+                TYPE_OPERATORS));
 
         HashBuilderOperatorFactory buildOperatorFactory = new HashBuilderOperatorFactory(
                 1,
@@ -208,13 +204,13 @@ public final class JoinTestUtils
     {
         requireNonNull(buildSideSetup, "buildSideSetup is null");
 
-        LookupSourceFactory lookupSourceFactory = buildSideSetup.getLookupSourceFactoryManager().getJoinBridge(Lifespan.taskWide());
+        LookupSourceFactory lookupSourceFactory = buildSideSetup.getLookupSourceFactoryManager().getJoinBridge();
         Future<LookupSourceProvider> lookupSourceProvider = lookupSourceFactory.createLookupSourceProvider();
         List<Driver> buildDrivers = buildSideSetup.getBuildDrivers();
 
         while (!lookupSourceProvider.isDone()) {
             for (Driver buildDriver : buildDrivers) {
-                buildDriver.process();
+                buildDriver.processForNumberOfIterations(1);
             }
         }
         getFutureValue(lookupSourceProvider).close();
@@ -232,7 +228,7 @@ public final class JoinTestUtils
         executor.execute(() -> {
             if (!driver.isFinished()) {
                 try {
-                    driver.process();
+                    driver.processUntilBlocked();
                 }
                 catch (TrinoException e) {
                     driver.getDriverContext().failed(e);
@@ -319,14 +315,16 @@ public final class JoinTestUtils
         private volatile boolean failSpill;
         private volatile boolean failUnspill;
 
-        public void failSpill()
+        public DummySpillerFactory failSpill()
         {
             failSpill = true;
+            return this;
         }
 
-        public void failUnspill()
+        public DummySpillerFactory failUnspill()
         {
             failUnspill = true;
+            return this;
         }
 
         @Override

@@ -16,11 +16,11 @@ package io.trino.operator.aggregation;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slices;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.AggregationMetrics;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.Type;
-import io.trino.sql.tree.QualifiedName;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -35,7 +35,7 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.options.WarmupMode;
 
-import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
@@ -45,6 +45,7 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static org.openjdk.jmh.annotations.Level.Invocation;
 
 @SuppressWarnings("MethodMayBeStatic")
@@ -62,7 +63,7 @@ public class BenchmarkArrayAggregation
     @OperationsPerInvocation(ARRAY_SIZE)
     public void arrayAggregation(BenchmarkData data)
     {
-        data.getAccumulator().addInput(data.getPage());
+        data.getAggregator().processPage(data.getPage());
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -73,7 +74,7 @@ public class BenchmarkArrayAggregation
         private String type = "BIGINT";
 
         private Page page;
-        private Accumulator accumulator;
+        private Aggregator aggregator;
 
         @Setup(Invocation)
         public void setup()
@@ -96,8 +97,8 @@ public class BenchmarkArrayAggregation
                 default:
                     throw new UnsupportedOperationException();
             }
-            TestingAggregationFunction function = new TestingFunctionResolution().getAggregateFunction(QualifiedName.of("array_agg"), fromTypes(elementType));
-            accumulator = function.bind(ImmutableList.of(0), Optional.empty()).createAccumulator();
+            TestingAggregationFunction function = new TestingFunctionResolution().getAggregateFunction("array_agg", fromTypes(elementType));
+            aggregator = function.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty()).createAggregator(new AggregationMetrics());
 
             block = createChannel(ARRAY_SIZE, elementType);
             page = new Page(block);
@@ -127,9 +128,9 @@ public class BenchmarkArrayAggregation
             return blockBuilder.build();
         }
 
-        public Accumulator getAccumulator()
+        public Aggregator getAggregator()
         {
-            return accumulator;
+            return aggregator;
         }
 
         public Page getPage()

@@ -16,7 +16,7 @@ package io.trino.orc.metadata.statistics;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -27,11 +27,8 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.orc.metadata.statistics.AbstractStatisticsBuilderTest.StatisticsType.STRING;
 import static io.trino.orc.metadata.statistics.ColumnStatistics.mergeColumnStatistics;
 import static io.trino.orc.metadata.statistics.StringStatistics.STRING_VALUE_BYTES_OVERHEAD;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNotNull;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestStringStatisticsBuilder
         extends AbstractStatisticsBuilderTest<StringStatisticsBuilder, Slice>
@@ -164,7 +161,7 @@ public class TestStringStatisticsBuilder
         // max merged to null
         List<ColumnStatistics> statisticsList = new ArrayList<>();
 
-        StringStatisticsBuilder statisticsBuilder = new StringStatisticsBuilder(7, new NoOpBloomFilterBuilder());
+        StringStatisticsBuilder statisticsBuilder = new StringStatisticsBuilder(7, new NoOpBloomFilterBuilder(), false);
         statisticsList.add(statisticsBuilder.buildColumnStatistics());
         assertMergedStringStatistics(statisticsList, 0, 0);
 
@@ -191,7 +188,7 @@ public class TestStringStatisticsBuilder
         // min merged to null
         statisticsList = new ArrayList<>();
 
-        statisticsBuilder = new StringStatisticsBuilder(7, new NoOpBloomFilterBuilder());
+        statisticsBuilder = new StringStatisticsBuilder(7, new NoOpBloomFilterBuilder(), false);
         statisticsList.add(statisticsBuilder.buildColumnStatistics());
         assertMergedStringStatistics(statisticsList, 0, 0);
 
@@ -218,7 +215,7 @@ public class TestStringStatisticsBuilder
         // min and max both merged to null
         statisticsList = new ArrayList<>();
 
-        statisticsBuilder = new StringStatisticsBuilder(7, new NoOpBloomFilterBuilder());
+        statisticsBuilder = new StringStatisticsBuilder(7, new NoOpBloomFilterBuilder(), false);
         statisticsBuilder.addValue(MEDIUM_BOTTOM_VALUE);
         statisticsList.add(statisticsBuilder.buildColumnStatistics());
         assertMinMax(mergeColumnStatistics(statisticsList).getStringStatistics(), MEDIUM_BOTTOM_VALUE, MEDIUM_BOTTOM_VALUE);
@@ -245,8 +242,8 @@ public class TestStringStatisticsBuilder
         Slice stats = statisticsBuilder.buildColumnStatistics().getStringStatistics().getMax();
 
         // assert we only spend 1 byte for stats
-        assertNotNull(stats);
-        assertEquals(stats.getRetainedSize(), Slices.wrappedBuffer(new byte[1]).getRetainedSize());
+        assertThat(stats).isNotNull();
+        assertThat(stats.getRetainedSize()).isEqualTo(Slices.wrappedBuffer(new byte[1]).getRetainedSize());
     }
 
     @Test
@@ -270,7 +267,7 @@ public class TestStringStatisticsBuilder
     private static void assertMinMaxValuesWithLimit(Slice expectedMin, Slice expectedMax, List<Slice> values, int limit)
     {
         checkArgument(values != null && !values.isEmpty());
-        StringStatisticsBuilder builder = new StringStatisticsBuilder(limit, new NoOpBloomFilterBuilder());
+        StringStatisticsBuilder builder = new StringStatisticsBuilder(limit, new NoOpBloomFilterBuilder(), false);
         for (Slice value : values) {
             builder.addValue(value);
         }
@@ -280,13 +277,13 @@ public class TestStringStatisticsBuilder
     private static void assertMinMax(StringStatistics actualStringStatistics, Slice expectedMin, Slice expectedMax)
     {
         if (expectedMax == null && expectedMin == null) {
-            assertNull(actualStringStatistics);
+            assertThat(actualStringStatistics).isNull();
             return;
         }
 
-        assertNotNull(actualStringStatistics);
-        assertEquals(actualStringStatistics.getMin(), expectedMin);
-        assertEquals(actualStringStatistics.getMax(), expectedMax);
+        assertThat(actualStringStatistics).isNotNull();
+        assertThat(actualStringStatistics.getMin()).isEqualTo(expectedMin);
+        assertThat(actualStringStatistics.getMax()).isEqualTo(expectedMax);
     }
 
     private static ColumnStatistics stringColumnStatistics(Slice minimum, Slice maximum)
@@ -294,6 +291,7 @@ public class TestStringStatisticsBuilder
         return new ColumnStatistics(
                 100L,
                 100,
+                null,
                 null,
                 null,
                 null,
@@ -308,12 +306,12 @@ public class TestStringStatisticsBuilder
     private void assertStringStatistics(ColumnStatistics columnStatistics, int expectedNumberOfValues, long expectedSum)
     {
         if (expectedNumberOfValues > 0) {
-            assertEquals(columnStatistics.getNumberOfValues(), expectedNumberOfValues);
-            assertEquals(columnStatistics.getStringStatistics().getSum(), expectedSum);
+            assertThat(columnStatistics.getNumberOfValues()).isEqualTo(expectedNumberOfValues);
+            assertThat(columnStatistics.getStringStatistics().getSum()).isEqualTo(expectedSum);
         }
         else {
-            assertNull(columnStatistics.getStringStatistics());
-            assertEquals(columnStatistics.getNumberOfValues(), 0);
+            assertThat(columnStatistics.getStringStatistics()).isNull();
+            assertThat(columnStatistics.getNumberOfValues()).isEqualTo(0);
         }
     }
 
@@ -325,10 +323,66 @@ public class TestStringStatisticsBuilder
         statisticsBuilder.addValue(MEDIUM_BOTTOM_VALUE);
         statisticsBuilder.addValue(MEDIUM_BOTTOM_VALUE);
         BloomFilter bloomFilter = statisticsBuilder.buildColumnStatistics().getBloomFilter();
-        assertNotNull(bloomFilter);
-        assertTrue(bloomFilter.testSlice(LOW_BOTTOM_VALUE));
-        assertTrue(bloomFilter.testSlice(MEDIUM_BOTTOM_VALUE));
-        assertTrue(bloomFilter.testSlice(MEDIUM_BOTTOM_VALUE));
-        assertFalse(bloomFilter.testSlice(LOW_TOP_VALUE));
+        assertThat(bloomFilter).isNotNull();
+        assertThat(bloomFilter.testSlice(LOW_BOTTOM_VALUE)).isTrue();
+        assertThat(bloomFilter.testSlice(MEDIUM_BOTTOM_VALUE)).isTrue();
+        assertThat(bloomFilter.testSlice(MEDIUM_BOTTOM_VALUE)).isTrue();
+        assertThat(bloomFilter.testSlice(LOW_TOP_VALUE)).isFalse();
+    }
+
+    @Test
+    public void testComputeMin()
+    {
+        assertThat(truncateMin("simple/case", 6)).containsExactly("simple".getBytes(UTF_8));
+        assertThat(truncateMin("simple/ƒ", 8)).containsExactly("simple/".getBytes(UTF_8));
+        assertThat(truncateMin("simple/語", 9)).containsExactly("simple/".getBytes(UTF_8));
+        assertThat(truncateMin("simple/語", 8)).containsExactly("simple/".getBytes(UTF_8));
+        assertThat(truncateMin("simple/\uD80C\uDE02", 10)).containsExactly("simple/".getBytes(UTF_8));
+        assertThat(truncateMin("simple/\uD80C\uDE02", 9)).containsExactly("simple/".getBytes(UTF_8));
+        assertThat(truncateMin("simple/\uD80C\uDE02", 8)).containsExactly("simple/".getBytes(UTF_8));
+        assertThat(truncateMin("\uDBFF\uDFFF", 3)).containsExactly("".getBytes(UTF_8));
+    }
+
+    @Test
+    public void testComputeMax()
+    {
+        assertThat(truncateMax("simple/case", 6)).containsExactly("simplf".getBytes(UTF_8));
+        assertThat(truncateMax("simple/ƒ", 8)).containsExactly("simple0".getBytes(UTF_8));
+        assertThat(truncateMax("simple/語", 9)).containsExactly("simple0".getBytes(UTF_8));
+        assertThat(truncateMax("simple/語", 8)).containsExactly("simple0".getBytes(UTF_8));
+        assertThat(truncateMax("simple/\uD80C\uDE02", 10)).containsExactly("simple0".getBytes(UTF_8));
+        assertThat(truncateMax("simple/\uD80C\uDE02", 9)).containsExactly("simple0".getBytes(UTF_8));
+        assertThat(truncateMax("simple/\uD80C\uDE02", 8)).containsExactly("simple0".getBytes(UTF_8));
+        assertThat(truncateMax("simple/ƒƒ", 10)).containsExactly("simple/Ɠ".getBytes(UTF_8));
+        assertThat(truncateMax("\uDBFF\uDFFF", 3)).containsExactly("".getBytes(UTF_8));
+    }
+
+    @Test
+    public void testComputeMaxForMaxUtf8Chars()
+    {
+        assertThat(truncateMax("\uDBFF\uDFFF\uDBFF\uDFFF\uDBFF\uDFFF", 11)).isEqualTo(new byte[0]);
+    }
+
+    @Test
+    public void testComputeMaxSkipsMaxUtf8Chars()
+    {
+        assertThat(truncateMax("a\uDBFF\uDFFF\uDBFF\uDFFF\uDBFF\uDFFF", 12)).containsExactly("b".getBytes(UTF_8));
+    }
+
+    @Test
+    public void testComputeMixMaxReturnsNullForMaxLengthEquals0()
+    {
+        assertThat(StringStatisticsBuilder.StringCompactor.truncateMin(Slices.wrappedBuffer("simple/test".getBytes(UTF_8)), 0)).isEqualTo(EMPTY_SLICE);
+        assertThat(truncateMax("simple/test", 0)).isEqualTo(new byte[0]);
+    }
+
+    private static byte[] truncateMin(String input, int maxLength)
+    {
+        return StringStatisticsBuilder.StringCompactor.truncateMin(Slices.wrappedBuffer(input.getBytes(UTF_8)), maxLength).getBytes();
+    }
+
+    private static byte[] truncateMax(String input, int maxLength)
+    {
+        return StringStatisticsBuilder.StringCompactor.truncateMax(Slices.wrappedBuffer(input.getBytes(UTF_8)), maxLength).getBytes();
     }
 }

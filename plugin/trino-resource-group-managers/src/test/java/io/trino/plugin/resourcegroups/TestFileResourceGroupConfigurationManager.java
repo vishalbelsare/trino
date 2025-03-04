@@ -23,7 +23,7 @@ import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.spi.resourcegroups.SelectionContext;
 import io.trino.spi.resourcegroups.SelectionCriteria;
 import io.trino.spi.session.ResourceEstimates;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -31,7 +31,6 @@ import java.util.regex.Pattern;
 
 import static com.google.common.io.Resources.getResource;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
-import static io.trino.memory.LocalMemoryManager.GENERAL_POOL;
 import static io.trino.plugin.resourcegroups.TestingResourceGroups.groupIdTemplate;
 import static io.trino.plugin.resourcegroups.TestingResourceGroups.managerSpec;
 import static io.trino.plugin.resourcegroups.TestingResourceGroups.resourceGroupSpec;
@@ -40,10 +39,6 @@ import static io.trino.spi.resourcegroups.SchedulingPolicy.WEIGHTED;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
 
 public class TestFileResourceGroupConfigurationManager
 {
@@ -86,7 +81,7 @@ public class TestFileResourceGroupConfigurationManager
                 ImmutableList.of(selectorSpec(groupIdTemplate("group"))
                         .userGroups("first matching", "second matching")));
 
-        FileResourceGroupConfigurationManager groupManager = new FileResourceGroupConfigurationManager((poolId, listener) -> {}, managerSpec);
+        FileResourceGroupConfigurationManager groupManager = new FileResourceGroupConfigurationManager(listener -> {}, managerSpec);
 
         assertThat(groupManager.match(userGroupsSelectionCriteria("not matching"))).isEmpty();
         assertThat(groupManager.match(userGroupsSelectionCriteria("first matching")))
@@ -102,7 +97,7 @@ public class TestFileResourceGroupConfigurationManager
                 ImmutableList.of(selectorSpec(groupIdTemplate("group"))
                         .users("First matching user", "Second matching user")));
 
-        FileResourceGroupConfigurationManager groupManager = new FileResourceGroupConfigurationManager((poolId, listener) -> {}, managerSpec);
+        FileResourceGroupConfigurationManager groupManager = new FileResourceGroupConfigurationManager(listener -> {}, managerSpec);
 
         assertThat(groupManager.match(userSelectionCriteria("Not matching user"))).isEmpty();
         assertThat(groupManager.match(userSelectionCriteria("First matching user")))
@@ -119,7 +114,7 @@ public class TestFileResourceGroupConfigurationManager
                         .userGroups("Matching group")
                         .users("Matching user")));
 
-        FileResourceGroupConfigurationManager groupManager = new FileResourceGroupConfigurationManager((poolId, listener) -> {}, managerSpec);
+        FileResourceGroupConfigurationManager groupManager = new FileResourceGroupConfigurationManager(listener -> {}, managerSpec);
 
         assertThat(groupManager.match(userAndUserGroupsSelectionCriteria("Matching user", "Not matching group"))).isEmpty();
         assertThat(groupManager.match(userAndUserGroupsSelectionCriteria("Not matching user", "Matching group"))).isEmpty();
@@ -147,25 +142,25 @@ public class TestFileResourceGroupConfigurationManager
         ResourceGroupId globalId = new ResourceGroupId("global");
         ResourceGroup global = new TestingResourceGroup(globalId);
         manager.configure(global, new SelectionContext<>(globalId, new ResourceGroupIdTemplate("global")));
-        assertEquals(global.getSoftMemoryLimitBytes(), DataSize.of(1, MEGABYTE).toBytes());
-        assertEquals(global.getSoftCpuLimit(), Duration.ofHours(1));
-        assertEquals(global.getHardCpuLimit(), Duration.ofDays(1));
-        assertEquals(global.getCpuQuotaGenerationMillisPerSecond(), 1000 * 24);
-        assertEquals(global.getMaxQueuedQueries(), 1000);
-        assertEquals(global.getHardConcurrencyLimit(), 100);
-        assertEquals(global.getSchedulingPolicy(), WEIGHTED);
-        assertEquals(global.getSchedulingWeight(), 0);
-        assertTrue(global.getJmxExport());
+        assertThat(global.getSoftMemoryLimitBytes()).isEqualTo(DataSize.of(1, MEGABYTE).toBytes());
+        assertThat(global.getSoftCpuLimit()).isEqualTo(Duration.ofHours(1));
+        assertThat(global.getHardCpuLimit()).isEqualTo(Duration.ofDays(1));
+        assertThat(global.getCpuQuotaGenerationMillisPerSecond()).isEqualTo(1000 * 24);
+        assertThat(global.getMaxQueuedQueries()).isEqualTo(1000);
+        assertThat(global.getHardConcurrencyLimit()).isEqualTo(100);
+        assertThat(global.getSchedulingPolicy()).isEqualTo(WEIGHTED);
+        assertThat(global.getSchedulingWeight()).isEqualTo(0);
+        assertThat(global.getJmxExport()).isTrue();
 
         ResourceGroupId subId = new ResourceGroupId(globalId, "sub");
         ResourceGroup sub = new TestingResourceGroup(subId);
         manager.configure(sub, new SelectionContext<>(subId, new ResourceGroupIdTemplate("global.sub")));
-        assertEquals(sub.getSoftMemoryLimitBytes(), DataSize.of(2, MEGABYTE).toBytes());
-        assertEquals(sub.getHardConcurrencyLimit(), 3);
-        assertEquals(sub.getMaxQueuedQueries(), 4);
-        assertNull(sub.getSchedulingPolicy());
-        assertEquals(sub.getSchedulingWeight(), 5);
-        assertFalse(sub.getJmxExport());
+        assertThat(sub.getSoftMemoryLimitBytes()).isEqualTo(DataSize.of(2, MEGABYTE).toBytes());
+        assertThat(sub.getHardConcurrencyLimit()).isEqualTo(3);
+        assertThat(sub.getMaxQueuedQueries()).isEqualTo(4);
+        assertThat(sub.getSchedulingPolicy()).isNull();
+        assertThat(sub.getSchedulingWeight()).isEqualTo(5);
+        assertThat(sub.getJmxExport()).isFalse();
     }
 
     @Test
@@ -174,28 +169,24 @@ public class TestFileResourceGroupConfigurationManager
         FileResourceGroupConfigurationManager manager = parse("resource_groups_config_extract_variable.json");
 
         SelectionContext<ResourceGroupIdTemplate> selectionContext = match(manager, userAndSourceSelectionCriteria("someuser@presto.io", "scheduler.us_east.12"));
-        assertEquals(selectionContext.getResourceGroupId().toString(), "global.presto:us_east:12");
+        assertThat(selectionContext.getResourceGroupId().toString()).isEqualTo("global.presto:us_east:12");
         TestingResourceGroup resourceGroup = new TestingResourceGroup(selectionContext.getResourceGroupId());
         manager.configure(resourceGroup, selectionContext);
-        assertEquals(resourceGroup.getHardConcurrencyLimit(), 3);
+        assertThat(resourceGroup.getHardConcurrencyLimit()).isEqualTo(3);
 
         selectionContext = match(manager, userAndSourceSelectionCriteria("nobody", "rg-abcdefghijkl"));
-        assertEquals(selectionContext.getResourceGroupId().toString(), "global.abcdefghijkl");
+        assertThat(selectionContext.getResourceGroupId().toString()).isEqualTo("global.abcdefghijkl");
         resourceGroup = new TestingResourceGroup(selectionContext.getResourceGroupId());
         manager.configure(resourceGroup, selectionContext);
-        assertEquals(resourceGroup.getHardConcurrencyLimit(), 115);
+        assertThat(resourceGroup.getHardConcurrencyLimit()).isEqualTo(115);
     }
 
     @Test
     public void testDocsExample()
     {
-        long generalPoolSize = 31415926535900L; // arbitrary uneven value for testing
+        long memoryPoolSize = 31415926535900L; // arbitrary uneven value for testing
         FileResourceGroupConfigurationManager manager = new FileResourceGroupConfigurationManager(
-                (poolId, listener) -> {
-                    if (poolId.equals(GENERAL_POOL)) {
-                        listener.accept(new MemoryPoolInfo(generalPoolSize, 0, 0, ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of()));
-                    }
-                },
+                (listener) -> listener.accept(new MemoryPoolInfo(memoryPoolSize, 0, 0, ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of())),
                 new FileResourceGroupConfig()
                         // TODO: figure out a better way to validate documentation
                         .setConfigFile("../../docs/src/main/sphinx/admin/resource-groups-example.json"));
@@ -208,12 +199,12 @@ public class TestFileResourceGroupConfigurationManager
                 ImmutableSet.of("hipri"),
                 EMPTY_RESOURCE_ESTIMATES,
                 Optional.of("select")));
-        assertEquals(selectionContext.getResourceGroupId().toString(), "global.adhoc.bi-powerfulbi.Alice");
+        assertThat(selectionContext.getResourceGroupId().toString()).isEqualTo("global.adhoc.bi-powerfulbi.Alice");
         TestingResourceGroup resourceGroup = new TestingResourceGroup(selectionContext.getResourceGroupId());
         manager.configure(resourceGroup, selectionContext);
-        assertEquals(resourceGroup.getHardConcurrencyLimit(), 3);
-        assertEquals(resourceGroup.getMaxQueuedQueries(), 10);
-        assertEquals(resourceGroup.getSoftMemoryLimitBytes(), generalPoolSize / 10);
+        assertThat(resourceGroup.getHardConcurrencyLimit()).isEqualTo(3);
+        assertThat(resourceGroup.getMaxQueuedQueries()).isEqualTo(10);
+        assertThat(resourceGroup.getSoftMemoryLimitBytes()).isEqualTo(memoryPoolSize / 10);
     }
 
     @Test
@@ -223,15 +214,17 @@ public class TestFileResourceGroupConfigurationManager
         ResourceGroupId globalId = new ResourceGroupId("global");
         ResourceGroup global = new TestingResourceGroup(globalId);
         manager.configure(global, new SelectionContext<>(globalId, new ResourceGroupIdTemplate("global")));
-        assertEquals(global.getSoftMemoryLimitBytes(), DataSize.of(3, MEGABYTE).toBytes());
-        assertEquals(global.getMaxQueuedQueries(), 99);
-        assertEquals(global.getHardConcurrencyLimit(), 42);
+        assertThat(global.getSoftMemoryLimitBytes()).isEqualTo(DataSize.of(3, MEGABYTE).toBytes());
+        assertThat(global.getMaxQueuedQueries()).isEqualTo(99);
+        assertThat(global.getHardConcurrencyLimit()).isEqualTo(42);
     }
 
     private static void assertMatch(FileResourceGroupConfigurationManager manager, SelectionCriteria criteria, String expectedResourceGroup)
     {
         ResourceGroupId resourceGroupId = match(manager, criteria).getResourceGroupId();
-        assertEquals(resourceGroupId.toString(), expectedResourceGroup, format("Expected: '%s' resource group, found: %s", expectedResourceGroup, resourceGroupId));
+        assertThat(resourceGroupId.toString())
+                .describedAs(format("Expected: '%s' resource group, found: %s", expectedResourceGroup, resourceGroupId))
+                .isEqualTo(expectedResourceGroup);
     }
 
     private static SelectionContext<ResourceGroupIdTemplate> match(FileResourceGroupConfigurationManager manager, SelectionCriteria criteria)
@@ -249,7 +242,7 @@ public class TestFileResourceGroupConfigurationManager
     {
         FileResourceGroupConfig config = new FileResourceGroupConfig();
         config.setConfigFile(getResource(fileName).getPath());
-        return new FileResourceGroupConfigurationManager((poolId, listener) -> {}, config);
+        return new FileResourceGroupConfigurationManager(listener -> {}, config);
     }
 
     private static ManagerSpec parseManagerSpec(String fileName)

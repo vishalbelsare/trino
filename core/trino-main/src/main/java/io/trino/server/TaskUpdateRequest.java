@@ -13,11 +13,12 @@
  */
 package io.trino.server;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slice;
+import io.opentelemetry.api.trace.Span;
 import io.trino.SessionRepresentation;
-import io.trino.execution.TaskSource;
+import io.trino.execution.SplitAssignment;
 import io.trino.execution.buffer.OutputBuffers;
 import io.trino.spi.predicate.Domain;
 import io.trino.sql.planner.PlanFragment;
@@ -30,74 +31,30 @@ import java.util.Optional;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 
-public class TaskUpdateRequest
+/**
+ * @param extraCredentials extraCredentials is stored separately from SessionRepresentation to avoid being leaked
+ */
+public record TaskUpdateRequest(
+        SessionRepresentation session,
+        Map<String, String> extraCredentials,
+        Span stageSpan,
+        Optional<PlanFragment> fragment,
+        List<SplitAssignment> splitAssignments,
+        OutputBuffers outputIds,
+        Map<DynamicFilterId, Domain> dynamicFilterDomains,
+        Optional<Slice> exchangeEncryptionKey,
+        boolean speculative)
 {
-    private final SessionRepresentation session;
-    // extraCredentials is stored separately from SessionRepresentation to avoid being leaked
-    private final Map<String, String> extraCredentials;
-    private final Optional<PlanFragment> fragment;
-    private final List<TaskSource> sources;
-    private final OutputBuffers outputIds;
-    private final Map<DynamicFilterId, Domain> dynamicFilterDomains;
-
-    @JsonCreator
-    public TaskUpdateRequest(
-            @JsonProperty("session") SessionRepresentation session,
-            @JsonProperty("extraCredentials") Map<String, String> extraCredentials,
-            @JsonProperty("fragment") Optional<PlanFragment> fragment,
-            @JsonProperty("sources") List<TaskSource> sources,
-            @JsonProperty("outputIds") OutputBuffers outputIds,
-            @JsonProperty("dynamicFilterDomains") Map<DynamicFilterId, Domain> dynamicFilterDomains)
+    public TaskUpdateRequest
     {
         requireNonNull(session, "session is null");
         requireNonNull(extraCredentials, "extraCredentials is null");
+        requireNonNull(stageSpan, "stageSpan is null");
         requireNonNull(fragment, "fragment is null");
-        requireNonNull(sources, "sources is null");
+        splitAssignments = ImmutableList.copyOf(splitAssignments);
         requireNonNull(outputIds, "outputIds is null");
-        requireNonNull(dynamicFilterDomains, "dynamicFilterDomains is null");
-
-        this.session = session;
-        this.extraCredentials = extraCredentials;
-        this.fragment = fragment;
-        this.sources = ImmutableList.copyOf(sources);
-        this.outputIds = outputIds;
-        this.dynamicFilterDomains = dynamicFilterDomains;
-    }
-
-    @JsonProperty
-    public SessionRepresentation getSession()
-    {
-        return session;
-    }
-
-    @JsonProperty
-    public Map<String, String> getExtraCredentials()
-    {
-        return extraCredentials;
-    }
-
-    @JsonProperty
-    public Optional<PlanFragment> getFragment()
-    {
-        return fragment;
-    }
-
-    @JsonProperty
-    public List<TaskSource> getSources()
-    {
-        return sources;
-    }
-
-    @JsonProperty
-    public OutputBuffers getOutputIds()
-    {
-        return outputIds;
-    }
-
-    @JsonProperty
-    public Map<DynamicFilterId, Domain> getDynamicFilterDomains()
-    {
-        return dynamicFilterDomains;
+        dynamicFilterDomains = ImmutableMap.copyOf(dynamicFilterDomains);
+        requireNonNull(exchangeEncryptionKey, "exchangeEncryptionKey is null");
     }
 
     @Override
@@ -107,9 +64,11 @@ public class TaskUpdateRequest
                 .add("session", session)
                 .add("extraCredentials", extraCredentials.keySet())
                 .add("fragment", fragment)
-                .add("sources", sources)
+                .add("splitAssignments", splitAssignments)
                 .add("outputIds", outputIds)
                 .add("dynamicFilterDomains", dynamicFilterDomains)
+                .add("exchangeEncryptionKey", exchangeEncryptionKey.map(_ -> "[REDACTED]"))
+                .add("speculative", speculative)
                 .toString();
     }
 }

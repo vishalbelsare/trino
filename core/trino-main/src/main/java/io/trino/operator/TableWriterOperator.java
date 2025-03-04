@@ -17,30 +17,33 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.slice.Slice;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.operator.OperationTimer.OperationTiming;
+import io.trino.plugin.base.util.AutoCloseableCloser;
 import io.trino.spi.Mergeable;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
-import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
+import io.trino.split.PageSinkId;
 import io.trino.split.PageSinkManager;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
-import io.trino.util.AutoCloseableCloser;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -52,8 +55,9 @@ import static com.google.common.util.concurrent.Futures.allAsList;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.MoreFutures.toListenableFuture;
+import static io.trino.SystemSessionProperties.getCloseIdleWritersTriggerDuration;
+import static io.trino.SystemSessionProperties.getIdleWriterMinDataSizeThreshold;
 import static io.trino.SystemSessionProperties.isStatisticsCpuTimerEnabled;
-import static io.trino.spi.StandardErrorCode.CONSTRAINT_VIOLATION;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
@@ -76,7 +80,6 @@ public class TableWriterOperator
         private final PageSinkManager pageSinkManager;
         private final WriterTarget target;
         private final List<Integer> columnChannels;
-        private final List<String> notNullChannelColumnNames;
         private final Session session;
         private final OperatorFactory statisticsAggregationOperatorFactory;
         private final List<Type> types;
@@ -88,7 +91,6 @@ public class TableWriterOperator
                 PageSinkManager pageSinkManager,
                 WriterTarget writerTarget,
                 List<Integer> columnChannels,
-                List<String> notNullChannelColumnNames,
                 Session session,
                 OperatorFactory statisticsAggregationOperatorFactory,
                 List<Type> types)
@@ -96,7 +98,6 @@ public class TableWriterOperator
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
             this.columnChannels = requireNonNull(columnChannels, "columnChannels is null");
-            this.notNullChannelColumnNames = requireNonNull(notNullChannelColumnNames, "notNullChannelColumnNames is null");
             this.pageSinkManager = requireNonNull(pageSinkManager, "pageSinkManager is null");
             checkArgument(
                     writerTarget instanceof CreateTarget
@@ -114,25 +115,37 @@ public class TableWriterOperator
         public Operator createOperator(DriverContext driverContext)
         {
             checkState(!closed, "Factory is already closed");
+            // Driver should call getOutput() periodically on TableWriterOperator to close idle writers which will essentially
+            // decrease the memory usage even if no pages were added to that writer thread.
+            if (getCloseIdleWritersTriggerDuration(session).toMillis() > 0) {
+                driverContext.setBlockedTimeout(getCloseIdleWritersTriggerDuration(session));
+            }
             OperatorContext context = driverContext.addOperatorContext(operatorId, planNodeId, TableWriterOperator.class.getSimpleName());
             Operator statisticsAggregationOperator = statisticsAggregationOperatorFactory.createOperator(driverContext);
             boolean statisticsCpuTimerEnabled = !(statisticsAggregationOperator instanceof DevNullOperator) && isStatisticsCpuTimerEnabled(session);
-            return new TableWriterOperator(context, createPageSink(), columnChannels, notNullChannelColumnNames, statisticsAggregationOperator, types, statisticsCpuTimerEnabled);
+            return new TableWriterOperator(
+                    context,
+                    createPageSink(driverContext),
+                    columnChannels,
+                    statisticsAggregationOperator,
+                    types,
+                    statisticsCpuTimerEnabled,
+                    getIdleWriterMinDataSizeThreshold(session));
         }
 
-        private ConnectorPageSink createPageSink()
+        private ConnectorPageSink createPageSink(DriverContext driverContext)
         {
             if (target instanceof CreateTarget) {
-                return pageSinkManager.createPageSink(session, ((CreateTarget) target).getHandle());
+                return pageSinkManager.createPageSink(session, ((CreateTarget) target).getHandle(), PageSinkId.fromTaskId(driverContext.getTaskId()));
             }
             if (target instanceof InsertTarget) {
-                return pageSinkManager.createPageSink(session, ((InsertTarget) target).getHandle());
+                return pageSinkManager.createPageSink(session, ((InsertTarget) target).getHandle(), PageSinkId.fromTaskId(driverContext.getTaskId()));
             }
             if (target instanceof TableWriterNode.RefreshMaterializedViewTarget) {
-                return pageSinkManager.createPageSink(session, ((TableWriterNode.RefreshMaterializedViewTarget) target).getInsertHandle());
+                return pageSinkManager.createPageSink(session, ((TableWriterNode.RefreshMaterializedViewTarget) target).getInsertHandle(), PageSinkId.fromTaskId(driverContext.getTaskId()));
             }
             if (target instanceof TableWriterNode.TableExecuteTarget) {
-                return pageSinkManager.createPageSink(session, ((TableWriterNode.TableExecuteTarget) target).getExecuteHandle());
+                return pageSinkManager.createPageSink(session, ((TableWriterNode.TableExecuteTarget) target).getExecuteHandle(), PageSinkId.fromTaskId(driverContext.getTaskId()));
             }
             throw new UnsupportedOperationException("Unhandled target type: " + target.getClass().getName());
         }
@@ -146,7 +159,7 @@ public class TableWriterOperator
         @Override
         public OperatorFactory duplicate()
         {
-            return new TableWriterOperatorFactory(operatorId, planNodeId, pageSinkManager, target, columnChannels, notNullChannelColumnNames, session, statisticsAggregationOperatorFactory, types);
+            return new TableWriterOperatorFactory(operatorId, planNodeId, pageSinkManager, target, columnChannels, session, statisticsAggregationOperatorFactory, types);
         }
     }
 
@@ -158,11 +171,11 @@ public class TableWriterOperator
     private final OperatorContext operatorContext;
     private final LocalMemoryContext pageSinkMemoryContext;
     private final ConnectorPageSink pageSink;
-    private final List<Integer> columnChannels;
-    private final List<String> notNullChannelColumnNames;
+    private final int[] columnChannels;
     private final AtomicLong pageSinkPeakMemoryUsage = new AtomicLong();
     private final Operator statisticAggregationOperator;
     private final List<Type> types;
+    private final DataSize idleWriterMinDataSizeThreshold;
 
     private ListenableFuture<Void> blocked = NOT_BLOCKED;
     private CompletableFuture<Collection<Slice>> finishFuture;
@@ -174,27 +187,28 @@ public class TableWriterOperator
 
     private final OperationTiming statisticsTiming = new OperationTiming();
     private final boolean statisticsCpuTimerEnabled;
-
     private final Supplier<TableWriterInfo> tableWriterInfoSupplier;
+    // This records the last physical written data size when connector closeIdleWriters is triggered.
+    private long lastPhysicalWrittenDataSize;
+    private boolean newPagesAdded;
 
     public TableWriterOperator(
             OperatorContext operatorContext,
             ConnectorPageSink pageSink,
             List<Integer> columnChannels,
-            List<String> notNullChannelColumnNames,
             Operator statisticAggregationOperator,
             List<Type> types,
-            boolean statisticsCpuTimerEnabled)
+            boolean statisticsCpuTimerEnabled,
+            DataSize idleWriterMinDataSizeThreshold)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
-        this.pageSinkMemoryContext = operatorContext.newLocalSystemMemoryContext(TableWriterOperator.class.getSimpleName());
+        this.pageSinkMemoryContext = operatorContext.newLocalUserMemoryContext(TableWriterOperator.class.getSimpleName());
         this.pageSink = requireNonNull(pageSink, "pageSink is null");
-        this.columnChannels = requireNonNull(columnChannels, "columnChannels is null");
-        this.notNullChannelColumnNames = requireNonNull(notNullChannelColumnNames, "notNullChannelColumnNames is null");
-        checkArgument(columnChannels.size() == notNullChannelColumnNames.size(), "columnChannels and notNullColumnNames have different sizes");
+        this.columnChannels = Ints.toArray(requireNonNull(columnChannels, "columnChannels is null"));
         this.statisticAggregationOperator = requireNonNull(statisticAggregationOperator, "statisticAggregationOperator is null");
         this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
         this.statisticsCpuTimerEnabled = statisticsCpuTimerEnabled;
+        this.idleWriterMinDataSizeThreshold = requireNonNull(idleWriterMinDataSizeThreshold, "idleWriterMinDataSizeThreshold is null");
         this.tableWriterInfoSupplier = createTableWriterInfoSupplier(pageSinkPeakMemoryUsage, statisticsTiming, pageSink);
         this.operatorContext.setInfoSupplier(tableWriterInfoSupplier);
     }
@@ -252,47 +266,34 @@ public class TableWriterOperator
         requireNonNull(page, "page is null");
         checkState(needsInput(), "Operator does not need input");
 
-        Block[] blocks = new Block[columnChannels.size()];
-        for (int outputChannel = 0; outputChannel < columnChannels.size(); outputChannel++) {
-            Block block = page.getBlock(columnChannels.get(outputChannel));
-            String columnName = notNullChannelColumnNames.get(outputChannel);
-            if (columnName != null) {
-                verifyBlockHasNoNulls(block, columnName);
-            }
-            blocks[outputChannel] = block;
-        }
-
         OperationTimer timer = new OperationTimer(statisticsCpuTimerEnabled);
         statisticAggregationOperator.addInput(page);
         timer.end(statisticsTiming);
 
+        page = page.getColumns(columnChannels);
+
         ListenableFuture<Void> blockedOnAggregation = statisticAggregationOperator.isBlocked();
-        CompletableFuture<?> future = pageSink.appendPage(new Page(blocks));
+        CompletableFuture<?> future = pageSink.appendPage(page);
         updateMemoryUsage();
         ListenableFuture<?> blockedOnWrite = toListenableFuture(future);
         blocked = asVoid(allAsList(blockedOnAggregation, blockedOnWrite));
         rowCount += page.getPositionCount();
         updateWrittenBytes();
-    }
-
-    private void verifyBlockHasNoNulls(Block block, String columnName)
-    {
-        if (!block.mayHaveNull()) {
-            return;
-        }
-        for (int position = 0; position < block.getPositionCount(); position++) {
-            if (block.isNull(position)) {
-                throw new TrinoException(CONSTRAINT_VIOLATION, "NULL value not allowed for NOT NULL column: " + columnName);
-            }
-        }
+        operatorContext.recordWriterInputDataSize(page.getSizeInBytes());
+        newPagesAdded = true;
     }
 
     @Override
     public Page getOutput()
     {
-        if (!blocked.isDone()) {
+        tryClosingIdleWriters();
+        // This method could be called even when new pages have not been added. In that case, we don't have to
+        // try to get the output from the aggregation operator. It could be expensive since getOutput() is
+        // called quite frequently.
+        if (!(blocked.isDone() && (newPagesAdded || state != State.RUNNING))) {
             return null;
         }
+        newPagesAdded = false;
 
         if (!statisticAggregationOperator.isFinished()) {
             OperationTimer timer = new OperationTimer(statisticsCpuTimerEnabled);
@@ -378,6 +379,7 @@ public class TableWriterOperator
                 closer.register(pageSink::abort);
             }
         }
+        closer.register(() -> statisticAggregationOperator.getOperatorContext().destroy());
         closer.register(statisticAggregationOperator);
         closer.register(pageSinkMemoryContext::close);
         closer.close();
@@ -390,9 +392,27 @@ public class TableWriterOperator
         writtenBytes = current;
     }
 
+    private void tryClosingIdleWriters()
+    {
+        long physicalWrittenDataSize = getTaskContext().getPhysicalWrittenDataSize();
+        Optional<Integer> writerCount = getTaskContext().getMaxWriterCount();
+        if (writerCount.isEmpty() || physicalWrittenDataSize - lastPhysicalWrittenDataSize <= idleWriterMinDataSizeThreshold.toBytes() * writerCount.get()) {
+            return;
+        }
+        pageSink.closeIdleWriters();
+        updateMemoryUsage();
+        updateWrittenBytes();
+        lastPhysicalWrittenDataSize = physicalWrittenDataSize;
+    }
+
+    private TaskContext getTaskContext()
+    {
+        return operatorContext.getDriverContext().getPipelineContext().getTaskContext();
+    }
+
     private void updateMemoryUsage()
     {
-        long pageSinkMemoryUsage = pageSink.getSystemMemoryUsage();
+        long pageSinkMemoryUsage = pageSink.getMemoryUsage();
         pageSinkMemoryContext.setBytes(pageSinkMemoryUsage);
         pageSinkPeakMemoryUsage.accumulateAndGet(pageSinkMemoryUsage, Math::max);
     }

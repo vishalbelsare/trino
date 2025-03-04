@@ -15,23 +15,15 @@ package io.trino.sql.planner.optimizations;
 
 import io.trino.Session;
 import io.trino.cost.StatsAndCosts;
-import io.trino.execution.warnings.WarningCollector;
+import io.trino.metadata.FunctionManager;
+import io.trino.metadata.MergeHandle;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.TableExecuteHandle;
 import io.trino.metadata.TableHandle;
 import io.trino.spi.connector.BeginTableExecuteResult;
-import io.trino.sql.planner.PlanNodeIdAllocator;
-import io.trino.sql.planner.SymbolAllocator;
-import io.trino.sql.planner.TypeProvider;
-import io.trino.sql.planner.plan.AssignUniqueId;
-import io.trino.sql.planner.plan.DeleteNode;
 import io.trino.sql.planner.plan.ExchangeNode;
-import io.trino.sql.planner.plan.FilterNode;
-import io.trino.sql.planner.plan.JoinNode;
-import io.trino.sql.planner.plan.MarkDistinctNode;
+import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.PlanNode;
-import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.planner.plan.SemiJoinNode;
 import io.trino.sql.planner.plan.SimplePlanRewriter;
 import io.trino.sql.planner.plan.SimplePlanRewriter.RewriteContext;
 import io.trino.sql.planner.plan.StatisticsWriterNode;
@@ -41,24 +33,23 @@ import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TableWriterNode.CreateReference;
 import io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
-import io.trino.sql.planner.plan.TableWriterNode.DeleteTarget;
 import io.trino.sql.planner.plan.TableWriterNode.InsertReference;
 import io.trino.sql.planner.plan.TableWriterNode.InsertTarget;
+import io.trino.sql.planner.plan.TableWriterNode.MergeTarget;
 import io.trino.sql.planner.plan.TableWriterNode.TableExecuteTarget;
-import io.trino.sql.planner.plan.TableWriterNode.UpdateTarget;
 import io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
 import io.trino.sql.planner.plan.UnionNode;
-import io.trino.sql.planner.plan.UpdateNode;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.sql.planner.planprinter.PlanPrinter.textLogicalPlan;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toSet;
 
 /*
@@ -72,22 +63,24 @@ public class BeginTableWrite
         implements PlanOptimizer
 {
     private final Metadata metadata;
+    private final FunctionManager functionManager;
 
-    public BeginTableWrite(Metadata metadata)
+    public BeginTableWrite(Metadata metadata, FunctionManager functionManager)
     {
-        this.metadata = metadata;
+        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.functionManager = requireNonNull(functionManager, "functionManager is null");
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanNode optimize(PlanNode plan, Context context)
     {
         try {
-            return SimplePlanRewriter.rewriteWith(new Rewriter(session), plan, Optional.empty());
+            return SimplePlanRewriter.rewriteWith(new Rewriter(context.session()), plan, Optional.empty());
         }
         catch (RuntimeException e) {
             try {
                 int nestLevel = 4; // so that it renders reasonably within exception stacktrace
-                String explain = textLogicalPlan(plan, types, metadata, StatsAndCosts.empty(), session, nestLevel, false);
+                String explain = textLogicalPlan(plan, metadata, functionManager, StatsAndCosts.empty(), context.session(), nestLevel, false);
                 e.addSuppressed(new Exception("Current plan:\n" + explain));
             }
             catch (RuntimeException ignore) {
@@ -122,36 +115,9 @@ public class BeginTableWrite
                     node.getFragmentSymbol(),
                     node.getColumns(),
                     node.getColumnNames(),
-                    node.getNotNullColumnSymbols(),
                     node.getPartitioningScheme(),
-                    node.getPreferredPartitioningScheme(),
                     node.getStatisticsAggregation(),
                     node.getStatisticsAggregationDescriptor());
-        }
-
-        @Override
-        public PlanNode visitDelete(DeleteNode node, RewriteContext<Optional<WriterTarget>> context)
-        {
-            DeleteTarget deleteTarget = (DeleteTarget) getContextTarget(context);
-            return new DeleteNode(
-                    node.getId(),
-                    rewriteModifyTableScan(node.getSource(), deleteTarget.getHandleOrElseThrow()),
-                    deleteTarget,
-                    node.getRowId(),
-                    node.getOutputSymbols());
-        }
-
-        @Override
-        public PlanNode visitUpdate(UpdateNode node, RewriteContext<Optional<WriterTarget>> context)
-        {
-            UpdateTarget updateTarget = (UpdateTarget) getContextTarget(context);
-            return new UpdateNode(
-                    node.getId(),
-                    rewriteModifyTableScan(node.getSource(), updateTarget.getHandleOrElseThrow()),
-                    updateTarget,
-                    node.getRowId(),
-                    node.getColumnValueAndRowIdSymbols(),
-                    node.getOutputSymbols());
         }
 
         @Override
@@ -160,14 +126,26 @@ public class BeginTableWrite
             TableExecuteTarget tableExecuteTarget = (TableExecuteTarget) getContextTarget(context);
             return new TableExecuteNode(
                     node.getId(),
-                    rewriteModifyTableScan(node.getSource(), tableExecuteTarget.getSourceHandle().orElseThrow()),
+                    rewriteModifyTableScan(node.getSource(), tableExecuteTarget.getSourceHandle().orElseThrow(), false),
                     tableExecuteTarget,
                     node.getRowCountSymbol(),
                     node.getFragmentSymbol(),
                     node.getColumns(),
                     node.getColumnNames(),
-                    node.getPartitioningScheme(),
-                    node.getPreferredPartitioningScheme());
+                    node.getPartitioningScheme());
+        }
+
+        @Override
+        public PlanNode visitMergeWriter(MergeWriterNode mergeNode, RewriteContext<Optional<WriterTarget>> context)
+        {
+            MergeTarget mergeTarget = (MergeTarget) getContextTarget(context);
+            return new MergeWriterNode(
+                    mergeNode.getId(),
+                    rewriteModifyTableScan(mergeNode.getSource(), mergeTarget.getHandle(), true),
+                    mergeTarget,
+                    mergeNode.getProjectedSymbols(),
+                    mergeNode.getPartitioningScheme(),
+                    mergeNode.getOutputSymbols());
         }
 
         @Override
@@ -194,7 +172,7 @@ public class BeginTableWrite
             PlanNode child = node.getSource();
 
             WriterTarget originalTarget = getWriterTarget(child);
-            WriterTarget newTarget = createWriterTarget(originalTarget);
+            WriterTarget newTarget = createWriterTarget(originalTarget, child);
 
             child = context.rewrite(child, Optional.of(newTarget));
 
@@ -212,29 +190,32 @@ public class BeginTableWrite
             if (node instanceof TableWriterNode) {
                 return ((TableWriterNode) node).getTarget();
             }
-            if (node instanceof DeleteNode) {
-                DeleteNode deleteNode = (DeleteNode) node;
-                DeleteTarget delete = deleteNode.getTarget();
-                return new DeleteTarget(
-                        Optional.of(findTableScanHandleForDeleteOrUpdate(deleteNode.getSource())),
-                        delete.getSchemaTableName());
-            }
-            if (node instanceof UpdateNode) {
-                UpdateNode updateNode = (UpdateNode) node;
-                UpdateTarget update = updateNode.getTarget();
-                return new UpdateTarget(
-                        Optional.of(findTableScanHandleForDeleteOrUpdate(updateNode.getSource())),
-                        update.getSchemaTableName(),
-                        update.getUpdatedColumns(),
-                        update.getUpdatedColumnHandles());
-            }
             if (node instanceof TableExecuteNode) {
                 TableExecuteTarget target = ((TableExecuteNode) node).getTarget();
                 return new TableExecuteTarget(
                         target.getExecuteHandle(),
                         findTableScanHandleForTableExecute(((TableExecuteNode) node).getSource()),
-                        target.getSchemaTableName());
+                        target.getSchemaTableName(),
+                        target.getWriterScalingOptions());
             }
+
+            if (node instanceof MergeWriterNode mergeWriterNode) {
+                MergeTarget mergeTarget = mergeWriterNode.getTarget();
+                Optional<TableHandle> tableHandle = findTableScanHandleForMergeWriter(mergeWriterNode.getSource());
+                if (tableHandle.isEmpty()) {
+                    // The table scan was eliminated by constant folding.  But since it was eliminated, we
+                    // won't ever need to access the table, so returning the existing mergeTarget works.
+                    return mergeTarget;
+                }
+                return new MergeTarget(
+                        tableHandle.get(),
+                        mergeTarget.getMergeHandle(),
+                        mergeTarget.getSchemaTableName(),
+                        mergeTarget.getMergeParadigmAndTypes(),
+                        findSourceTableHandles(node),
+                        mergeTarget.getUpdateCaseColumnHandles());
+            }
+
             if (node instanceof ExchangeNode || node instanceof UnionNode) {
                 Set<WriterTarget> writerTargets = node.getSources().stream()
                         .map(this::getWriterTarget)
@@ -244,76 +225,63 @@ public class BeginTableWrite
             throw new IllegalArgumentException("Invalid child for TableCommitNode: " + node.getClass().getSimpleName());
         }
 
-        private WriterTarget createWriterTarget(WriterTarget target)
+        private WriterTarget createWriterTarget(WriterTarget target, PlanNode planNode)
         {
             // TODO: begin these operations in pre-execution step, not here
             // TODO: we shouldn't need to store the schemaTableName in the handles, but there isn't a good way to pass this around with the current architecture
-            if (target instanceof CreateReference) {
-                CreateReference create = (CreateReference) target;
-                return new CreateTarget(metadata.beginCreateTable(session, create.getCatalog(), create.getTableMetadata(), create.getLayout()), create.getTableMetadata().getTable());
+            if (target instanceof CreateReference create) {
+                return new CreateTarget(
+                        metadata.beginCreateTable(session, create.getCatalog(), create.getTableMetadata(), create.getLayout(), create.isReplace()),
+                        create.getTableMetadata().getTable(),
+                        target.supportsMultipleWritersPerPartition(metadata, session),
+                        target.getMaxWriterTasks(metadata, session),
+                        target.getWriterScalingOptions(metadata, session),
+                        create.isReplace());
             }
-            if (target instanceof InsertReference) {
-                InsertReference insert = (InsertReference) target;
-                return new InsertTarget(metadata.beginInsert(session, insert.getHandle(), insert.getColumns()), metadata.getTableMetadata(session, insert.getHandle()).getTable());
+            if (target instanceof InsertReference insert) {
+                return new InsertTarget(
+                        metadata.beginInsert(session, insert.getHandle(), insert.getColumns()),
+                        metadata.getTableName(session, insert.getHandle()).getSchemaTableName(),
+                        target.supportsMultipleWritersPerPartition(metadata, session),
+                        target.getMaxWriterTasks(metadata, session),
+                        target.getWriterScalingOptions(metadata, session),
+                        findSourceTableHandles(planNode));
             }
-            if (target instanceof DeleteTarget) {
-                DeleteTarget delete = (DeleteTarget) target;
-                TableHandle newHandle = metadata.beginDelete(session, delete.getHandleOrElseThrow());
-                return new DeleteTarget(Optional.of(newHandle), delete.getSchemaTableName());
+            if (target instanceof MergeTarget merge) {
+                MergeHandle mergeHandle = metadata.beginMerge(session, merge.getHandle(), merge.getUpdateCaseColumnHandles());
+                return new MergeTarget(
+                        mergeHandle.tableHandle(),
+                        Optional.of(mergeHandle),
+                        merge.getSchemaTableName(),
+                        merge.getMergeParadigmAndTypes(),
+                        findSourceTableHandles(planNode),
+                        merge.getUpdateCaseColumnHandles());
             }
-            if (target instanceof UpdateTarget) {
-                UpdateTarget update = (UpdateTarget) target;
-                TableHandle newHandle = metadata.beginUpdate(session, update.getHandleOrElseThrow(), update.getUpdatedColumnHandles());
-                return new UpdateTarget(
-                        Optional.of(newHandle),
-                        update.getSchemaTableName(),
-                        update.getUpdatedColumns(),
-                        update.getUpdatedColumnHandles());
-            }
-            if (target instanceof TableWriterNode.RefreshMaterializedViewReference) {
-                TableWriterNode.RefreshMaterializedViewReference refreshMV = (TableWriterNode.RefreshMaterializedViewReference) target;
+            if (target instanceof TableWriterNode.RefreshMaterializedViewReference refreshMV) {
                 return new TableWriterNode.RefreshMaterializedViewTarget(
                         refreshMV.getStorageTableHandle(),
-                        metadata.beginRefreshMaterializedView(session, refreshMV.getStorageTableHandle(), refreshMV.getSourceTableHandles()),
-                        metadata.getTableMetadata(session, refreshMV.getStorageTableHandle()).getTable(),
-                        refreshMV.getSourceTableHandles());
+                        metadata.beginRefreshMaterializedView(session, refreshMV.getStorageTableHandle(), refreshMV.getSourceTableHandles(), refreshMV.getRefreshType()),
+                        metadata.getTableName(session, refreshMV.getStorageTableHandle()).getSchemaTableName(),
+                        refreshMV.getSourceTableHandles(),
+                        refreshMV.getSourceTableFunctions(),
+                        refreshMV.getWriterScalingOptions(metadata, session));
             }
-            if (target instanceof TableExecuteTarget) {
-                TableExecuteTarget tableExecute = (TableExecuteTarget) target;
+            if (target instanceof TableExecuteTarget tableExecute) {
                 BeginTableExecuteResult<TableExecuteHandle, TableHandle> result = metadata.beginTableExecute(session, tableExecute.getExecuteHandle(), tableExecute.getMandatorySourceHandle());
-
-                return new TableExecuteTarget(result.getTableExecuteHandle(), Optional.of(result.getSourceHandle()), tableExecute.getSchemaTableName());
+                return new TableExecuteTarget(result.getTableExecuteHandle(), Optional.of(result.getSourceHandle()), tableExecute.getSchemaTableName(), tableExecute.getWriterScalingOptions());
             }
             throw new IllegalArgumentException("Unhandled target type: " + target.getClass().getSimpleName());
         }
 
-        private TableHandle findTableScanHandleForDeleteOrUpdate(PlanNode node)
+        private static List<TableHandle> findSourceTableHandles(PlanNode startNode)
         {
-            if (node instanceof TableScanNode) {
-                TableScanNode tableScanNode = (TableScanNode) node;
-                checkArgument(((TableScanNode) node).isUpdateTarget(), "TableScanNode should be an updatable target");
-                return tableScanNode.getTable();
-            }
-            if (node instanceof FilterNode) {
-                return findTableScanHandleForDeleteOrUpdate(((FilterNode) node).getSource());
-            }
-            if (node instanceof ProjectNode) {
-                return findTableScanHandleForDeleteOrUpdate(((ProjectNode) node).getSource());
-            }
-            if (node instanceof SemiJoinNode) {
-                return findTableScanHandleForDeleteOrUpdate(((SemiJoinNode) node).getSource());
-            }
-            if (node instanceof JoinNode) {
-                JoinNode joinNode = (JoinNode) node;
-                return findTableScanHandleForDeleteOrUpdate(joinNode.getLeft());
-            }
-            if (node instanceof AssignUniqueId) {
-                return findTableScanHandleForDeleteOrUpdate(((AssignUniqueId) node).getSource());
-            }
-            if (node instanceof MarkDistinctNode) {
-                return findTableScanHandleForDeleteOrUpdate(((MarkDistinctNode) node).getSource());
-            }
-            throw new IllegalArgumentException("Invalid descendant for DeleteNode or UpdateNode: " + node.getClass().getName());
+            return PlanNodeSearcher.searchFrom(startNode)
+                    .where(TableScanNode.class::isInstance)
+                    .findAll()
+                    .stream()
+                    .map(TableScanNode.class::cast)
+                    .map(TableScanNode::getTable)
+                    .collect(toImmutableList());
         }
 
         private Optional<TableHandle> findTableScanHandleForTableExecute(PlanNode startNode)
@@ -328,7 +296,22 @@ public class BeginTableWrite
             throw new IllegalArgumentException("Expected to find exactly one update target TableScanNode in plan but found: " + tableScanNodes);
         }
 
-        private PlanNode rewriteModifyTableScan(PlanNode node, TableHandle handle)
+        private Optional<TableHandle> findTableScanHandleForMergeWriter(PlanNode startNode)
+        {
+            List<PlanNode> tableScanNodes = PlanNodeSearcher.searchFrom(startNode)
+                    .where(node -> node instanceof TableScanNode scanNode && scanNode.isUpdateTarget())
+                    .findAll();
+
+            if (tableScanNodes.isEmpty()) {
+                return Optional.empty();
+            }
+            if (tableScanNodes.size() == 1) {
+                return Optional.of(((TableScanNode) tableScanNodes.get(0)).getTable());
+            }
+            throw new IllegalArgumentException("Expected to find zero or one update target TableScanNode in plan but found: " + tableScanNodes);
+        }
+
+        private PlanNode rewriteModifyTableScan(PlanNode node, TableHandle handle, boolean tableScanNotFoundIsOk)
         {
             AtomicInteger modifyCount = new AtomicInteger(0);
             PlanNode rewrittenNode = SimplePlanRewriter.rewriteWith(
@@ -356,7 +339,13 @@ public class BeginTableWrite
                     node,
                     null);
 
-            verify(modifyCount.get() == 1, "Expected to find exactly one update target TableScanNode but found %s", modifyCount);
+            int countFound = modifyCount.get();
+            if (tableScanNotFoundIsOk) {
+                verify(countFound == 0 || countFound == 1, "Expected to find zero or one update target TableScanNodes but found %s", countFound);
+            }
+            else {
+                verify(countFound == 1, "Expected to find exactly one update target TableScanNode but found %s", countFound);
+            }
             return rewrittenNode;
         }
     }

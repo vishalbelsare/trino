@@ -13,29 +13,28 @@
  */
 package io.trino.plugin.kudu;
 
-import io.trino.spi.connector.ConnectorPartitionHandle;
+import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 
-import javax.inject.Inject;
-
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 
 import static io.trino.plugin.kudu.KuduSessionProperties.getDynamicFilteringWaitTimeout;
-import static io.trino.spi.connector.DynamicFilter.NOT_BLOCKED;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 public class KuduSplitManager
         implements ConnectorSplitManager
 {
+    private static final ConnectorSplitSource.ConnectorSplitBatch EMPTY_BATCH = new ConnectorSplitSource.ConnectorSplitBatch(ImmutableList.of(), false);
     private final KuduClientSession clientSession;
 
     @Inject
@@ -49,89 +48,82 @@ public class KuduSplitManager
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
-        long timeoutMillis = getDynamicFilteringWaitTimeout(session).toMillis();
-        if (timeoutMillis == 0 || !dynamicFilter.isAwaitable()) {
-            return getSplitSource(table, splitSchedulingStrategy, dynamicFilter);
-        }
-        CompletableFuture<?> dynamicFilterFuture = whenCompleted(dynamicFilter)
-                .completeOnTimeout(null, timeoutMillis, MILLISECONDS);
-        CompletableFuture<ConnectorSplitSource> splitSourceFuture = dynamicFilterFuture.thenApply(
-                ignored -> getSplitSource(table, splitSchedulingStrategy, dynamicFilter));
-        return new KuduDynamicFilteringSplitSource(dynamicFilterFuture, splitSourceFuture);
-    }
-
-    private ConnectorSplitSource getSplitSource(
-            ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
-    {
-        KuduTableHandle handle = (KuduTableHandle) table;
-
-        List<KuduSplit> splits = clientSession.buildKuduSplits(handle, dynamicFilter);
-
-        switch (splitSchedulingStrategy) {
-            case UNGROUPED_SCHEDULING:
-                return new FixedSplitSource(splits);
-            case GROUPED_SCHEDULING:
-                return new KuduBucketedSplitSource(splits);
-        }
-        throw new IllegalArgumentException("Unknown splitSchedulingStrategy: " + splitSchedulingStrategy);
-    }
-
-    private static CompletableFuture<?> whenCompleted(DynamicFilter dynamicFilter)
-    {
-        if (dynamicFilter.isAwaitable()) {
-            return dynamicFilter.isBlocked().thenCompose(ignored -> whenCompleted(dynamicFilter));
-        }
-        return NOT_BLOCKED;
+        return new KuduDynamicFilteringSplitSource(session, clientSession, dynamicFilter, table);
     }
 
     private static class KuduDynamicFilteringSplitSource
             implements ConnectorSplitSource
     {
-        private final CompletableFuture<?> dynamicFilterFuture;
-        private final CompletableFuture<ConnectorSplitSource> splitSourceFuture;
+        private final KuduClientSession clientSession;
+        private final DynamicFilter dynamicFilter;
+        private final ConnectorTableHandle tableHandle;
+        private final long dynamicFilteringTimeoutNanos;
+        private ConnectorSplitSource delegateSplitSource;
+        private final long startNanos;
 
         private KuduDynamicFilteringSplitSource(
-                CompletableFuture<?> dynamicFilterFuture,
-                CompletableFuture<ConnectorSplitSource> splitSourceFuture)
+                ConnectorSession connectorSession,
+                KuduClientSession clientSession,
+                DynamicFilter dynamicFilter,
+                ConnectorTableHandle tableHandle)
         {
-            this.dynamicFilterFuture = requireNonNull(dynamicFilterFuture, "dynamicFilterFuture is null");
-            this.splitSourceFuture = requireNonNull(splitSourceFuture, "splitSourceFuture is null");
+            this.clientSession = requireNonNull(clientSession, "clientSession is null");
+            this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilterFuture is null");
+            this.tableHandle = requireNonNull(tableHandle, "splitSourceFuture is null");
+            this.dynamicFilteringTimeoutNanos = (long) getDynamicFilteringWaitTimeout(connectorSession).getValue(NANOSECONDS);
+            this.startNanos = System.nanoTime();
         }
 
         @Override
-        public CompletableFuture<ConnectorSplitBatch> getNextBatch(ConnectorPartitionHandle partitionHandle, int maxSize)
+        public CompletableFuture<ConnectorSplitBatch> getNextBatch(int maxSize)
         {
-            return splitSourceFuture.thenCompose(splitSource -> splitSource.getNextBatch(partitionHandle, maxSize));
+            CompletableFuture<?> blocked = dynamicFilter.isBlocked();
+            long remainingTimeoutNanos = getRemainingTimeoutNanos();
+            if (remainingTimeoutNanos > 0 && dynamicFilter.isAwaitable()) {
+                // wait for dynamic filter and yield
+                return blocked
+                        .thenApply(_ -> EMPTY_BATCH)
+                        .completeOnTimeout(EMPTY_BATCH, remainingTimeoutNanos, NANOSECONDS);
+            }
+
+            if (delegateSplitSource == null) {
+                KuduTableHandle handle = (KuduTableHandle) tableHandle;
+
+                List<KuduSplit> splits = clientSession.buildKuduSplits(handle, dynamicFilter);
+                delegateSplitSource = new FixedSplitSource(splits);
+            }
+
+            return delegateSplitSource.getNextBatch(maxSize);
         }
 
         @Override
         public void close()
         {
-            if (!dynamicFilterFuture.cancel(true)) {
-                splitSourceFuture.thenAccept(ConnectorSplitSource::close);
+            if (delegateSplitSource != null) {
+                delegateSplitSource.close();
             }
         }
 
         @Override
         public boolean isFinished()
         {
-            if (!splitSourceFuture.isDone()) {
+            if (getRemainingTimeoutNanos() > 0 && dynamicFilter.isAwaitable()) {
                 return false;
             }
-            if (splitSourceFuture.isCompletedExceptionally()) {
-                return false;
+
+            if (delegateSplitSource != null) {
+                return delegateSplitSource.isFinished();
             }
-            try {
-                return splitSourceFuture.get().isFinished();
-            }
-            catch (InterruptedException | ExecutionException e) {
-                throw new RuntimeException(e);
-            }
+
+            return false;
+        }
+
+        private long getRemainingTimeoutNanos()
+        {
+            return dynamicFilteringTimeoutNanos - (System.nanoTime() - startNanos);
         }
     }
 }

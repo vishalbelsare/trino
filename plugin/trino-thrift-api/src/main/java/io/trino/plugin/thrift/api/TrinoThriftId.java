@@ -24,11 +24,15 @@ import io.airlift.drift.annotations.ThriftStruct;
 import java.util.Arrays;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 
 @ThriftStruct
 public final class TrinoThriftId
 {
+    private static final int INSTANCE_SIZE = instanceSize(TrinoThriftId.class);
+
     private static final int PREFIX_SUFFIX_BYTES = 8;
     private static final String FILLER = "..";
     private static final int MAX_DISPLAY_CHARACTERS = PREFIX_SUFFIX_BYTES * 4 + FILLER.length();
@@ -74,6 +78,11 @@ public final class TrinoThriftId
         return toStringHelper(this)
                 .add("id", summarize(id))
                 .toString();
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE + sizeOf(id);
     }
 
     @VisibleForTesting

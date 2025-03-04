@@ -14,8 +14,10 @@
 package io.trino.sql.planner.assertions;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
+import io.airlift.slice.Slice;
 import io.trino.Session;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.cost.StatsProvider;
@@ -25,15 +27,20 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Row;
+import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.GroupReference;
-import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.optimizations.SymbolMapper;
+import io.trino.sql.planner.plan.AdaptivePlanNode;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AggregationNode.Step;
 import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.DistinctLimitNode;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
 import io.trino.sql.planner.plan.ExceptNode;
@@ -44,14 +51,16 @@ import io.trino.sql.planner.plan.IndexJoinNode;
 import io.trino.sql.planner.plan.IndexSourceNode;
 import io.trino.sql.planner.plan.IntersectNode;
 import io.trino.sql.planner.plan.JoinNode;
-import io.trino.sql.planner.plan.JoinNode.EquiJoinClause;
-import io.trino.sql.planner.plan.JoinNode.Type;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.MarkDistinctNode;
+import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.OffsetNode;
 import io.trino.sql.planner.plan.OutputNode;
+import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
+import io.trino.sql.planner.plan.RemoteSourceNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
 import io.trino.sql.planner.plan.SortNode;
 import io.trino.sql.planner.plan.SpatialJoinNode;
@@ -63,15 +72,7 @@ import io.trino.sql.planner.plan.UnionNode;
 import io.trino.sql.planner.plan.UnnestNode;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.ComparisonExpression;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.FrameBound;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.NotExpression;
-import io.trino.sql.tree.QualifiedName;
-import io.trino.sql.tree.Row;
 import io.trino.sql.tree.SortItem;
-import io.trino.sql.tree.WindowFrame;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -91,13 +92,12 @@ import static io.trino.spi.connector.SortOrder.ASC_NULLS_FIRST;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_LAST;
 import static io.trino.spi.connector.SortOrder.DESC_NULLS_FIRST;
 import static io.trino.spi.connector.SortOrder.DESC_NULLS_LAST;
+import static io.trino.sql.ir.Comparison.Operator.IDENTICAL;
 import static io.trino.sql.planner.assertions.MatchResult.NO_MATCH;
 import static io.trino.sql.planner.assertions.MatchResult.match;
 import static io.trino.sql.planner.assertions.StrictAssignedSymbolsMatcher.actualAssignments;
 import static io.trino.sql.planner.assertions.StrictSymbolsMatcher.actualOutputs;
-import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
-import static io.trino.sql.tree.ComparisonExpression.Operator.EQUAL;
-import static io.trino.sql.tree.ComparisonExpression.Operator.IS_DISTINCT_FROM;
+import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.sql.tree.SortItem.NullOrdering.FIRST;
 import static io.trino.sql.tree.SortItem.NullOrdering.UNDEFINED;
 import static io.trino.sql.tree.SortItem.Ordering.ASCENDING;
@@ -124,10 +124,10 @@ public final class PlanMatchPattern
 
     /**
      * Matches to any tree of nodes with children matching to given source matchers.
-     * anyNodeTree(tableScanNode("nation")) - will match to any plan which all leafs contain
+     * anyTree(tableScan("nation")) - will match to any plan which all leafs contain
      * any node containing table scan from nation table.
-     *
-     * @note anyTree does not match zero nodes. E.g. output(anyTree(tableScan)) will NOT match TableScan node followed by OutputNode.
+     * <p>
+     * Note: anyTree does not match zero nodes. E.g. output(anyTree(tableScan)) will NOT match TableScan node followed by OutputNode.
      */
     public static PlanMatchPattern anyTree(PlanMatchPattern... sources)
     {
@@ -137,6 +137,36 @@ public final class PlanMatchPattern
     public static PlanMatchPattern anyNot(Class<? extends PlanNode> excludeNodeClass, PlanMatchPattern... sources)
     {
         return any(sources).with(new NotPlanNodeMatcher(excludeNodeClass));
+    }
+
+    public static PlanMatchPattern adaptivePlan(PlanMatchPattern initialPlan, PlanMatchPattern currentPlan)
+    {
+        return node(AdaptivePlanNode.class, currentPlan).with(new AdaptivePlanMatcher(initialPlan));
+    }
+
+    public static PlanMatchPattern remoteSource(List<PlanFragmentId> sourceFragmentIds)
+    {
+        return node(RemoteSourceNode.class)
+                .with(new RemoteSourceMatcher(
+                        sourceFragmentIds,
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty()));
+    }
+
+    public static PlanMatchPattern remoteSource(
+            List<PlanFragmentId> sourceFragmentIds,
+            List<String> outputSymbols,
+            ExchangeNode.Type exchangeType)
+    {
+        return node(RemoteSourceNode.class)
+                .with(new RemoteSourceMatcher(
+                        sourceFragmentIds,
+                        Optional.of(outputSymbols),
+                        Optional.empty(),
+                        Optional.of(exchangeType),
+                        Optional.empty()));
     }
 
     public static PlanMatchPattern tableScan(String expectedTableName)
@@ -247,7 +277,7 @@ public final class PlanMatchPattern
     }
 
     public static PlanMatchPattern aggregation(
-            Map<String, ExpectedValueProvider<FunctionCall>> aggregations,
+            Map<String, ExpectedValueProvider<AggregationFunction>> aggregations,
             PlanMatchPattern source)
     {
         PlanMatchPattern result = node(AggregationNode.class, source);
@@ -257,7 +287,7 @@ public final class PlanMatchPattern
     }
 
     public static PlanMatchPattern aggregation(
-            Map<String, ExpectedValueProvider<FunctionCall>> aggregations,
+            Map<String, ExpectedValueProvider<AggregationFunction>> aggregations,
             Step step,
             PlanMatchPattern source)
     {
@@ -268,7 +298,7 @@ public final class PlanMatchPattern
     }
 
     public static PlanMatchPattern aggregation(
-            Map<String, ExpectedValueProvider<FunctionCall>> aggregations,
+            Map<String, ExpectedValueProvider<AggregationFunction>> aggregations,
             Predicate<AggregationNode> predicate,
             PlanMatchPattern source)
     {
@@ -281,7 +311,20 @@ public final class PlanMatchPattern
 
     public static PlanMatchPattern aggregation(
             GroupingSetDescriptor groupingSets,
-            Map<Optional<String>, ExpectedValueProvider<FunctionCall>> aggregations,
+            Map<String, ExpectedValueProvider<AggregationFunction>> aggregations,
+            PlanMatchPattern source)
+    {
+        return aggregation(
+                groupingSets,
+                aggregations.entrySet().stream().collect(toImmutableMap(entry -> Optional.of(entry.getKey()), Map.Entry::getValue)),
+                Optional.empty(),
+                Step.SINGLE,
+                source);
+    }
+
+    public static PlanMatchPattern aggregation(
+            GroupingSetDescriptor groupingSets,
+            Map<Optional<String>, ExpectedValueProvider<AggregationFunction>> aggregations,
             Optional<Symbol> groupId,
             Step step,
             PlanMatchPattern source)
@@ -291,7 +334,7 @@ public final class PlanMatchPattern
 
     public static PlanMatchPattern aggregation(
             GroupingSetDescriptor groupingSets,
-            Map<Optional<String>, ExpectedValueProvider<FunctionCall>> aggregations,
+            Map<Optional<String>, ExpectedValueProvider<AggregationFunction>> aggregations,
             List<String> preGroupedSymbols,
             Optional<Symbol> groupId,
             Step step,
@@ -302,7 +345,7 @@ public final class PlanMatchPattern
 
     public static PlanMatchPattern aggregation(
             GroupingSetDescriptor groupingSets,
-            Map<Optional<String>, ExpectedValueProvider<FunctionCall>> aggregations,
+            Map<Optional<String>, ExpectedValueProvider<AggregationFunction>> aggregations,
             List<String> preGroupedSymbols,
             List<String> masks,
             Optional<Symbol> groupId,
@@ -354,36 +397,6 @@ public final class PlanMatchPattern
                 Optional.of(new SymbolAlias(hashSymbol))));
     }
 
-    public static ExpectedValueProvider<WindowNode.Frame> windowFrame(
-            WindowFrame.Type type,
-            FrameBound.Type startType,
-            Optional<String> startValue,
-            FrameBound.Type endType,
-            Optional<String> endValue,
-            Optional<String> sortKey)
-    {
-        return windowFrame(type, startType, startValue, sortKey, endType, endValue, sortKey);
-    }
-
-    public static ExpectedValueProvider<WindowNode.Frame> windowFrame(
-            WindowFrame.Type type,
-            FrameBound.Type startType,
-            Optional<String> startValue,
-            Optional<String> sortKeyForStartComparison,
-            FrameBound.Type endType,
-            Optional<String> endValue,
-            Optional<String> sortKeyForEndComparison)
-    {
-        return new WindowFrameProvider(
-                type,
-                startType,
-                startValue.map(SymbolAlias::new),
-                sortKeyForStartComparison.map(SymbolAlias::new),
-                endType,
-                endValue.map(SymbolAlias::new),
-                sortKeyForEndComparison.map(SymbolAlias::new));
-    }
-
     public static PlanMatchPattern window(Consumer<WindowMatcher.Builder> handler, PlanMatchPattern source)
     {
         WindowMatcher.Builder builder = new WindowMatcher.Builder(source);
@@ -408,6 +421,13 @@ public final class PlanMatchPattern
     public static PlanMatchPattern patternRecognition(Consumer<PatternRecognitionMatcher.Builder> handler, PlanMatchPattern source)
     {
         PatternRecognitionMatcher.Builder builder = new PatternRecognitionMatcher.Builder(source);
+        handler.accept(builder);
+        return builder.build();
+    }
+
+    public static PlanMatchPattern join(JoinType type, Consumer<JoinMatcher.Builder> handler)
+    {
+        JoinMatcher.Builder builder = new JoinMatcher.Builder(type);
         handler.accept(builder);
         return builder.build();
     }
@@ -499,96 +519,26 @@ public final class PlanMatchPattern
         return node(SemiJoinNode.class, source, filtering).with(new SemiJoinMatcher(sourceSymbolAlias, filteringSymbolAlias, outputAlias, distributionType, hasDynamicFilter));
     }
 
-    public static PlanMatchPattern join(JoinNode.Type joinType, List<ExpectedValueProvider<JoinNode.EquiJoinClause>> expectedEquiCriteria, PlanMatchPattern left, PlanMatchPattern right)
-    {
-        return join(joinType, expectedEquiCriteria, Optional.empty(), left, right);
-    }
-
-    public static PlanMatchPattern join(JoinNode.Type joinType, List<ExpectedValueProvider<JoinNode.EquiJoinClause>> expectedEquiCriteria, Optional<String> expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
-    {
-        return join(joinType, expectedEquiCriteria, expectedFilter, Optional.empty(), Optional.empty(), left, right);
-    }
-
-    public static PlanMatchPattern join(JoinNode.Type joinType, List<ExpectedValueProvider<JoinNode.EquiJoinClause>> expectedEquiCriteria, Optional<String> expectedFilter, Optional<JoinNode.DistributionType> expectedDistributionType, PlanMatchPattern left, PlanMatchPattern right)
-    {
-        return join(joinType, expectedEquiCriteria, expectedFilter, expectedDistributionType, Optional.empty(), left, right);
-    }
-
-    public static PlanMatchPattern join(
-            JoinNode.Type joinType,
-            List<ExpectedValueProvider<JoinNode.EquiJoinClause>> expectedEquiCriteria,
-            Optional<String> expectedFilter,
-            Optional<JoinNode.DistributionType> expectedDistributionType,
-            Optional<Boolean> expectedSpillable,
-            PlanMatchPattern left,
-            PlanMatchPattern right)
-    {
-        return join(joinType, expectedEquiCriteria, expectedFilter, Optional.empty(), expectedDistributionType, expectedSpillable, left, right);
-    }
-
-    public static PlanMatchPattern join(
-            Type joinType,
-            List<ExpectedValueProvider<EquiJoinClause>> expectedEquiCriteria,
-            Map<String, String> expectedDynamicFilter,
-            PlanMatchPattern left,
-            PlanMatchPattern right)
-    {
-        List<DynamicFilterPattern> pattern = expectedDynamicFilter.entrySet().stream()
-                .map(entry -> new DynamicFilterPattern(entry.getKey(), EQUAL, entry.getValue()))
-                .collect(toImmutableList());
-        return join(joinType, expectedEquiCriteria, Optional.empty(), Optional.of(pattern), Optional.empty(), Optional.empty(), left, right);
-    }
-
-    public static PlanMatchPattern join(
-            Type joinType,
-            List<ExpectedValueProvider<EquiJoinClause>> expectedEquiCriteria,
-            List<DynamicFilterPattern> expectedDynamicFilter,
-            PlanMatchPattern left,
-            PlanMatchPattern right)
-    {
-        return join(joinType, expectedEquiCriteria, Optional.empty(), Optional.of(expectedDynamicFilter), Optional.empty(), Optional.empty(), left, right);
-    }
-
-    public static PlanMatchPattern join(
-            JoinNode.Type joinType,
-            List<ExpectedValueProvider<JoinNode.EquiJoinClause>> expectedEquiCriteria,
-            Optional<String> expectedFilter,
-            Optional<List<DynamicFilterPattern>> expectedDynamicFilter,
-            Optional<JoinNode.DistributionType> expectedDistributionType,
-            Optional<Boolean> expectedSpillable,
-            PlanMatchPattern left,
-            PlanMatchPattern right)
-    {
-        return node(JoinNode.class, left, right).with(
-                new JoinMatcher(
-                        joinType,
-                        expectedEquiCriteria,
-                        expectedFilter.map(predicate -> PlanBuilder.expression(predicate)),
-                        expectedDistributionType,
-                        expectedSpillable,
-                        expectedDynamicFilter));
-    }
-
-    public static PlanMatchPattern spatialJoin(String expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
+    public static PlanMatchPattern spatialJoin(Expression expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
     {
         return spatialJoin(expectedFilter, Optional.empty(), left, right);
     }
 
-    public static PlanMatchPattern spatialJoin(String expectedFilter, Optional<String> kdbTree, PlanMatchPattern left, PlanMatchPattern right)
+    public static PlanMatchPattern spatialJoin(Expression expectedFilter, Optional<Slice> kdbTree, PlanMatchPattern left, PlanMatchPattern right)
     {
         return spatialJoin(expectedFilter, kdbTree, Optional.empty(), left, right);
     }
 
-    public static PlanMatchPattern spatialJoin(String expectedFilter, Optional<String> kdbTree, Optional<List<String>> outputSymbols, PlanMatchPattern left, PlanMatchPattern right)
+    public static PlanMatchPattern spatialJoin(Expression filter, Optional<Slice> kdbTree, Optional<List<String>> outputSymbols, PlanMatchPattern left, PlanMatchPattern right)
     {
         return node(SpatialJoinNode.class, left, right).with(
-                new SpatialJoinMatcher(SpatialJoinNode.Type.INNER, PlanBuilder.expression(expectedFilter), kdbTree, outputSymbols));
+                new SpatialJoinMatcher(SpatialJoinNode.Type.INNER, filter, kdbTree, outputSymbols));
     }
 
-    public static PlanMatchPattern spatialLeftJoin(String expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
+    public static PlanMatchPattern spatialLeftJoin(Expression expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
     {
         return node(SpatialJoinNode.class, left, right).with(
-                new SpatialJoinMatcher(SpatialJoinNode.Type.LEFT, PlanBuilder.expression(expectedFilter), Optional.empty(), Optional.empty()));
+                new SpatialJoinMatcher(SpatialJoinNode.Type.LEFT, expectedFilter, Optional.empty(), Optional.empty()));
     }
 
     public static PlanMatchPattern unnest(PlanMatchPattern source)
@@ -598,15 +548,14 @@ public final class PlanMatchPattern
 
     public static PlanMatchPattern unnest(List<String> replicateSymbols, List<UnnestMapping> mappings, PlanMatchPattern source)
     {
-        return unnest(replicateSymbols, mappings, Optional.empty(), INNER, Optional.empty(), source);
+        return unnest(replicateSymbols, mappings, Optional.empty(), INNER, source);
     }
 
     public static PlanMatchPattern unnest(
             List<String> replicateSymbols,
             List<UnnestMapping> mappings,
             Optional<String> ordinalitySymbol,
-            Type type,
-            Optional<String> filter,
+            JoinType type,
             PlanMatchPattern source)
     {
         PlanMatchPattern result = node(UnnestNode.class, source)
@@ -614,8 +563,7 @@ public final class PlanMatchPattern
                         replicateSymbols,
                         mappings,
                         ordinalitySymbol,
-                        type,
-                        filter.map(predicate -> PlanBuilder.expression(predicate))));
+                        type));
 
         mappings.forEach(mapping -> {
             for (int i = 0; i < mapping.getOutputs().size(); i++) {
@@ -635,12 +583,17 @@ public final class PlanMatchPattern
 
     public static PlanMatchPattern exchange(ExchangeNode.Scope scope, PlanMatchPattern... sources)
     {
-        return exchange(scope, Optional.empty(), ImmutableList.of(), ImmutableSet.of(), Optional.empty(), sources);
+        return exchange(scope, Optional.empty(), Optional.empty(), ImmutableList.of(), ImmutableSet.of(), Optional.empty(), sources);
     }
 
     public static PlanMatchPattern exchange(ExchangeNode.Scope scope, ExchangeNode.Type type, PlanMatchPattern... sources)
     {
         return exchange(scope, type, ImmutableList.of(), sources);
+    }
+
+    public static PlanMatchPattern exchange(ExchangeNode.Scope scope, ExchangeNode.Type type, PartitioningHandle partitioningHandle, PlanMatchPattern... sources)
+    {
+        return exchange(scope, Optional.of(type), Optional.of(partitioningHandle), ImmutableList.of(), ImmutableSet.of(), Optional.empty(), sources);
     }
 
     public static PlanMatchPattern exchange(ExchangeNode.Scope scope, ExchangeNode.Type type, List<Ordering> orderBy, PlanMatchPattern... sources)
@@ -661,19 +614,66 @@ public final class PlanMatchPattern
             Optional<List<List<String>>> inputs,
             PlanMatchPattern... sources)
     {
-        return exchange(scope, Optional.of(type), orderBy, partitionedBy, inputs, sources);
+        return exchange(scope, Optional.of(type), Optional.empty(), orderBy, partitionedBy, inputs, sources);
     }
 
     public static PlanMatchPattern exchange(
             ExchangeNode.Scope scope,
             Optional<ExchangeNode.Type> type,
+            Optional<PartitioningHandle> partitioningHandle,
             List<Ordering> orderBy,
             Set<String> partitionedBy,
             Optional<List<List<String>>> inputs,
             PlanMatchPattern... sources)
     {
-        return node(ExchangeNode.class, sources)
-                .with(new ExchangeMatcher(scope, type, orderBy, partitionedBy, inputs));
+        return exchange(scope, type, partitioningHandle, orderBy, partitionedBy, inputs, ImmutableList.of(), Optional.empty(), sources);
+    }
+
+    public static PlanMatchPattern exchange(ExchangeNode.Scope scope, Optional<Integer> partitionCount, PlanMatchPattern... sources)
+    {
+        return exchange(scope, Optional.empty(), Optional.empty(), ImmutableList.of(), ImmutableSet.of(), Optional.empty(), ImmutableList.of(), Optional.of(partitionCount), sources);
+    }
+
+    public static PlanMatchPattern exchange(ExchangeNode.Scope scope, ExchangeNode.Type type, Optional<Integer> partitionCount, PlanMatchPattern... sources)
+    {
+        return exchange(scope, Optional.of(type), Optional.empty(), ImmutableList.of(), ImmutableSet.of(), Optional.empty(), ImmutableList.of(), Optional.of(partitionCount), sources);
+    }
+
+    public static PlanMatchPattern exchange(ExchangeNode.Scope scope, PartitioningHandle partitioningHandle, Optional<Integer> partitionCount, PlanMatchPattern... sources)
+    {
+        return exchange(scope, Optional.empty(), Optional.of(partitioningHandle), ImmutableList.of(), ImmutableSet.of(), Optional.empty(), ImmutableList.of(), Optional.of(partitionCount), sources);
+    }
+
+    public static PlanMatchPattern exchange(ExchangeNode.Scope scope, ExchangeNode.Type type, PartitioningHandle partitioningHandle, Optional<Integer> partitionCount, PlanMatchPattern... sources)
+    {
+        return exchange(scope, Optional.of(type), Optional.of(partitioningHandle), ImmutableList.of(), ImmutableSet.of(), Optional.empty(), ImmutableList.of(), Optional.of(partitionCount), sources);
+    }
+
+    public static PlanMatchPattern exchange(
+            ExchangeNode.Scope scope,
+            Optional<ExchangeNode.Type> type,
+            Optional<PartitioningHandle> partitioningHandle,
+            List<Ordering> orderBy,
+            Set<String> partitionedBy,
+            Optional<List<List<String>>> inputs,
+            List<String> outputSymbolAliases,
+            Optional<Optional<Integer>> partitionCount,
+            PlanMatchPattern... sources)
+    {
+        PlanMatchPattern result = node(ExchangeNode.class, sources)
+                .with(new ExchangeMatcher(scope, type, partitioningHandle, orderBy, partitionedBy, inputs, partitionCount));
+
+        for (int i = 0; i < outputSymbolAliases.size(); i++) {
+            String outputSymbol = outputSymbolAliases.get(i);
+            int index = i;
+            result.withAlias(outputSymbol, (node, session, metadata, symbolAliases) -> {
+                ExchangeNode exchangeNode = (ExchangeNode) node;
+                List<Symbol> outputSymbols = exchangeNode.getPartitioningScheme().getOutputLayout();
+                checkState(index < outputSymbols.size(), "outputSymbolAliases size is more than exchange output symbols");
+                return Optional.ofNullable(outputSymbols.get(index));
+            });
+        }
+        return result;
     }
 
     public static PlanMatchPattern union(PlanMatchPattern... sources)
@@ -719,11 +719,6 @@ public final class PlanMatchPattern
         return new SymbolAlias(alias);
     }
 
-    public static PlanMatchPattern filter(String expectedPredicate, PlanMatchPattern source)
-    {
-        return filter(PlanBuilder.expression(expectedPredicate), source);
-    }
-
     public static PlanMatchPattern filter(Expression expectedPredicate, PlanMatchPattern source)
     {
         return node(FilterNode.class, source).with(new FilterMatcher(expectedPredicate, Optional.empty()));
@@ -734,7 +729,7 @@ public final class PlanMatchPattern
         return node(FilterNode.class, source).with(new FilterMatcher(expectedPredicate, Optional.of(dynamicFilter)));
     }
 
-    public static PlanMatchPattern apply(List<String> correlationSymbolAliases, Map<String, ExpressionMatcher> subqueryAssignments, PlanMatchPattern inputPattern, PlanMatchPattern subqueryPattern)
+    public static PlanMatchPattern apply(List<String> correlationSymbolAliases, Map<String, SetExpressionMatcher> subqueryAssignments, PlanMatchPattern inputPattern, PlanMatchPattern subqueryPattern)
     {
         PlanMatchPattern result = node(ApplyNode.class, inputPattern, subqueryPattern)
                 .with(new CorrelationMatcher(correlationSymbolAliases));
@@ -749,6 +744,12 @@ public final class PlanMatchPattern
                 .with(new CorrelationMatcher(correlationSymbolAliases));
     }
 
+    public static PlanMatchPattern correlatedJoin(List<String> correlationSymbolAliases, Expression filter, PlanMatchPattern inputPattern, PlanMatchPattern subqueryPattern)
+    {
+        return correlatedJoin(correlationSymbolAliases, inputPattern, subqueryPattern)
+                .with(new CorrelatedJoinMatcher(filter));
+    }
+
     public static PlanMatchPattern groupId(List<List<String>> groupingSets, String groupIdSymbol, PlanMatchPattern source)
     {
         return groupId(groupingSets, ImmutableList.of(), groupIdSymbol, source);
@@ -760,8 +761,19 @@ public final class PlanMatchPattern
             String groupIdSymbol,
             PlanMatchPattern source)
     {
+        return groupId(groupingSets, ImmutableMap.of(), aggregationArguments, groupIdSymbol, source);
+    }
+
+    public static PlanMatchPattern groupId(
+            List<List<String>> groupingSets,
+            Map<String, String> groupingColumns,
+            List<String> aggregationArguments,
+            String groupIdSymbol,
+            PlanMatchPattern source)
+    {
         return node(GroupIdNode.class, source).with(new GroupIdMatcher(
                 groupingSets,
+                groupingColumns,
                 aggregationArguments,
                 groupIdSymbol));
     }
@@ -850,6 +862,11 @@ public final class PlanMatchPattern
         return node(EnforceSingleRowNode.class, source);
     }
 
+    public static PlanMatchPattern mergeWriter(PlanMatchPattern source)
+    {
+        return node(MergeWriterNode.class, source);
+    }
+
     public static PlanMatchPattern tableWriter(List<String> columns, List<String> columnNames, PlanMatchPattern source)
     {
         return node(TableWriterNode.class, source).with(new TableWriterMatcher(columns, columnNames));
@@ -858,6 +875,27 @@ public final class PlanMatchPattern
     public static PlanMatchPattern tableExecute(List<String> columns, List<String> columnNames, PlanMatchPattern source)
     {
         return node(TableExecuteNode.class, source).with(new TableExecuteMatcher(columns, columnNames));
+    }
+
+    public static PlanMatchPattern tableFunction(Consumer<TableFunctionMatcher.Builder> handler, PlanMatchPattern... sources)
+    {
+        TableFunctionMatcher.Builder builder = new TableFunctionMatcher.Builder(sources);
+        handler.accept(builder);
+        return builder.build();
+    }
+
+    public static PlanMatchPattern tableFunctionProcessor(Consumer<TableFunctionProcessorMatcher.Builder> handler, PlanMatchPattern source)
+    {
+        TableFunctionProcessorMatcher.Builder builder = new TableFunctionProcessorMatcher.Builder(source);
+        handler.accept(builder);
+        return builder.build();
+    }
+
+    public static PlanMatchPattern tableFunctionProcessor(Consumer<TableFunctionProcessorMatcher.Builder> handler)
+    {
+        TableFunctionProcessorMatcher.Builder builder = new TableFunctionProcessorMatcher.Builder();
+        handler.accept(builder);
+        return builder.build();
     }
 
     public PlanMatchPattern(List<PlanMatchPattern> sourcePatterns)
@@ -923,7 +961,7 @@ public final class PlanMatchPattern
             @Override
             public MatchResult detailMatches(PlanNode node, StatsProvider stats, Session session, Metadata metadata, SymbolAliases symbolAliases)
             {
-                if (predicate.test((T) node)) {
+                if (predicate.test(clazz.cast(node))) {
                     return match();
                 }
 
@@ -976,26 +1014,10 @@ public final class PlanMatchPattern
         return this;
     }
 
-    /*
-     * withExactAssignments and withExactAssignedOutputs are needed for matching symbols
-     * that are produced in the node that you're matching. The name of the symbol bound to
-     * the alias is *not* known when the Matcher is run, and so you need to match by what
-     * is being assigned to it.
-     */
-    public PlanMatchPattern withExactAssignedOutputs(RvalueMatcher... expectedAliases)
-    {
-        return withExactAssignedOutputs(ImmutableList.copyOf(expectedAliases));
-    }
-
     public PlanMatchPattern withExactAssignedOutputs(Collection<? extends RvalueMatcher> expectedAliases)
     {
         matchers.add(new StrictAssignedSymbolsMatcher(actualOutputs(), expectedAliases));
         return this;
-    }
-
-    public PlanMatchPattern withExactAssignments(RvalueMatcher... expectedAliases)
-    {
-        return withExactAssignments(ImmutableList.copyOf(expectedAliases));
     }
 
     public PlanMatchPattern withExactAssignments(Collection<? extends RvalueMatcher> expectedAliases)
@@ -1015,19 +1037,14 @@ public final class PlanMatchPattern
         return new ColumnReference(tableName, columnName);
     }
 
-    public static ExpressionMatcher expression(String expression)
+    public static SetExpressionMatcher setExpression(ApplyNode.SetExpression expression)
     {
-        return new ExpressionMatcher(expression);
+        return new SetExpressionMatcher(expression);
     }
 
     public static ExpressionMatcher expression(Expression expression)
     {
         return new ExpressionMatcher(expression);
-    }
-
-    public PlanMatchPattern withOutputs(String... aliases)
-    {
-        return withOutputs(ImmutableList.copyOf(aliases));
     }
 
     public PlanMatchPattern withOutputs(List<String> aliases)
@@ -1036,7 +1053,7 @@ public final class PlanMatchPattern
         return this;
     }
 
-    public PlanMatchPattern matchToAnyNodeTree()
+    PlanMatchPattern matchToAnyNodeTree()
     {
         anyTree = true;
         return this;
@@ -1047,40 +1064,59 @@ public final class PlanMatchPattern
         return sourcePatterns.isEmpty();
     }
 
-    public static PlanTestSymbol anySymbol()
+    public static ExpectedValueProvider<AggregationFunction> aggregationFunction(String name, List<String> args)
     {
-        return new AnySymbol();
+        return new AggregationFunctionProvider(
+                name,
+                false,
+                toSymbolAliases(args),
+                ImmutableList.of(),
+                Optional.empty());
     }
 
-    public static ExpectedValueProvider<FunctionCall> functionCall(String name, List<String> args)
+    public static ExpectedValueProvider<AggregationFunction> aggregationFunction(String name, List<String> args, List<PlanMatchPattern.Ordering> orderBy)
     {
-        return new FunctionCallProvider(QualifiedName.of(name), toSymbolAliases(args));
+        return new AggregationFunctionProvider(
+                name,
+                false,
+                toSymbolAliases(args),
+                orderBy,
+                Optional.empty());
     }
 
-    public static ExpectedValueProvider<FunctionCall> functionCall(String name, List<String> args, List<Ordering> orderBy)
+    public static ExpectedValueProvider<AggregationFunction> aggregationFunction(String name, boolean distinct, List<PlanTestSymbol> args)
     {
-        return new FunctionCallProvider(QualifiedName.of(name), toSymbolAliases(args), orderBy);
+        return new AggregationFunctionProvider(
+                name,
+                distinct,
+                args,
+                ImmutableList.of(),
+                Optional.empty());
     }
 
-    public static ExpectedValueProvider<FunctionCall> functionCall(
-            String name,
-            Optional<WindowFrame> frame,
-            List<String> args)
+    public static ExpectedValueProvider<AggregationFunction> aggregationFunction(String name, boolean distinct, List<PlanTestSymbol> args, String filter)
     {
-        return new FunctionCallProvider(QualifiedName.of(name), frame, false, toSymbolAliases(args));
+        return new AggregationFunctionProvider(
+                name,
+                distinct,
+                args,
+                ImmutableList.of(),
+                Optional.of(symbol(filter)));
     }
 
-    public static ExpectedValueProvider<FunctionCall> functionCall(
-            String name,
-            boolean distinct,
-            List<PlanTestSymbol> args)
+    public static ExpectedValueProvider<WindowFunction> windowFunction(String name, List<String> args, WindowNode.Frame frame)
     {
-        return new FunctionCallProvider(QualifiedName.of(name), distinct, args);
+        return windowFunction(name, args, frame, ImmutableList.of());
     }
 
-    public static ExpectedValueProvider<FunctionCall> functionCall(String name, List<String> args, String filter)
+    public static ExpectedValueProvider<WindowFunction> windowFunction(String name, List<String> args, WindowNode.Frame frame, List<PlanMatchPattern.Ordering> orderBy)
     {
-        return new FunctionCallProvider(QualifiedName.of(name), toSymbolAliases(args), symbol(filter));
+        return windowFunction(name, args, frame, orderBy, false);
+    }
+
+    public static ExpectedValueProvider<WindowFunction> windowFunction(String name, List<String> args, WindowNode.Frame frame, List<PlanMatchPattern.Ordering> orderBy, boolean distinct)
+    {
+        return new WindowFunctionProvider(name, frame, toSymbolAliases(args), orderBy, distinct);
     }
 
     public static List<Expression> toSymbolReferences(List<PlanTestSymbol> aliases, SymbolAliases symbolAliases)
@@ -1099,7 +1135,7 @@ public final class PlanMatchPattern
                 .collect(toImmutableList());
     }
 
-    public static ExpectedValueProvider<WindowNode.Specification> specification(
+    public static ExpectedValueProvider<DataOrganizationSpecification> specification(
             List<String> partitionBy,
             List<String> orderBy,
             Map<String, SortOrder> orderings)
@@ -1158,7 +1194,10 @@ public final class PlanMatchPattern
                 .collect(toImmutableList());
 
         for (Matcher matcher : matchersToPrint) {
-            builder.append(indentString(indent + 1)).append(matcher.toString()).append("\n");
+            builder
+                    .append(indentString(indent + 1))
+                    .append(matcher.toString().replace("\n", "\n" + indentString(indent + 1)))
+                    .append("\n");
         }
 
         for (PlanMatchPattern pattern : sourcePatterns) {
@@ -1184,7 +1223,7 @@ public final class PlanMatchPattern
     public static GroupingSetDescriptor singleGroupingSet(List<String> groupingKeys)
     {
         Set<Integer> globalGroupingSets;
-        if (groupingKeys.size() == 0) {
+        if (groupingKeys.isEmpty()) {
             globalGroupingSets = ImmutableSet.of(0);
         }
         else {
@@ -1197,20 +1236,11 @@ public final class PlanMatchPattern
     public static class DynamicFilterPattern
     {
         private final Expression probe;
-        private final ComparisonExpression.Operator operator;
+        private final Comparison.Operator operator;
         private final SymbolAlias build;
         private final boolean nullAllowed;
 
-        public DynamicFilterPattern(String probeExpression, ComparisonExpression.Operator operator, String buildAlias, boolean nullAllowed)
-        {
-            this(
-                    PlanBuilder.expression(probeExpression),
-                    operator,
-                    buildAlias,
-                    nullAllowed);
-        }
-
-        public DynamicFilterPattern(Expression probe, ComparisonExpression.Operator operator, String buildAlias, boolean nullAllowed)
+        public DynamicFilterPattern(Expression probe, Comparison.Operator operator, String buildAlias, boolean nullAllowed)
         {
             this.probe = requireNonNull(probe, "probe is null");
             this.operator = requireNonNull(operator, "operator is null");
@@ -1218,22 +1248,21 @@ public final class PlanMatchPattern
             this.nullAllowed = nullAllowed;
         }
 
-        public DynamicFilterPattern(String probeAlias, ComparisonExpression.Operator operator, String buildAlias)
+        public DynamicFilterPattern(Expression probe, Comparison.Operator operator, String buildAlias)
         {
-            this(probeAlias, operator, buildAlias, false);
+            this(probe, operator, buildAlias, false);
         }
 
         Expression getExpression(SymbolAliases aliases)
         {
             Expression probeMapped = symbolMapper(aliases).map(probe);
             if (nullAllowed) {
-                return new NotExpression(
-                        new ComparisonExpression(
-                                IS_DISTINCT_FROM,
-                                probeMapped,
-                                build.toSymbol(aliases).toSymbolReference()));
+                return new Comparison(
+                        IDENTICAL,
+                        probeMapped,
+                        build.toSymbol(aliases).toSymbolReference());
             }
-            return new ComparisonExpression(
+            return new Comparison(
                     operator,
                     probeMapped,
                     build.toSymbol(aliases).toSymbolReference());
@@ -1241,7 +1270,7 @@ public final class PlanMatchPattern
 
         private static SymbolMapper symbolMapper(SymbolAliases symbolAliases)
         {
-            return new SymbolMapper(symbol -> Symbol.from(symbolAliases.get(symbol.getName())));
+            return new SymbolMapper(symbol -> Symbol.from(symbolAliases.get(symbol.name())));
         }
 
         @Override
@@ -1339,16 +1368,6 @@ public final class PlanMatchPattern
             return field;
         }
 
-        public SortItem.Ordering getOrdering()
-        {
-            return ordering;
-        }
-
-        public SortItem.NullOrdering getNullOrdering()
-        {
-            return nullOrdering;
-        }
-
         public SortOrder getSortOrder()
         {
             checkState(nullOrdering != UNDEFINED, "nullOrdering is undefined");
@@ -1356,19 +1375,13 @@ public final class PlanMatchPattern
                 if (nullOrdering == FIRST) {
                     return ASC_NULLS_FIRST;
                 }
-                else {
-                    return ASC_NULLS_LAST;
-                }
+                return ASC_NULLS_LAST;
             }
-            else {
-                checkState(ordering == DESCENDING);
-                if (nullOrdering == FIRST) {
-                    return DESC_NULLS_FIRST;
-                }
-                else {
-                    return DESC_NULLS_LAST;
-                }
+            checkState(ordering == DESCENDING);
+            if (nullOrdering == FIRST) {
+                return DESC_NULLS_FIRST;
             }
+            return DESC_NULLS_LAST;
         }
 
         @Override

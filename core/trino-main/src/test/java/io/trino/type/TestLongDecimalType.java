@@ -13,22 +13,18 @@
  */
 package io.trino.type;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
-import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.SqlDecimal;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
-import java.math.BigInteger;
 
-import static io.trino.spi.type.Decimals.encodeScaledValue;
-import static io.trino.spi.type.Decimals.encodeUnscaledValue;
 import static io.trino.spi.type.Decimals.writeBigDecimal;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.unscaledDecimalToBigInteger;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestLongDecimalType
         extends AbstractTestType
@@ -40,19 +36,9 @@ public class TestLongDecimalType
         super(LONG_DECIMAL_TYPE, SqlDecimal.class, createTestBlock());
     }
 
-    @Test
-    public void testUnscaledValueToSlice()
+    public static ValueBlock createTestBlock()
     {
-        assertEquals(encodeUnscaledValue(0L), encodeUnscaledValue(BigInteger.valueOf(0L)));
-        assertEquals(encodeUnscaledValue(1L), encodeUnscaledValue(BigInteger.valueOf(1L)));
-        assertEquals(encodeUnscaledValue(-1L), encodeUnscaledValue(BigInteger.valueOf(-1L)));
-        assertEquals(encodeUnscaledValue(Long.MAX_VALUE), encodeUnscaledValue(BigInteger.valueOf(Long.MAX_VALUE)));
-        assertEquals(encodeUnscaledValue(Long.MIN_VALUE), encodeUnscaledValue(BigInteger.valueOf(Long.MIN_VALUE)));
-    }
-
-    public static Block createTestBlock()
-    {
-        BlockBuilder blockBuilder = LONG_DECIMAL_TYPE.createBlockBuilder(null, 15);
+        BlockBuilder blockBuilder = LONG_DECIMAL_TYPE.createFixedSizeBlockBuilder(15);
         writeBigDecimal(LONG_DECIMAL_TYPE, blockBuilder, new BigDecimal("-12345678901234567890.1234567890"));
         writeBigDecimal(LONG_DECIMAL_TYPE, blockBuilder, new BigDecimal("-12345678901234567890.1234567890"));
         writeBigDecimal(LONG_DECIMAL_TYPE, blockBuilder, new BigDecimal("-12345678901234567890.1234567890"));
@@ -64,26 +50,46 @@ public class TestLongDecimalType
         writeBigDecimal(LONG_DECIMAL_TYPE, blockBuilder, new BigDecimal("32345678901234567890.1234567890"));
         writeBigDecimal(LONG_DECIMAL_TYPE, blockBuilder, new BigDecimal("32345678901234567890.1234567890"));
         writeBigDecimal(LONG_DECIMAL_TYPE, blockBuilder, new BigDecimal("42345678901234567890.1234567890"));
-        return blockBuilder.build();
+        return blockBuilder.buildValueBlock();
     }
 
     @Override
     protected Object getNonNullValue()
     {
-        return Slices.wrappedBuffer(new byte[16]);
+        return Int128.ZERO;
     }
 
     @Override
     protected Object getGreaterValue(Object value)
     {
-        Slice slice = (Slice) value;
-        BigDecimal decimal = toBigDecimal(slice, 10);
+        BigDecimal decimal = toBigDecimal((Int128) value, 10);
         BigDecimal greaterDecimal = decimal.add(BigDecimal.ONE);
-        return encodeScaledValue(greaterDecimal);
+        return Decimals.valueOf(greaterDecimal);
     }
 
-    private static BigDecimal toBigDecimal(Slice valueSlice, int scale)
+    private static BigDecimal toBigDecimal(Int128 value, int scale)
     {
-        return new BigDecimal(unscaledDecimalToBigInteger(valueSlice), scale);
+        return new BigDecimal(value.toBigInteger(), scale);
+    }
+
+    @Test
+    public void testRange()
+    {
+        assertThat(type.getRange())
+                .isEmpty();
+    }
+
+    @Test
+    public void testPreviousValue()
+    {
+        assertThat(type.getPreviousValue(getSampleValue()))
+                .isEmpty();
+    }
+
+    @Test
+    public void testNextValue()
+    {
+        assertThat(type.getNextValue(getSampleValue()))
+                .isEmpty();
     }
 }

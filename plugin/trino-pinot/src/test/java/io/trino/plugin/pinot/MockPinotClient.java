@@ -14,23 +14,33 @@
 package io.trino.plugin.pinot;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Multimap;
 import io.airlift.http.client.Request;
 import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.json.JsonCodec;
+import io.trino.plugin.pinot.auth.PinotBrokerAuthenticationProvider;
+import io.trino.plugin.pinot.auth.PinotControllerAuthenticationProvider;
+import io.trino.plugin.pinot.auth.none.PinotEmptyAuthenticationProvider;
 import io.trino.plugin.pinot.client.IdentityPinotHostMapper;
 import io.trino.plugin.pinot.client.PinotClient;
 import org.apache.pinot.spi.data.Schema;
 
+import java.util.AbstractMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.airlift.concurrent.Threads.threadsNamed;
 import static io.trino.plugin.pinot.MetadataUtil.BROKERS_FOR_TABLE_JSON_CODEC;
 import static io.trino.plugin.pinot.MetadataUtil.BROKER_RESPONSE_NATIVE_JSON_CODEC;
 import static io.trino.plugin.pinot.MetadataUtil.TABLES_JSON_CODEC;
 import static io.trino.plugin.pinot.MetadataUtil.TEST_TABLE;
 import static io.trino.plugin.pinot.MetadataUtil.TIME_BOUNDARY_JSON_CODEC;
+import static java.util.Locale.ENGLISH;
+import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.stream.Collectors.toList;
 
 public class MockPinotClient
         extends PinotClient
@@ -54,10 +64,13 @@ public class MockPinotClient
                 pinotConfig,
                 new IdentityPinotHostMapper(),
                 new TestingHttpClient(request -> null),
+                newCachedThreadPool(threadsNamed("pinot-metadata-fetcher-testing")),
                 TABLES_JSON_CODEC,
                 BROKERS_FOR_TABLE_JSON_CODEC,
                 TIME_BOUNDARY_JSON_CODEC,
-                BROKER_RESPONSE_NATIVE_JSON_CODEC);
+                BROKER_RESPONSE_NATIVE_JSON_CODEC,
+                PinotControllerAuthenticationProvider.create(PinotEmptyAuthenticationProvider.instance()),
+                PinotBrokerAuthenticationProvider.create(PinotEmptyAuthenticationProvider.instance()));
         this.metadata = metadata;
         this.response = response;
     }
@@ -69,19 +82,25 @@ public class MockPinotClient
     }
 
     @Override
-    public <T> T doHttpActionWithHeadersJson(Request.Builder requestBuilder, Optional<String> requestBody, JsonCodec<T> codec)
+    public <T> T doHttpActionWithHeadersJson(
+            Request.Builder requestBuilder,
+            Optional<String> requestBody,
+            JsonCodec<T> codec,
+            Multimap<String, String> additionalHeaders)
     {
         return codec.fromJson(response);
     }
 
     @Override
-    public List<String> getAllTables()
+    public Multimap<String, String> getAllTables()
     {
-        return ImmutableList.<String>builder()
-                .add(TestPinotSplitManager.realtimeOnlyTable.getTableName())
-                .add(TestPinotSplitManager.hybridTable.getTableName())
-                .add(TEST_TABLE)
-                .addAll(metadata.keySet())
+        return ImmutableListMultimap.<String, String>builder()
+                .put(TestPinotSplitManager.realtimeOnlyTable.tableName().toLowerCase(ENGLISH), TestPinotSplitManager.realtimeOnlyTable.tableName())
+                .put(TestPinotSplitManager.hybridTable.tableName().toLowerCase(ENGLISH), TestPinotSplitManager.hybridTable.tableName())
+                .put(TEST_TABLE.toLowerCase(ENGLISH), TEST_TABLE)
+                .putAll(metadata.keySet().stream()
+                        .map(key -> new AbstractMap.SimpleEntry<>(key.toLowerCase(ENGLISH), key))
+                        .collect(toList()))
                 .build();
     }
 
@@ -90,19 +109,19 @@ public class MockPinotClient
     {
         ImmutableMap.Builder<String, Map<String, List<String>>> routingTable = ImmutableMap.builder();
 
-        if (TestPinotSplitManager.realtimeOnlyTable.getTableName().equalsIgnoreCase(tableName) || TestPinotSplitManager.hybridTable.getTableName().equalsIgnoreCase(tableName)) {
+        if (TestPinotSplitManager.realtimeOnlyTable.tableName().equalsIgnoreCase(tableName) || TestPinotSplitManager.hybridTable.tableName().equalsIgnoreCase(tableName)) {
             routingTable.put(tableName + "_REALTIME", ImmutableMap.of(
                     "server1", ImmutableList.of("segment11", "segment12"),
                     "server2", ImmutableList.of("segment21", "segment22")));
         }
 
-        if (TestPinotSplitManager.hybridTable.getTableName().equalsIgnoreCase(tableName)) {
+        if (TestPinotSplitManager.hybridTable.tableName().equalsIgnoreCase(tableName)) {
             routingTable.put(tableName + "_OFFLINE", ImmutableMap.of(
                     "server3", ImmutableList.of("segment31", "segment32"),
                     "server4", ImmutableList.of("segment41", "segment42")));
         }
 
-        return routingTable.build();
+        return routingTable.buildOrThrow();
     }
 
     @Override
@@ -453,7 +472,7 @@ public class MockPinotClient
     @Override
     public TimeBoundary getTimeBoundaryForTable(String table)
     {
-        if (TestPinotSplitManager.hybridTable.getTableName().equalsIgnoreCase(table)) {
+        if (TestPinotSplitManager.hybridTable.tableName().equalsIgnoreCase(table)) {
             return new TimeBoundary("secondsSinceEpoch", "4562345");
         }
 

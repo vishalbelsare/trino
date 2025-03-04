@@ -36,9 +36,8 @@ import io.trino.orc.stream.PresentOutputStream;
 import io.trino.orc.stream.StreamDataOutput;
 import io.trino.spi.block.Block;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -49,6 +48,7 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT_V2;
 import static io.trino.orc.metadata.CompressionKind.NONE;
 import static io.trino.orc.metadata.Stream.StreamKind.SECONDARY;
@@ -57,7 +57,7 @@ import static java.util.Objects.requireNonNull;
 public class DecimalColumnWriter
         implements ColumnWriter
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(DecimalColumnWriter.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(DecimalColumnWriter.class);
     private final OrcColumnId columnId;
     private final DecimalType type;
     private final ColumnEncoding columnEncoding;
@@ -128,10 +128,10 @@ public class DecimalColumnWriter
         else {
             for (int position = 0; position < block.getPositionCount(); position++) {
                 if (!block.isNull(position)) {
-                    Slice value = type.getSlice(block, position);
+                    Int128 value = (Int128) type.getObject(block, position);
                     dataStream.writeUnscaledValue(value);
 
-                    longDecimalStatisticsBuilder.addValue(new BigDecimal(Decimals.decodeUnscaledValue(value), type.getScale()));
+                    longDecimalStatisticsBuilder.addValue(new BigDecimal(((Int128) value).toBigInteger(), type.getScale()));
                 }
             }
         }

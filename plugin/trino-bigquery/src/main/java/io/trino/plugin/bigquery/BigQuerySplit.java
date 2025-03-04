@@ -13,130 +13,89 @@
  */
 package io.trino.plugin.bigquery;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
-import io.trino.spi.HostAddress;
-import io.trino.spi.connector.ColumnHandle;
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
-import java.util.Objects;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
 
-import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.trino.plugin.bigquery.BigQuerySplit.Mode.QUERY;
+import static io.trino.plugin.bigquery.BigQuerySplit.Mode.STORAGE;
 import static java.util.Objects.requireNonNull;
 
-public class BigQuerySplit
+public record BigQuerySplit(
+        Mode mode,
+        String streamName,
+        String schemaString,
+        List<BigQueryColumnHandle> columns,
+        long emptyRowsToGenerate,
+        Optional<String> filter,
+        OptionalInt dataSize)
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(BigQuerySplit.class);
+
     private static final int NO_ROWS_TO_GENERATE = -1;
 
-    private final String streamName;
-    private final String avroSchema;
-    private final List<ColumnHandle> columns;
-    private final long emptyRowsToGenerate;
-
     // do not use directly, it is public only for Jackson
-    @JsonCreator
-    public BigQuerySplit(
-            @JsonProperty("streamName") String streamName,
-            @JsonProperty("avroSchema") String avroSchema,
-            @JsonProperty("columns") List<ColumnHandle> columns,
-            @JsonProperty("emptyRowsToGenerate") long emptyRowsToGenerate)
+    public BigQuerySplit
     {
-        this.streamName = requireNonNull(streamName, "streamName cannot be null");
-        this.avroSchema = requireNonNull(avroSchema, "avroSchema cannot be null");
-        this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns cannot be null"));
-        this.emptyRowsToGenerate = emptyRowsToGenerate;
+        requireNonNull(mode, "mode is null");
+        requireNonNull(streamName, "streamName cannot be null");
+        requireNonNull(schemaString, "schemaString cannot be null");
+        columns = ImmutableList.copyOf(requireNonNull(columns, "columns cannot be null"));
+        requireNonNull(filter, "filter is null");
+        requireNonNull(dataSize, "dataSize is null");
     }
 
-    static BigQuerySplit forStream(String streamName, String avroSchema, List<ColumnHandle> columns)
+    static BigQuerySplit forStream(String streamName, String schemaString, List<BigQueryColumnHandle> columns, OptionalInt dataSize)
     {
-        return new BigQuerySplit(streamName, avroSchema, columns, NO_ROWS_TO_GENERATE);
+        return new BigQuerySplit(STORAGE, streamName, schemaString, columns, NO_ROWS_TO_GENERATE, Optional.empty(), dataSize);
+    }
+
+    static BigQuerySplit forViewStream(List<BigQueryColumnHandle> columns, Optional<String> filter)
+    {
+        return new BigQuerySplit(QUERY, "", "", columns, NO_ROWS_TO_GENERATE, filter, OptionalInt.empty());
     }
 
     static BigQuerySplit emptyProjection(long numberOfRows)
     {
-        return new BigQuerySplit("", "", ImmutableList.of(), numberOfRows);
-    }
-
-    @JsonProperty
-    public String getStreamName()
-    {
-        return streamName;
-    }
-
-    @JsonProperty
-    public String getAvroSchema()
-    {
-        return avroSchema;
-    }
-
-    @JsonProperty
-    public List<ColumnHandle> getColumns()
-    {
-        return columns;
-    }
-
-    @JsonProperty
-    public long getEmptyRowsToGenerate()
-    {
-        return emptyRowsToGenerate;
+        return new BigQuerySplit(STORAGE, "", "", ImmutableList.of(), numberOfRows, Optional.empty(), OptionalInt.of(0));
     }
 
     @Override
-    public boolean isRemotelyAccessible()
+    public Map<String, String> getSplitInfo()
     {
-        return true;
+        return ImmutableMap.of(
+                "mode", mode.name(),
+                "filter", filter.orElse(""),
+                "streamName", streamName,
+                "emptyRowsToGenerate", String.valueOf(emptyRowsToGenerate));
     }
 
     @Override
-    public List<HostAddress> getAddresses()
+    public long getRetainedSizeInBytes()
     {
-        return ImmutableList.of();
-    }
-
-    @Override
-    public Object getInfo()
-    {
-        return this;
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-        if (this == o) {
-            return true;
-        }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
-        }
-        BigQuerySplit that = (BigQuerySplit) o;
-        return Objects.equals(streamName, that.streamName) &&
-                Objects.equals(avroSchema, that.avroSchema) &&
-                Objects.equals(columns, that.columns) &&
-                Objects.equals(emptyRowsToGenerate, that.emptyRowsToGenerate);
-    }
-
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(streamName, avroSchema, columns, emptyRowsToGenerate);
-    }
-
-    @Override
-    public String toString()
-    {
-        return toStringHelper(this)
-                .add("streamName", streamName)
-                .add("avroSchema", avroSchema)
-                .add("columns", columns)
-                .add("emptyRowsToGenerate", emptyRowsToGenerate)
-                .toString();
+        return INSTANCE_SIZE
+                + estimatedSizeOf(streamName)
+                + estimatedSizeOf(schemaString)
+                + estimatedSizeOf(columns, BigQueryColumnHandle::getRetainedSizeInBytes);
     }
 
     boolean representsEmptyProjection()
     {
         return emptyRowsToGenerate != NO_ROWS_TO_GENERATE;
+    }
+
+    public enum Mode
+    {
+        STORAGE,
+        QUERY,
+        /**/;
     }
 }

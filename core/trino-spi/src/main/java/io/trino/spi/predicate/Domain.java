@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -30,17 +31,17 @@ import static java.util.Objects.requireNonNull;
  * Defines the possible values of a single variable in terms of its valid scalar values and nullability.
  * <p>
  * For example:
- * <p>
  * <ul>
  * <li>Domain.none() => no scalar values allowed, NULL not allowed
  * <li>Domain.all() => all scalar values allowed, NULL allowed
  * <li>Domain.onlyNull() => no scalar values allowed, NULL allowed
  * <li>Domain.notNull() => all scalar values allowed, NULL not allowed
  * </ul>
- * <p>
  */
 public final class Domain
 {
+    private static final int INSTANCE_SIZE = instanceSize(Domain.class);
+
     public static final int DEFAULT_COMPACTION_THRESHOLD = 32;
 
     private final ValueSet values;
@@ -143,9 +144,7 @@ public final class Domain
         if (nullAllowed) {
             return values.isNone();
         }
-        else {
-            return values.isSingleValue();
-        }
+        return values.isSingleValue();
     }
 
     public boolean isOnlyNull()
@@ -170,9 +169,7 @@ public final class Domain
         if (nullAllowed) {
             return null;
         }
-        else {
-            return values.getSingleValue();
-        }
+        return values.getSingleValue();
     }
 
     public boolean includesNullableValue(Object value)
@@ -341,6 +338,11 @@ public final class Domain
             return "[NULL]";
         }
         return "[ " + (nullAllowed ? "NULL, " : "") + values.toString(session, limit) + " ]";
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE + values.getRetainedSizeInBytes();
     }
 
     public static class DiscreteSet

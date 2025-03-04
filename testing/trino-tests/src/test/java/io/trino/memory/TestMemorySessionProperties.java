@@ -16,11 +16,11 @@ package io.trino.memory;
 import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
-import io.trino.tests.tpch.TpchQueryRunnerBuilder;
-import org.testng.annotations.Test;
+import io.trino.tests.tpch.TpchQueryRunner;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import static io.trino.SystemSessionProperties.QUERY_MAX_MEMORY_PER_NODE;
-import static io.trino.SystemSessionProperties.QUERY_MAX_TOTAL_MEMORY_PER_NODE;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestMemorySessionProperties
@@ -32,10 +32,13 @@ public class TestMemorySessionProperties
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return TpchQueryRunnerBuilder.builder().setNodeCount(2).build();
+        return TpchQueryRunner.builder()
+                .setWorkerCount(1)
+                .build();
     }
 
-    @Test(timeOut = 240_000)
+    @Test
+    @Timeout(240)
     public void testSessionQueryMemoryPerNodeLimit()
     {
         assertQuery(sql);
@@ -44,18 +47,6 @@ public class TestMemorySessionProperties
                 .build();
         assertThatThrownBy(() -> getQueryRunner().execute(session, sql))
                 .isInstanceOf(RuntimeException.class)
-                .hasMessageStartingWith("Query exceeded per-node user memory limit of ");
-    }
-
-    @Test(timeOut = 240_000)
-    public void testSessionQueryMaxTotalMemoryPerNodeLimit()
-    {
-        assertQuery(sql);
-        Session session = Session.builder(getSession())
-                .setSystemProperty(QUERY_MAX_TOTAL_MEMORY_PER_NODE, "1kB")
-                .build();
-        assertThatThrownBy(() -> getQueryRunner().execute(session, sql))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageStartingWith("Query exceeded per-node total memory limit of ");
+                .hasMessageStartingWith("Query exceeded per-node memory limit of ");
     }
 }

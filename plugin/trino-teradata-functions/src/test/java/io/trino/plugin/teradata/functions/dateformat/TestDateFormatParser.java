@@ -17,55 +17,56 @@ import io.trino.spi.TrinoException;
 import org.antlr.v4.runtime.Token;
 import org.joda.time.DateTime;
 import org.joda.time.format.DateTimeFormatter;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestDateFormatParser
 {
     @Test
     public void testTokenize()
     {
-        assertEquals(
-                DateFormatParser.tokenize("yyyy mm").stream().map(Token::getType).collect(Collectors.toList()),
-                asList(DateFormat.YYYY, DateFormat.TEXT, DateFormat.MM));
+        assertThat(DateFormatParser.tokenize("yyyy mm").stream().map(Token::getType).collect(Collectors.toList()))
+                .isEqualTo(asList(DateFormat.YYYY, DateFormat.TEXT, DateFormat.MM));
     }
 
     @Test
     public void testGreedinessLongFirst()
     {
-        assertEquals(1, DateFormatParser.tokenize("yy").size());
-        assertEquals(1, DateFormatParser.tokenize("yyyy").size());
-        assertEquals(2, DateFormatParser.tokenize("yyyyyy").size());
+        assertThat(DateFormatParser.tokenize("yy")).hasSize(1);
+        assertThat(DateFormatParser.tokenize("yyyy")).hasSize(1);
+        assertThat(DateFormatParser.tokenize("yyyyyy")).hasSize(2);
     }
 
     @Test
     public void testInvalidTokenTokenize()
     {
-        assertEquals(
-                DateFormatParser.tokenize("ala").stream().map(Token::getType).collect(Collectors.toList()),
-                asList(DateFormat.UNRECOGNIZED, DateFormat.UNRECOGNIZED, DateFormat.UNRECOGNIZED));
+        assertThat(DateFormatParser.tokenize("ala").stream().map(Token::getType).collect(Collectors.toList()))
+                .isEqualTo(asList(DateFormat.UNRECOGNIZED, DateFormat.UNRECOGNIZED, DateFormat.UNRECOGNIZED));
     }
 
-    @Test(expectedExceptions = TrinoException.class)
+    @Test
     public void testInvalidTokenCreate1()
     {
-        DateFormatParser.createDateTimeFormatter("ala");
+        assertThatThrownBy(() -> DateFormatParser.createDateTimeFormatter("ala"))
+                .isInstanceOf(TrinoException.class);
     }
 
-    @Test(expectedExceptions = TrinoException.class)
+    @Test
     public void testInvalidTokenCreate2()
     {
-        DateFormatParser.createDateTimeFormatter("yyym/mm/dd");
+        assertThatThrownBy(() -> DateFormatParser.createDateTimeFormatter("yyym/mm/dd"))
+                .isInstanceOf(TrinoException.class);
     }
 
     @Test
     public void testCreateDateTimeFormatter()
     {
         DateTimeFormatter formatter = DateFormatParser.createDateTimeFormatter("yyyy/mm/dd");
-        assertEquals(formatter.parseDateTime("1988/04/08"), new DateTime(1988, 4, 8, 0, 0));
+        assertThat(formatter.parseDateTime("1988/04/08")).isEqualTo(new DateTime(1988, 4, 8, 0, 0));
     }
 }

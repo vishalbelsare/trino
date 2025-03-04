@@ -16,8 +16,11 @@ package io.trino.plugin.geospatial;
 import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlock;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
+import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TypeSignature;
 
 import static io.trino.geospatial.serde.GeometrySerde.deserialize;
@@ -26,11 +29,10 @@ public class GeometryType
         extends AbstractVariableWidthType
 {
     public static final GeometryType GEOMETRY = new GeometryType();
-    public static final String GEOMETRY_TYPE_NAME = "Geometry";
 
     private GeometryType()
     {
-        super(new TypeSignature(GEOMETRY_TYPE_NAME), Slice.class);
+        super(new TypeSignature(StandardTypes.GEOMETRY), Slice.class);
     }
 
     protected GeometryType(TypeSignature signature)
@@ -39,21 +41,11 @@ public class GeometryType
     }
 
     @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            block.writeBytesTo(position, 0, block.getSliceLength(position), blockBuilder);
-            blockBuilder.closeEntry();
-        }
-    }
-
-    @Override
     public Slice getSlice(Block block, int position)
     {
-        return block.getSlice(position, 0, block.getSliceLength(position));
+        VariableWidthBlock valueBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        int valuePosition = block.getUnderlyingValuePosition(position);
+        return valueBlock.getSlice(valuePosition);
     }
 
     @Override
@@ -73,7 +65,7 @@ public class GeometryType
             blockBuilder.appendNull();
             return;
         }
-        blockBuilder.writeBytes(value, offset, length).closeEntry();
+        ((VariableWidthBlockBuilder) blockBuilder).writeEntry(value, offset, length);
     }
 
     @Override
@@ -82,7 +74,11 @@ public class GeometryType
         if (block.isNull(position)) {
             return null;
         }
-        Slice slice = block.getSlice(position, 0, block.getSliceLength(position));
-        return deserialize(slice).asText();
+        try {
+            return deserialize(getSlice(block, position)).asText();
+        }
+        catch (Exception e) {
+            return "<invalid geometry>";
+        }
     }
 }

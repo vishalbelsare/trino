@@ -16,33 +16,39 @@ package io.trino.plugin.example;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.net.URI;
 import java.util.List;
+import java.util.Map;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 public class ExampleSplit
         implements ConnectorSplit
 {
-    private final URI uri;
+    private static final int INSTANCE_SIZE = instanceSize(ExampleSplit.class);
+
+    private final String uri;
     private final boolean remotelyAccessible;
     private final List<HostAddress> addresses;
 
     @JsonCreator
-    public ExampleSplit(
-            @JsonProperty("uri") URI uri)
+    public ExampleSplit(@JsonProperty("uri") String uri)
     {
         this.uri = requireNonNull(uri, "uri is null");
 
         remotelyAccessible = true;
-        addresses = ImmutableList.of(HostAddress.fromUri(uri));
+        addresses = ImmutableList.of(HostAddress.fromUri(URI.create(uri)));
     }
 
     @JsonProperty
-    public URI getUri()
+    public String getUri()
     {
         return uri;
     }
@@ -61,8 +67,16 @@ public class ExampleSplit
     }
 
     @Override
-    public Object getInfo()
+    public Map<String, String> getSplitInfo()
     {
-        return this;
+        return ImmutableMap.of("addresses", addresses.stream().map(HostAddress::toString).collect(joining(",")), "remotelyAccessible", String.valueOf(remotelyAccessible));
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(uri)
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
     }
 }

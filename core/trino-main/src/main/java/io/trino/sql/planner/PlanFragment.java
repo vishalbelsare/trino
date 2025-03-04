@@ -16,16 +16,19 @@ package io.trino.sql.planner;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.cost.StatsAndCosts;
-import io.trino.operator.StageExecutionDescriptor;
+import io.trino.metadata.LanguageFunctionProvider.LanguageFunctionData;
+import io.trino.spi.catalog.CatalogProperties;
+import io.trino.spi.function.FunctionId;
 import io.trino.spi.type.Type;
 import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.RemoteSourceNode;
-
-import javax.annotation.concurrent.Immutable;
+import io.trino.sql.planner.plan.TableScanNode;
 
 import java.util.List;
 import java.util.Map;
@@ -42,76 +45,92 @@ public class PlanFragment
 {
     private final PlanFragmentId id;
     private final PlanNode root;
-    private final Map<Symbol, Type> symbols;
+    private final Set<Symbol> symbols;
     private final PartitioningHandle partitioning;
+    private final Optional<Integer> partitionCount;
     private final List<PlanNodeId> partitionedSources;
     private final Set<PlanNodeId> partitionedSourcesSet;
     private final List<Type> types;
     private final Set<PlanNode> partitionedSourceNodes;
     private final List<RemoteSourceNode> remoteSourceNodes;
-    private final PartitioningScheme partitioningScheme;
-    private final StageExecutionDescriptor stageExecutionDescriptor;
+    private final PartitioningScheme outputPartitioningScheme;
     private final StatsAndCosts statsAndCosts;
+    private final List<CatalogProperties> activeCatalogs;
+    private final Map<FunctionId, LanguageFunctionData> languageFunctions;
     private final Optional<String> jsonRepresentation;
+    private final boolean containsTableScanNode;
 
     // Only for creating instances without the JSON representation embedded
     private PlanFragment(
             PlanFragmentId id,
             PlanNode root,
-            Map<Symbol, Type> symbols,
+            Set<Symbol> symbols,
             PartitioningHandle partitioning,
+            Optional<Integer> partitionCount,
             List<PlanNodeId> partitionedSources,
             Set<PlanNodeId> partitionedSourcesSet,
             List<Type> types,
             Set<PlanNode> partitionedSourceNodes,
             List<RemoteSourceNode> remoteSourceNodes,
-            PartitioningScheme partitioningScheme,
-            StageExecutionDescriptor stageExecutionDescriptor,
-            StatsAndCosts statsAndCosts)
+            PartitioningScheme outputPartitioningScheme,
+            StatsAndCosts statsAndCosts,
+            List<CatalogProperties> activeCatalogs,
+            Map<FunctionId, LanguageFunctionData> languageFunctions)
     {
         this.id = requireNonNull(id, "id is null");
         this.root = requireNonNull(root, "root is null");
         this.symbols = requireNonNull(symbols, "symbols is null");
         this.partitioning = requireNonNull(partitioning, "partitioning is null");
+        this.partitionCount = requireNonNull(partitionCount, "partitionCount is null");
         this.partitionedSources = requireNonNull(partitionedSources, "partitionedSources is null");
         this.partitionedSourcesSet = requireNonNull(partitionedSourcesSet, "partitionedSourcesSet is null");
         this.types = requireNonNull(types, "types is null");
         this.partitionedSourceNodes = requireNonNull(partitionedSourceNodes, "partitionedSourceNodes is null");
         this.remoteSourceNodes = requireNonNull(remoteSourceNodes, "remoteSourceNodes is null");
-        this.partitioningScheme = requireNonNull(partitioningScheme, "partitioningScheme is null");
-        this.stageExecutionDescriptor = requireNonNull(stageExecutionDescriptor, "stageExecutionDescriptor is null");
+        this.outputPartitioningScheme = requireNonNull(outputPartitioningScheme, "outputPartitioningScheme is null");
         this.statsAndCosts = requireNonNull(statsAndCosts, "statsAndCosts is null");
+        this.activeCatalogs = requireNonNull(activeCatalogs, "activeCatalogs is null");
+        this.languageFunctions = ImmutableMap.copyOf(languageFunctions);
         this.jsonRepresentation = Optional.empty();
+        this.containsTableScanNode = partitionedSourceNodes.stream().anyMatch(TableScanNode.class::isInstance);
     }
 
     @JsonCreator
     public PlanFragment(
             @JsonProperty("id") PlanFragmentId id,
             @JsonProperty("root") PlanNode root,
-            @JsonProperty("symbols") Map<Symbol, Type> symbols,
+            @JsonProperty("symbols") Set<Symbol> symbols,
             @JsonProperty("partitioning") PartitioningHandle partitioning,
+            @JsonProperty("partitionCount") Optional<Integer> partitionCount,
             @JsonProperty("partitionedSources") List<PlanNodeId> partitionedSources,
-            @JsonProperty("partitioningScheme") PartitioningScheme partitioningScheme,
-            @JsonProperty("stageExecutionDescriptor") StageExecutionDescriptor stageExecutionDescriptor,
+            @JsonProperty("outputPartitioningScheme") PartitioningScheme outputPartitioningScheme,
             @JsonProperty("statsAndCosts") StatsAndCosts statsAndCosts,
+            @JsonProperty("activeCatalogs") List<CatalogProperties> activeCatalogs,
+            @JsonProperty("languageFunctions") Map<FunctionId, LanguageFunctionData> languageFunctions,
             @JsonProperty("jsonRepresentation") Optional<String> jsonRepresentation)
     {
         this.id = requireNonNull(id, "id is null");
         this.root = requireNonNull(root, "root is null");
         this.symbols = requireNonNull(symbols, "symbols is null");
         this.partitioning = requireNonNull(partitioning, "partitioning is null");
+        this.partitionCount = requireNonNull(partitionCount, "partitionCount is null");
         this.partitionedSources = ImmutableList.copyOf(requireNonNull(partitionedSources, "partitionedSources is null"));
         this.partitionedSourcesSet = ImmutableSet.copyOf(partitionedSources);
-        this.stageExecutionDescriptor = requireNonNull(stageExecutionDescriptor, "stageExecutionDescriptor is null");
         this.statsAndCosts = requireNonNull(statsAndCosts, "statsAndCosts is null");
+        this.activeCatalogs = requireNonNull(activeCatalogs, "activeCatalogs is null");
+        this.languageFunctions = ImmutableMap.copyOf(languageFunctions);
         this.jsonRepresentation = requireNonNull(jsonRepresentation, "jsonRepresentation is null");
 
-        checkArgument(partitionedSourcesSet.size() == partitionedSources.size(), "partitionedSources contains duplicates");
-        checkArgument(ImmutableSet.copyOf(root.getOutputSymbols()).containsAll(partitioningScheme.getOutputLayout()),
-                "Root node outputs (%s) does not include all fragment outputs (%s)", root.getOutputSymbols(), partitioningScheme.getOutputLayout());
+        checkArgument(
+                partitionCount.isEmpty() || partitioning.getConnectorHandle() instanceof SystemPartitioningHandle,
+                "Connector partitioning handle should be of type system partitioning when partitionCount is present");
 
-        types = partitioningScheme.getOutputLayout().stream()
-                .map(symbols::get)
+        checkArgument(partitionedSourcesSet.size() == partitionedSources.size(), "partitionedSources contains duplicates");
+        checkArgument(ImmutableSet.copyOf(root.getOutputSymbols()).containsAll(outputPartitioningScheme.getOutputLayout()),
+                "Root node outputs (%s) does not include all fragment outputs (%s)", root.getOutputSymbols(), outputPartitioningScheme.getOutputLayout());
+
+        types = outputPartitioningScheme.getOutputLayout().stream()
+                .map(Symbol::type)
                 .collect(toImmutableList());
 
         this.partitionedSourceNodes = findSources(root, partitionedSources);
@@ -120,7 +139,8 @@ public class PlanFragment
         findRemoteSourceNodes(root, remoteSourceNodes);
         this.remoteSourceNodes = remoteSourceNodes.build();
 
-        this.partitioningScheme = requireNonNull(partitioningScheme, "partitioningScheme is null");
+        this.outputPartitioningScheme = requireNonNull(outputPartitioningScheme, "partitioningScheme is null");
+        this.containsTableScanNode = partitionedSourceNodes.stream().anyMatch(TableScanNode.class::isInstance);
     }
 
     @JsonProperty
@@ -136,7 +156,7 @@ public class PlanFragment
     }
 
     @JsonProperty
-    public Map<Symbol, Type> getSymbols()
+    public Set<Symbol> getSymbols()
     {
         return symbols;
     }
@@ -145,6 +165,12 @@ public class PlanFragment
     public PartitioningHandle getPartitioning()
     {
         return partitioning;
+    }
+
+    @JsonProperty
+    public Optional<Integer> getPartitionCount()
+    {
+        return partitionCount;
     }
 
     @JsonProperty
@@ -159,21 +185,27 @@ public class PlanFragment
     }
 
     @JsonProperty
-    public PartitioningScheme getPartitioningScheme()
+    public PartitioningScheme getOutputPartitioningScheme()
     {
-        return partitioningScheme;
-    }
-
-    @JsonProperty
-    public StageExecutionDescriptor getStageExecutionDescriptor()
-    {
-        return stageExecutionDescriptor;
+        return outputPartitioningScheme;
     }
 
     @JsonProperty
     public StatsAndCosts getStatsAndCosts()
     {
         return statsAndCosts;
+    }
+
+    @JsonProperty
+    public List<CatalogProperties> getActiveCatalogs()
+    {
+        return activeCatalogs;
+    }
+
+    @JsonProperty
+    public Map<FunctionId, LanguageFunctionData> getLanguageFunctions()
+    {
+        return languageFunctions;
     }
 
     @JsonProperty
@@ -194,14 +226,16 @@ public class PlanFragment
                 this.root,
                 this.symbols,
                 this.partitioning,
+                this.partitionCount,
                 this.partitionedSources,
                 this.partitionedSourcesSet,
                 this.types,
                 this.partitionedSourceNodes,
                 this.remoteSourceNodes,
-                this.partitioningScheme,
-                this.stageExecutionDescriptor,
-                this.statsAndCosts);
+                this.outputPartitioningScheme,
+                this.statsAndCosts,
+                this.activeCatalogs,
+                this.languageFunctions);
     }
 
     public List<Type> getTypes()
@@ -255,17 +289,18 @@ public class PlanFragment
 
     public PlanFragment withBucketToPartition(Optional<int[]> bucketToPartition)
     {
-        return new PlanFragment(id, root, symbols, partitioning, partitionedSources, partitioningScheme.withBucketToPartition(bucketToPartition), stageExecutionDescriptor, statsAndCosts, jsonRepresentation);
-    }
-
-    public PlanFragment withFixedLifespanScheduleGroupedExecution(List<PlanNodeId> capableTableScanNodes)
-    {
-        return new PlanFragment(id, root, symbols, partitioning, partitionedSources, partitioningScheme, StageExecutionDescriptor.fixedLifespanScheduleGroupedExecution(capableTableScanNodes), statsAndCosts, jsonRepresentation);
-    }
-
-    public PlanFragment withDynamicLifespanScheduleGroupedExecution(List<PlanNodeId> capableTableScanNodes)
-    {
-        return new PlanFragment(id, root, symbols, partitioning, partitionedSources, partitioningScheme, StageExecutionDescriptor.dynamicLifespanScheduleGroupedExecution(capableTableScanNodes), statsAndCosts, jsonRepresentation);
+        return new PlanFragment(
+                id,
+                root,
+                symbols,
+                partitioning,
+                partitionCount,
+                partitionedSources,
+                outputPartitioningScheme.withBucketToPartition(bucketToPartition),
+                statsAndCosts,
+                activeCatalogs,
+                languageFunctions,
+                jsonRepresentation);
     }
 
     @Override
@@ -274,8 +309,30 @@ public class PlanFragment
         return toStringHelper(this)
                 .add("id", id)
                 .add("partitioning", partitioning)
+                .add("partitionCount", partitionCount)
                 .add("partitionedSource", partitionedSources)
-                .add("partitionFunction", partitioningScheme)
+                .add("outputPartitioningScheme", outputPartitioningScheme)
                 .toString();
+    }
+
+    public PlanFragment withActiveCatalogs(List<CatalogProperties> activeCatalogs)
+    {
+        return new PlanFragment(
+                this.id,
+                this.root,
+                this.symbols,
+                this.partitioning,
+                this.partitionCount,
+                this.partitionedSources,
+                this.outputPartitioningScheme,
+                this.statsAndCosts,
+                activeCatalogs,
+                this.languageFunctions,
+                this.jsonRepresentation);
+    }
+
+    public boolean containsTableScanNode()
+    {
+        return containsTableScanNode;
     }
 }

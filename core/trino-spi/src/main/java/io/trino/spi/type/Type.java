@@ -18,10 +18,12 @@ import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.connector.ConnectorSession;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static io.trino.spi.type.TypeOperatorDeclaration.NO_TYPE_OPERATOR_DECLARATION;
 import static java.util.Objects.requireNonNull;
@@ -81,6 +83,11 @@ public interface Type
     Class<?> getJavaType();
 
     /**
+     * Gets the ValueBlock type used to store values of this type.
+     */
+    Class<? extends ValueBlock> getValueBlockType();
+
+    /**
      * For parameterized types returns the list of parameters.
      */
     List<Type> getTypeParameters();
@@ -96,6 +103,16 @@ public interface Type
      * store values after an expression projection within the query.
      */
     BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries);
+
+    /**
+     * Creates a block containing as single  null values.
+     */
+    default ValueBlock createNullBlock()
+    {
+        return createBlockBuilder(null, 1, 0)
+                .appendNull()
+                .buildValueBlock();
+    }
 
     /**
      * Gets an object representation of the type value in the {@code block}
@@ -173,6 +190,71 @@ public interface Type
     {
         return Optional.empty();
     }
+
+    /**
+     * Returns the maximum value that compares less than {@code value}.
+     * <p>
+     * The type of the value must match {@link #getJavaType}.
+     *
+     * @throws IllegalStateException if this type is not {@link #isOrderable() orderable}
+     */
+    default Optional<Object> getPreviousValue(Object value)
+    {
+        if (!isOrderable()) {
+            throw new IllegalStateException("Type is not orderable: " + this);
+        }
+        requireNonNull(value, "value is null");
+        return Optional.empty();
+    }
+
+    /**
+     * Returns the minimum value that compares greater than {@code value}.
+     * <p>
+     * The type of the value must match {@link #getJavaType}.
+     *
+     * @throws IllegalStateException if this type is not {@link #isOrderable() orderable}
+     */
+    default Optional<Object> getNextValue(Object value)
+    {
+        if (!isOrderable()) {
+            throw new IllegalStateException("Type is not orderable: " + this);
+        }
+        requireNonNull(value, "value is null");
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a stream of discrete values inside the specified range (if supported by this type).
+     */
+    default Optional<Stream<?>> getDiscreteValues(Range range)
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Returns the fixed size of this type when written to a flat buffer.
+     */
+    int getFlatFixedSize();
+
+    /**
+     * Returns true if this type is variable width when written to a flat buffer.
+     */
+    boolean isFlatVariableWidth();
+
+    /**
+     * Returns the variable width size of the value at the specified position when written to a flat buffer.
+     */
+    int getFlatVariableWidthSize(Block block, int position);
+
+    /**
+     * Update the variable width offsets recorded in the value.
+     * This method is called after the value has been moved to a new location, and therefore the offsets
+     * need to be updated.
+     * Returns the length of the variable width data, so container types can update their offsets.
+     *
+     * @return the length of the variable width data
+     */
+    int relocateFlatVariableWidthOffsets(byte[] fixedSizeSlice, int fixedSizeOffset, byte[] variableSizeSlice, int variableSizeOffset);
 
     final class Range
     {

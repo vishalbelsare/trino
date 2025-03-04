@@ -16,13 +16,13 @@ package io.trino.sql.planner.plan;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.metadata.TableHandle;
 import io.trino.sql.planner.Symbol;
 
-import javax.annotation.concurrent.Immutable;
-
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
@@ -76,6 +76,7 @@ public class TableDeleteNode
     @Override
     public PlanNode replaceChildren(List<PlanNode> newChildren)
     {
-        return new TableDeleteNode(getId(), target, output);
+        checkArgument(newChildren.isEmpty(), "newChildren should be empty");
+        return this;
     }
 }

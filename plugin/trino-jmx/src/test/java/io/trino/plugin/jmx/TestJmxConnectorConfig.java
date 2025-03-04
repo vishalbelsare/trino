@@ -16,7 +16,7 @@ package io.trino.plugin.jmx;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -40,11 +40,11 @@ public class TestJmxConnectorConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("jmx.dump-tables", "table1,table\\,with\\,commas")
                 .put("jmx.dump-period", "1s")
                 .put("jmx.max-entries", "100")
-                .build();
+                .buildOrThrow();
 
         JmxConnectorConfig expected = new JmxConnectorConfig()
                 .setDumpTables(ImmutableSet.of("table1", "table,with,commas"))

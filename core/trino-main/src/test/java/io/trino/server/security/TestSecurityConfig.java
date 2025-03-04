@@ -15,7 +15,7 @@ package io.trino.server.security;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -29,7 +29,7 @@ public class TestSecurityConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(SecurityConfig.class)
-                .setAuthenticationTypes("insecure")
+                .setAuthenticationTypes(ImmutableList.of("insecure"))
                 .setInsecureAuthenticationOverHttpAllowed(true)
                 .setFixedManagementUser(null)
                 .setFixedManagementUserForHttps(false));
@@ -38,12 +38,12 @@ public class TestSecurityConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("http-server.authentication.type", "KERBEROS,PASSWORD")
                 .put("http-server.authentication.allow-insecure-over-http", "false")
                 .put("management.user", "management-user")
                 .put("management.user.https-enabled", "true")
-                .build();
+                .buildOrThrow();
 
         SecurityConfig expected = new SecurityConfig()
                 .setAuthenticationTypes(ImmutableList.of("KERBEROS", "PASSWORD"))

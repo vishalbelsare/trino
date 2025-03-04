@@ -16,7 +16,7 @@ package io.trino.execution.scheduler;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.testing.ConfigAssertions;
 import io.airlift.units.Duration;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -41,10 +41,10 @@ public class TestTopologyFileConfig
     {
         Path networkTopologyFile = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("node-scheduler.network-topology.file", networkTopologyFile.toString())
                 .put("node-scheduler.network-topology.refresh-period", "27m")
-                .build();
+                .buildOrThrow();
 
         TopologyFileConfig expected = new TopologyFileConfig()
                 .setNetworkTopologyFile(networkTopologyFile.toFile())

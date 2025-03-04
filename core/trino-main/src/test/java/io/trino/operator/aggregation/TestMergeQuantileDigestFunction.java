@@ -23,8 +23,7 @@ import io.trino.spi.type.SqlVarbinary;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.TypeSignatureParameter;
-import io.trino.sql.tree.QualifiedName;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.function.BiFunction;
@@ -58,7 +57,7 @@ public class TestMergeQuantileDigestFunction
     @Override
     protected Block[] getSequenceBlocks(int start, int length)
     {
-        Type type = functionResolution.getMetadata().getType(new TypeSignature(QDIGEST.getName(), TypeSignatureParameter.typeParameter(DOUBLE.getTypeSignature())));
+        Type type = functionResolution.getPlannerContext().getTypeManager().getType(new TypeSignature(QDIGEST.getName(), TypeSignatureParameter.typeParameter(DOUBLE.getTypeSignature())));
         BlockBuilder blockBuilder = type.createBlockBuilder(null, length);
         for (int i = start; i < start + length; i++) {
             QuantileDigest qdigest = new QuantileDigest(0.0);
@@ -103,7 +102,7 @@ public class TestMergeQuantileDigestFunction
     {
         assertAggregation(
                 functionResolution,
-                QualifiedName.of(getFunctionName()),
+                getFunctionName(),
                 fromTypes(getFunctionParameterTypes()),
                 QDIGEST_EQUALITY,
                 "test multiple positions",
@@ -117,7 +116,7 @@ public class TestMergeQuantileDigestFunction
     {
         assertAggregation(
                 functionResolution,
-                QualifiedName.of(getFunctionName()),
+                getFunctionName(),
                 fromTypes(getFunctionParameterTypes()),
                 QDIGEST_EQUALITY,
                 "test mixed null and nonnull position",

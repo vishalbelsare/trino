@@ -13,7 +13,14 @@
  */
 package io.trino.testing.sql;
 
+import org.intellij.lang.annotations.Language;
+
 public interface SqlExecutor
 {
-    void execute(String sql);
+    default boolean supportsMultiRowInsert()
+    {
+        return true;
+    }
+
+    void execute(@Language("SQL") String sql);
 }

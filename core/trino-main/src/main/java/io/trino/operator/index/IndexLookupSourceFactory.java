@@ -18,6 +18,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.units.DataSize;
+import io.trino.operator.FlatHashStrategyCompiler;
 import io.trino.operator.PagesIndex;
 import io.trino.operator.TaskContext;
 import io.trino.operator.join.LookupSourceFactory;
@@ -25,7 +26,6 @@ import io.trino.operator.join.LookupSourceProvider;
 import io.trino.operator.join.OuterPositionIterator;
 import io.trino.operator.join.StaticLookupSourceProvider;
 import io.trino.spi.type.Type;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.type.BlockTypeOperators;
 
 import java.util.List;
@@ -56,17 +56,39 @@ public class IndexLookupSourceFactory
             IndexJoinLookupStats stats,
             boolean shareIndexLoading,
             PagesIndex.Factory pagesIndexFactory,
-            JoinCompiler joinCompiler,
+            FlatHashStrategyCompiler hashStrategyCompiler,
             BlockTypeOperators blockTypeOperators)
     {
         this.outputTypes = ImmutableList.copyOf(requireNonNull(outputTypes, "outputTypes is null"));
 
         if (shareIndexLoading) {
-            IndexLoader shared = new IndexLoader(lookupSourceInputChannels, keyOutputChannels, keyOutputHashChannel, outputTypes, indexBuildDriverFactoryProvider, 10_000, maxIndexMemorySize, stats, pagesIndexFactory, joinCompiler, blockTypeOperators);
+            IndexLoader shared = new IndexLoader(
+                    lookupSourceInputChannels,
+                    keyOutputChannels,
+                    keyOutputHashChannel,
+                    outputTypes,
+                    indexBuildDriverFactoryProvider,
+                    10_000,
+                    maxIndexMemorySize,
+                    stats,
+                    pagesIndexFactory,
+                    hashStrategyCompiler,
+                    blockTypeOperators);
             this.indexLoaderSupplier = () -> shared;
         }
         else {
-            this.indexLoaderSupplier = () -> new IndexLoader(lookupSourceInputChannels, keyOutputChannels, keyOutputHashChannel, outputTypes, indexBuildDriverFactoryProvider, 10_000, maxIndexMemorySize, stats, pagesIndexFactory, joinCompiler, blockTypeOperators);
+            this.indexLoaderSupplier = () -> new IndexLoader(
+                    lookupSourceInputChannels,
+                    keyOutputChannels,
+                    keyOutputHashChannel,
+                    outputTypes,
+                    indexBuildDriverFactoryProvider,
+                    10_000,
+                    maxIndexMemorySize,
+                    stats,
+                    pagesIndexFactory,
+                    hashStrategyCompiler,
+                    blockTypeOperators);
         }
     }
 
@@ -104,7 +126,7 @@ public class IndexLookupSourceFactory
     {
         return Futures.transformAsync(
                 whenTaskContextSet,
-                ignored -> transform(
+                _ -> transform(
                         this.createLookupSourceProvider(),
                         lookupSourceProvider -> {
                             // Close the lookupSourceProvider we just created.

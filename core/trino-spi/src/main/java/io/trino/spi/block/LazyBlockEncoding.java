@@ -23,12 +23,16 @@ public class LazyBlockEncoding
 {
     public static final String NAME = "LAZY";
 
-    public LazyBlockEncoding() {}
-
     @Override
     public String getName()
     {
         return NAME;
+    }
+
+    @Override
+    public Class<? extends Block> getBlockClass()
+    {
+        return LazyBlock.class;
     }
 
     @Override

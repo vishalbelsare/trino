@@ -23,27 +23,29 @@ import io.trino.operator.join.JoinFilterFunction;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.JoinFilterFunctionCompiler.JoinFilterFunctionFactory;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import org.locationtech.jts.geom.Envelope;
 import org.locationtech.jts.index.strtree.STRtree;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verifyNotNull;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.geospatial.serde.GeometrySerde.deserialize;
 import static io.trino.operator.SyntheticAddress.decodePosition;
 import static io.trino.operator.SyntheticAddress.decodeSliceIndex;
 import static io.trino.operator.join.JoinUtils.channelsToPages;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
-import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 public class PagesRTreeIndex
@@ -54,16 +56,17 @@ public class PagesRTreeIndex
     private final LongArrayList addresses;
     private final List<Type> types;
     private final List<Integer> outputChannels;
-    private final List<List<Block>> channels;
+    private final List<ObjectArrayList<Block>> channels;
     private final STRtree rtree;
     private final int radiusChannel;
+    private final OptionalDouble constantRadius;
     private final SpatialPredicate spatialRelationshipTest;
     private final JoinFilterFunction filterFunction;
     private final Map<Integer, Rectangle> partitions;
 
     public static final class GeometryWithPosition
     {
-        private static final int INSTANCE_SIZE = ClassLayout.parseClass(GeometryWithPosition.class).instanceSize();
+        private static final int INSTANCE_SIZE = instanceSize(GeometryWithPosition.class);
 
         private final OGCGeometry ogcGeometry;
         private final int partition;
@@ -102,9 +105,10 @@ public class PagesRTreeIndex
             LongArrayList addresses,
             List<Type> types,
             List<Integer> outputChannels,
-            List<List<Block>> channels,
+            List<ObjectArrayList<Block>> channels,
             STRtree rtree,
             Optional<Integer> radiusChannel,
+            OptionalDouble constantRadius,
             SpatialPredicate spatialRelationshipTest,
             Optional<JoinFilterFunctionFactory> filterFunctionFactory,
             Map<Integer, Rectangle> partitions)
@@ -115,9 +119,12 @@ public class PagesRTreeIndex
         this.channels = requireNonNull(channels, "channels is null");
         this.rtree = requireNonNull(rtree, "rtree is null");
         this.radiusChannel = radiusChannel.orElse(-1);
+        this.constantRadius = requireNonNull(constantRadius, "constantRadius is null");
         this.spatialRelationshipTest = requireNonNull(spatialRelationshipTest, "spatialRelationshipTest is null");
         this.filterFunction = filterFunctionFactory.map(factory -> factory.create(session.toConnectorSession(), addresses, channelsToPages(channels))).orElse(null);
         this.partitions = requireNonNull(partitions, "partitions is null");
+
+        checkArgument(!(constantRadius.isPresent() && radiusChannel.isPresent()), "Radius channel and constant radius are mutually exclusive");
     }
 
     private static Envelope getEnvelope(OGCGeometry ogcGeometry)
@@ -136,16 +143,19 @@ public class PagesRTreeIndex
      * for each of these addresses to apply additional join filters.
      */
     @Override
-    public int[] findJoinPositions(int probePosition, Page probe, int probeGeometryChannel, Optional<Integer> probePartitionChannel)
+    public int[] findJoinPositions(int position, Page probe, int probeGeometryChannel, Optional<Integer> probePartitionChannel)
     {
-        Block probeGeometryBlock = probe.getBlock(probeGeometryChannel);
+        Block probeBlock = probe.getBlock(probeGeometryChannel);
+        VariableWidthBlock probeGeometryBlock = (VariableWidthBlock) probeBlock.getUnderlyingValueBlock();
+        int probePosition = probeBlock.getUnderlyingValuePosition(position);
+
         if (probeGeometryBlock.isNull(probePosition)) {
             return EMPTY_ADDRESSES;
         }
 
-        int probePartition = probePartitionChannel.map(channel -> toIntExact(INTEGER.getLong(probe.getBlock(channel), probePosition))).orElse(-1);
+        int probePartition = probePartitionChannel.map(channel -> INTEGER.getInt(probe.getBlock(channel), probePosition)).orElse(-1);
 
-        Slice slice = probeGeometryBlock.getSlice(probePosition, 0, probeGeometryBlock.getSliceLength(probePosition));
+        Slice slice = probeGeometryBlock.getSlice(probePosition);
         OGCGeometry probeGeometry = deserialize(slice);
         verifyNotNull(probeGeometry);
         if (probeGeometry.isEmpty()) {
@@ -161,20 +171,24 @@ public class PagesRTreeIndex
             GeometryWithPosition geometryWithPosition = (GeometryWithPosition) item;
             OGCGeometry buildGeometry = geometryWithPosition.getGeometry();
             if (partitions.isEmpty() || (probePartition == geometryWithPosition.getPartition() && (probeIsPoint || (buildGeometry instanceof OGCPoint) || testReferencePoint(envelope, buildGeometry, probePartition)))) {
-                if (radiusChannel == -1) {
+                if (radiusChannel == -1 && constantRadius.isEmpty()) {
                     if (spatialRelationshipTest.apply(buildGeometry, probeGeometry, OptionalDouble.empty())) {
                         matchingPositions.add(geometryWithPosition.getPosition());
                     }
                 }
                 else {
-                    if (spatialRelationshipTest.apply(geometryWithPosition.getGeometry(), probeGeometry, OptionalDouble.of(getRadius(geometryWithPosition.getPosition())))) {
+                    OptionalDouble radius = constantRadius;
+                    if (radius.isEmpty()) {
+                        radius = OptionalDouble.of(getRadius(geometryWithPosition.getPosition()));
+                    }
+                    if (spatialRelationshipTest.apply(geometryWithPosition.getGeometry(), probeGeometry, radius)) {
                         matchingPositions.add(geometryWithPosition.getPosition());
                     }
                 }
             }
         });
 
-        return matchingPositions.toIntArray(null);
+        return matchingPositions.toIntArray();
     }
 
     private boolean testReferencePoint(Envelope probeEnvelope, OGCGeometry buildGeometry, int partition)

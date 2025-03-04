@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
+import io.trino.filesystem.local.LocalOutputFile;
 import io.trino.orc.OrcWriteValidation.OrcWriteValidationMode;
 import io.trino.orc.metadata.Footer;
 import io.trino.orc.metadata.OrcMetadataReader;
@@ -30,18 +31,16 @@ import io.trino.orc.stream.OrcChunkLoader;
 import io.trino.orc.stream.OrcInputStream;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.type.Type;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 
-import static io.airlift.testing.Assertions.assertGreaterThanOrEqual;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.orc.OrcTester.READER_OPTIONS;
@@ -52,7 +51,7 @@ import static io.trino.orc.metadata.CompressionKind.NONE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.testng.Assert.assertFalse;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestOrcWriter
 {
@@ -60,15 +59,40 @@ public class TestOrcWriter
     public void testWriteOutputStreamsInOrder()
             throws IOException
     {
+        testWriteOutput(ImmutableList.of("test1", "test2", "test3", "test4", "test5"),
+                new String[] {"a", "bbbbb", "ccc", "dd", "eeee"});
+    }
+
+    @Test
+    public void testWriteHugeChunk()
+            throws IOException
+    {
+        int columnCount = 500;
+        ImmutableList.Builder<String> columnNameBuilder = ImmutableList.builder();
+        String[] data = new String[columnCount];
+
+        for (int i = 0; i < columnCount; i++) {
+            columnNameBuilder.add(String.valueOf(i));
+            data[i] = "LONG_STRING";
+        }
+        testWriteOutput(columnNameBuilder.build(), data);
+    }
+
+    private void testWriteOutput(List<String> columnNames, String[] data)
+            throws IOException
+    {
         for (OrcWriteValidationMode validationMode : OrcWriteValidationMode.values()) {
             TempFile tempFile = new TempFile();
 
-            List<String> columnNames = ImmutableList.of("test1", "test2", "test3", "test4", "test5");
-            List<Type> types = ImmutableList.of(VARCHAR, VARCHAR, VARCHAR, VARCHAR, VARCHAR);
+            ImmutableList.Builder<Type> builder = ImmutableList.builder();
+            for (int i = 0; i < columnNames.size(); i++) {
+                builder.add(VARCHAR);
+            }
+            List<Type> types = builder.build();
 
             OrcWriter writer = new OrcWriter(
-                    new OutputStreamOrcDataSink(new FileOutputStream(tempFile.getFile())),
-                    ImmutableList.of("test1", "test2", "test3", "test4", "test5"),
+                    OutputStreamOrcDataSink.create(new LocalOutputFile(tempFile.getFile())),
+                    columnNames,
                     types,
                     OrcType.createRootOrcType(columnNames, types),
                     NONE,
@@ -85,20 +109,18 @@ public class TestOrcWriter
                     new OrcWriterStats());
 
             // write down some data with unsorted streams
-            String[] data = new String[] {"a", "bbbbb", "ccc", "dd", "eeee"};
             Block[] blocks = new Block[data.length];
             int entries = 65536;
-            BlockBuilder blockBuilder = VARCHAR.createBlockBuilder(null, entries);
+            VariableWidthBlockBuilder blockBuilder = VARCHAR.createBlockBuilder(null, entries);
             for (int i = 0; i < data.length; i++) {
                 byte[] bytes = data[i].getBytes(UTF_8);
                 for (int j = 0; j < entries; j++) {
                     // force to write different data
                     bytes[0] = (byte) ((bytes[0] + 1) % 128);
-                    blockBuilder.writeBytes(Slices.wrappedBuffer(bytes, 0, bytes.length), 0, bytes.length);
-                    blockBuilder.closeEntry();
+                    blockBuilder.writeEntry(Slices.wrappedBuffer(bytes, 0, bytes.length));
                 }
                 blocks[i] = blockBuilder.build();
-                blockBuilder = blockBuilder.newBlockBuilderLike(null);
+                blockBuilder = (VariableWidthBlockBuilder) blockBuilder.newBlockBuilderLike(null);
             }
 
             writer.write(new Page(blocks));
@@ -117,18 +139,18 @@ public class TestOrcWriter
                 // read the footer
                 Slice tailBuffer = orcDataSource.readFully(stripe.getOffset() + stripe.getIndexLength() + stripe.getDataLength(), toIntExact(stripe.getFooterLength()));
                 try (InputStream inputStream = new OrcInputStream(OrcChunkLoader.create(orcDataSource.getId(), tailBuffer, Optional.empty(), newSimpleAggregatedMemoryContext()))) {
-                    StripeFooter stripeFooter = new OrcMetadataReader().readStripeFooter(footer.getTypes(), inputStream, ZoneId.of("UTC"));
+                    StripeFooter stripeFooter = new OrcMetadataReader(new OrcReaderOptions()).readStripeFooter(footer.getTypes(), inputStream, ZoneId.of("UTC"));
 
                     int size = 0;
                     boolean dataStreamStarted = false;
                     for (Stream stream : stripeFooter.getStreams()) {
                         if (isIndexStream(stream)) {
-                            assertFalse(dataStreamStarted);
+                            assertThat(dataStreamStarted).isFalse();
                             continue;
                         }
                         dataStreamStarted = true;
                         // verify sizes in order
-                        assertGreaterThanOrEqual(stream.getLength(), size);
+                        assertThat(stream.getLength()).isGreaterThanOrEqualTo(size);
                         size = stream.getLength();
                     }
                 }

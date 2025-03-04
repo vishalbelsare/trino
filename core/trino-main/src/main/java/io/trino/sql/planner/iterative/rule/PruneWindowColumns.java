@@ -54,11 +54,12 @@ public class PruneWindowColumns
 
         windowNode.getOrderingScheme().ifPresent(
                 orderingScheme -> orderingScheme
-                        .getOrderBy()
+                        .orderBy()
                         .forEach(referencedInputs::add));
         windowNode.getHashSymbol().ifPresent(referencedInputs::add);
 
         for (WindowNode.Function windowFunction : referencedFunctions.values()) {
+            windowFunction.getOrderingScheme().ifPresent(orderingScheme -> referencedInputs.addAll(orderingScheme.orderBy()));
             referencedInputs.addAll(SymbolsExtractor.extractUnique(windowFunction));
         }
 

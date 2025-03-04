@@ -13,7 +13,7 @@
  */
 package io.trino.execution.resourcegroups;
 
-import javax.annotation.concurrent.Immutable;
+import com.google.errorprone.annotations.Immutable;
 
 import java.util.Objects;
 
@@ -21,7 +21,7 @@ import static com.google.common.math.LongMath.saturatedAdd;
 import static com.google.common.math.LongMath.saturatedSubtract;
 
 @Immutable
-class ResourceUsage
+final class ResourceUsage
 {
     private final long cpuUsageMillis;
     private final long memoryUsageBytes;
@@ -30,12 +30,6 @@ class ResourceUsage
     {
         this.cpuUsageMillis = cpuUsageMillis;
         this.memoryUsageBytes = memoryUsageBytes;
-    }
-
-    @Override
-    public ResourceUsage clone()
-    {
-        return new ResourceUsage(cpuUsageMillis, memoryUsageBytes);
     }
 
     public ResourceUsage add(ResourceUsage other)

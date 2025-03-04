@@ -24,6 +24,9 @@ import java.sql.SQLException;
 
 import static java.lang.String.format;
 
+/**
+ * An integration test for JDBC client interacting with Trino server.
+ */
 public class TestJdbcResultSet
         extends BaseTestJdbcResultSet
 {
@@ -46,6 +49,7 @@ public class TestJdbcResultSet
             throws Exception
     {
         server.close();
+        server = null;
     }
 
     @Override
@@ -54,12 +58,5 @@ public class TestJdbcResultSet
     {
         String url = format("jdbc:trino://%s", server.getAddress());
         return DriverManager.getConnection(url, "test", null);
-    }
-
-    @Override
-    protected int getTestedServerVersion()
-    {
-        // Latest version
-        return Integer.MAX_VALUE;
     }
 }

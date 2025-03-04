@@ -15,15 +15,24 @@ package io.trino.spi.eventlistener;
 
 public interface EventListener
 {
-    default void queryCreated(QueryCreatedEvent queryCreatedEvent)
+    default void queryCreated(QueryCreatedEvent queryCreatedEvent) {}
+
+    default void queryCompleted(QueryCompletedEvent queryCompletedEvent) {}
+
+    default void splitCompleted(SplitCompletedEvent splitCompletedEvent) {}
+
+    /**
+     * Specify whether the plan included in QueryCompletedEvent should be anonymized or not
+     */
+    default boolean requiresAnonymizedPlan()
     {
+        return false;
     }
 
-    default void queryCompleted(QueryCompletedEvent queryCompletedEvent)
-    {
-    }
-
-    default void splitCompleted(SplitCompletedEvent splitCompletedEvent)
-    {
-    }
+    /**
+     * Shutdown the event listener by releasing any held resources such as
+     * threads, sockets, etc. After this method is called,
+     * no methods will be called on the event listener.
+     */
+    default void shutdown() {}
 }

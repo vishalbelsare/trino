@@ -13,14 +13,12 @@
  */
 package io.trino.sql.tree;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public final class PathElement
@@ -29,23 +27,7 @@ public final class PathElement
     private final Optional<Identifier> catalog;
     private final Identifier schema;
 
-    public PathElement(NodeLocation location, Identifier schema)
-    {
-        this(Optional.of(location), Optional.empty(), schema);
-    }
-
-    @VisibleForTesting
-    public PathElement(Optional<Identifier> catalog, Identifier schema)
-    {
-        this(Optional.empty(), catalog, schema);
-    }
-
-    public PathElement(NodeLocation location, Identifier catalog, Identifier schema)
-    {
-        this(Optional.of(location), Optional.of(catalog), schema);
-    }
-
-    private PathElement(Optional<NodeLocation> location, Optional<Identifier> catalog, Identifier schema)
+    public PathElement(NodeLocation location, Optional<Identifier> catalog, Identifier schema)
     {
         super(location);
         this.catalog = requireNonNull(catalog, "catalog is null");
@@ -98,7 +80,7 @@ public final class PathElement
     public String toString()
     {
         if (catalog.isPresent()) {
-            return format("%s.%s", catalog.get(), schema);
+            return catalog.get() + "." + schema;
         }
         return schema.toString();
     }

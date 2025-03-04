@@ -31,7 +31,6 @@ import io.trino.orc.stream.PresentOutputStream;
 import io.trino.orc.stream.StreamDataOutput;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.ColumnarMap;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -41,6 +40,7 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT_V2;
 import static io.trino.orc.metadata.CompressionKind.NONE;
 import static io.trino.orc.stream.LongOutputStream.createLengthOutputStream;
@@ -50,7 +50,7 @@ import static java.util.Objects.requireNonNull;
 public class MapColumnWriter
         implements ColumnWriter
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(MapColumnWriter.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(MapColumnWriter.class);
     private final OrcColumnId columnId;
     private final boolean compressed;
     private final ColumnEncoding columnEncoding;
@@ -94,7 +94,7 @@ public class MapColumnWriter
         encodings.put(columnId, columnEncoding);
         encodings.putAll(keyWriter.getColumnEncodings());
         encodings.putAll(valueWriter.getColumnEncodings());
-        return encodings.build();
+        return encodings.buildOrThrow();
     }
 
     @Override
@@ -142,7 +142,7 @@ public class MapColumnWriter
     {
         checkState(!closed);
 
-        ColumnStatistics statistics = new ColumnStatistics((long) nonNullValueCount, 0, null, null, null, null, null, null, null, null, null);
+        ColumnStatistics statistics = new ColumnStatistics((long) nonNullValueCount, 0, null, null, null, null, null, null, null, null, null, null);
         rowGroupColumnStatistics.add(statistics);
         nonNullValueCount = 0;
 
@@ -150,7 +150,7 @@ public class MapColumnWriter
         columnStatistics.put(columnId, statistics);
         columnStatistics.putAll(keyWriter.finishRowGroup());
         columnStatistics.putAll(valueWriter.finishRowGroup());
-        return columnStatistics.build();
+        return columnStatistics.buildOrThrow();
     }
 
     @Override
@@ -171,7 +171,7 @@ public class MapColumnWriter
         columnStatistics.put(columnId, ColumnStatistics.mergeColumnStatistics(rowGroupColumnStatistics));
         columnStatistics.putAll(keyWriter.getColumnStripeStatistics());
         columnStatistics.putAll(valueWriter.getColumnStripeStatistics());
-        return columnStatistics.build();
+        return columnStatistics.buildOrThrow();
     }
 
     @Override

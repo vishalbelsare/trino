@@ -17,77 +17,91 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.connector.MockConnectorFactory;
+import io.trino.connector.MockConnectorPlugin;
 import io.trino.metadata.QualifiedObjectName;
-import io.trino.plugin.tpch.TpchConnectorFactory;
-import io.trino.spi.TrinoException;
+import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.ViewExpression;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.VarcharType;
-import io.trino.testing.LocalQueryRunner;
+import io.trino.testing.QueryRunner;
+import io.trino.testing.StandaloneQueryRunner;
 import io.trino.testing.TestingAccessControlManager;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.Optional;
 
 import static io.trino.connector.MockConnectorEntities.TPCH_NATION_DATA;
 import static io.trino.connector.MockConnectorEntities.TPCH_NATION_SCHEMA;
 import static io.trino.connector.MockConnectorEntities.TPCH_NATION_WITH_HIDDEN_COLUMN;
+import static io.trino.connector.MockConnectorEntities.TPCH_NATION_WITH_OPTIONAL_COLUMN;
 import static io.trino.connector.MockConnectorEntities.TPCH_WITH_HIDDEN_COLUMN_DATA;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
+import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.EXPRESSION_NOT_SCALAR;
+import static io.trino.spi.StandardErrorCode.INVALID_ROW_FILTER;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
+import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(SAME_THREAD)
 public class TestRowFilter
 {
-    private static final String CATALOG = "local";
+    private static final String LOCAL_CATALOG = "local";
     private static final String MOCK_CATALOG = "mock";
+    private static final String MOCK_CATALOG_MISSING_COLUMNS = "mockmissingcolumns";
     private static final String USER = "user";
     private static final String VIEW_OWNER = "view-owner";
     private static final String RUN_AS_USER = "run-as-user";
 
     private static final Session SESSION = testSessionBuilder()
-            .setCatalog(CATALOG)
+            .setCatalog(LOCAL_CATALOG)
             .setSchema(TINY_SCHEMA_NAME)
             .setIdentity(Identity.forUser(USER).build())
             .build();
 
-    private QueryAssertions assertions;
-    private TestingAccessControlManager accessControl;
+    private final QueryAssertions assertions;
+    private final TestingAccessControlManager accessControl;
 
-    @BeforeClass
-    public void init()
+    public TestRowFilter()
     {
-        LocalQueryRunner runner = LocalQueryRunner.builder(SESSION).build();
-
-        runner.createCatalog(CATALOG, new TpchConnectorFactory(1), ImmutableMap.of());
+        QueryRunner runner = new StandaloneQueryRunner(SESSION);
+        runner.installPlugin(new TpchPlugin());
+        runner.createCatalog(LOCAL_CATALOG, "tpch", ImmutableMap.of("tpch.splits-per-node", "1"));
 
         ConnectorViewDefinition view = new ConnectorViewDefinition(
                 "SELECT nationkey, name FROM local.tiny.nation",
                 Optional.empty(),
                 Optional.empty(),
-                ImmutableList.of(new ConnectorViewDefinition.ViewColumn("nationkey", BigintType.BIGINT.getTypeId()), new ConnectorViewDefinition.ViewColumn("name", VarcharType.createVarcharType(25)
-                        .getTypeId())),
+                ImmutableList.of(
+                        new ConnectorViewDefinition.ViewColumn("nationkey", BigintType.BIGINT.getTypeId(), Optional.empty()),
+                        new ConnectorViewDefinition.ViewColumn("name", VarcharType.createVarcharType(25).getTypeId(), Optional.empty())),
                 Optional.empty(),
                 Optional.of(VIEW_OWNER),
-                false);
+                false,
+                ImmutableList.of());
 
-        MockConnectorFactory mock = MockConnectorFactory.builder()
-                .withGetViews((s, prefix) -> ImmutableMap.<SchemaTableName, ConnectorViewDefinition>builder()
-                        .put(new SchemaTableName("default", "nation_view"), view)
-                        .build())
+        runner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                .withGetViews((s, prefix) -> ImmutableMap.of(new SchemaTableName("default", "nation_view"), view))
                 .withGetColumns(schemaTableName -> {
                     if (schemaTableName.equals(new SchemaTableName("tiny", "nation"))) {
                         return TPCH_NATION_SCHEMA;
                     }
                     if (schemaTableName.equals(new SchemaTableName("tiny", "nation_with_hidden_column"))) {
                         return TPCH_NATION_WITH_HIDDEN_COLUMN;
+                    }
+                    if (schemaTableName.equals(new SchemaTableName("tiny", "nation_with_optional_column"))) {
+                        return TPCH_NATION_WITH_OPTIONAL_COLUMN;
                     }
                     throw new UnsupportedOperationException();
                 })
@@ -98,21 +112,43 @@ public class TestRowFilter
                     if (schemaTableName.equals(new SchemaTableName("tiny", "nation_with_hidden_column"))) {
                         return TPCH_WITH_HIDDEN_COLUMN_DATA;
                     }
+                    if (schemaTableName.equals(new SchemaTableName("tiny", "nation_with_optional_column"))) {
+                        return TPCH_NATION_DATA;
+                    }
                     throw new UnsupportedOperationException();
                 })
-                .build();
+                .build()));
+        runner.createCatalog(MOCK_CATALOG, "mock", ImmutableMap.of());
 
-        runner.createCatalog(MOCK_CATALOG, mock, ImmutableMap.of());
+        runner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                .withName("mockmissingcolumns")
+                .withGetViews((s, prefix) -> ImmutableMap.of(
+                        new SchemaTableName("default", "nation_view"), view))
+                .withGetColumns(schemaTableName -> {
+                    if (schemaTableName.equals(new SchemaTableName("tiny", "nation_with_optional_column"))) {
+                        return TPCH_NATION_WITH_OPTIONAL_COLUMN;
+                    }
+                    throw new UnsupportedOperationException();
+                })
+                .withData(schemaTableName -> {
+                    if (schemaTableName.equals(new SchemaTableName("tiny", "nation_with_optional_column"))) {
+                        return TPCH_NATION_DATA;
+                    }
+                    throw new UnsupportedOperationException();
+                })
+                .withAllowMissingColumnsOnInsert(true)
+                .build()));
+
+        runner.createCatalog(MOCK_CATALOG_MISSING_COLUMNS, "mockmissingcolumns", ImmutableMap.of());
 
         assertions = new QueryAssertions(runner);
         accessControl = assertions.getQueryRunner().getAccessControl();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -120,16 +156,16 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "orderkey < 10"));
+                ViewExpression.builder().expression("orderkey < 10").build());
         assertThat(assertions.query("SELECT count(*) FROM orders")).matches("VALUES BIGINT '7'");
 
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "NULL"));
+                ViewExpression.builder().expression("NULL").build());
         assertThat(assertions.query("SELECT count(*) FROM orders")).matches("VALUES BIGINT '0'");
     }
 
@@ -138,14 +174,14 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "orderkey < 10"));
+                ViewExpression.builder().expression("orderkey < 10").build());
 
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "orderkey > 5"));
+                ViewExpression.builder().expression("orderkey > 5").build());
 
         assertThat(assertions.query("SELECT count(*) FROM orders")).matches("VALUES BIGINT '2'");
     }
@@ -155,9 +191,13 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.of(CATALOG), Optional.of("tiny"), "EXISTS (SELECT 1 FROM nation WHERE nationkey = orderkey)"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("EXISTS (SELECT 1 FROM nation WHERE nationkey = orderkey)")
+                        .build());
         assertThat(assertions.query("SELECT count(*) FROM orders")).matches("VALUES BIGINT '7'");
     }
 
@@ -167,9 +207,9 @@ public class TestRowFilter
         // filter on the underlying table for view owner when running query as different user
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "nation"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "nation"),
                 VIEW_OWNER,
-                new ViewExpression(VIEW_OWNER, Optional.empty(), Optional.empty(), "nationkey = 1"));
+                ViewExpression.builder().expression("nationkey = 1").build());
 
         assertThat(assertions.query(
                 Session.builder(SESSION)
@@ -181,9 +221,13 @@ public class TestRowFilter
         // filter on the underlying table for view owner when running as themselves
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "nation"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "nation"),
                 VIEW_OWNER,
-                new ViewExpression(VIEW_OWNER, Optional.of(CATALOG), Optional.of("tiny"), "nationkey = 1"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("nationkey = 1")
+                        .build());
 
         assertThat(assertions.query(
                 Session.builder(SESSION)
@@ -195,9 +239,13 @@ public class TestRowFilter
         // filter on the underlying table for user running the query (different from view owner) should not be applied
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "nation"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "nation"),
                 RUN_AS_USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "nationkey = 1"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("nationkey = 1")
+                        .build());
 
         Session session = Session.builder(SESSION)
                 .setIdentity(Identity.forUser(RUN_AS_USER).build())
@@ -210,7 +258,11 @@ public class TestRowFilter
         accessControl.rowFilter(
                 new QualifiedObjectName(MOCK_CATALOG, "default", "nation_view"),
                 USER,
-                new ViewExpression(USER, Optional.of(CATALOG), Optional.of("tiny"), "nationkey = 1"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("nationkey = 1")
+                        .build());
         assertThat(assertions.query("SELECT name FROM mock.default.nation_view")).matches("VALUES CAST('ARGENTINA' AS VARCHAR(25))");
     }
 
@@ -219,9 +271,9 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "orderkey = 1"));
+                ViewExpression.builder().expression("orderkey = 1").build());
         assertThat(assertions.query("WITH t AS (SELECT count(*) FROM orders) SELECT * FROM t")).matches("VALUES BIGINT '1'");
     }
 
@@ -230,9 +282,13 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.of(CATALOG), Optional.of("sf1"), "(SELECT count(*) FROM customer) = 150000")); // Filter is TRUE only if evaluating against sf1.customer
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("sf1") // Filter is TRUE only if evaluating against sf1.customer
+                        .expression("(SELECT count(*) FROM customer) = 150000")
+                        .build());
         assertThat(assertions.query("SELECT count(*) FROM orders")).matches("VALUES BIGINT '15000'");
     }
 
@@ -241,14 +297,23 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 RUN_AS_USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey = 1"));
+                ViewExpression.builder()
+                        .identity(RUN_AS_USER)
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("orderkey = 1")
+                        .build());
 
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey IN (SELECT orderkey FROM orders)"));
+                ViewExpression.builder()
+                        .identity(RUN_AS_USER)
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny").expression("orderkey IN (SELECT orderkey FROM orders)")
+                        .build());
 
         assertThat(assertions.query("SELECT count(*) FROM orders")).matches("VALUES BIGINT '1'");
     }
@@ -258,35 +323,57 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey IN (SELECT orderkey FROM orders)"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("orderkey IN (SELECT orderkey FROM orders)")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(INVALID_ROW_FILTER)
                 .hasMessageMatching(".*\\QRow filter for 'local.tiny.orders' is recursive\\E.*");
 
         // different reference style to same table
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey IN (SELECT local.tiny.orderkey FROM orders)"));
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("orderkey IN (SELECT local.tiny.orderkey FROM orders)")
+                        .build());
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(INVALID_ROW_FILTER)
                 .hasMessageMatching(".*\\QRow filter for 'local.tiny.orders' is recursive\\E.*");
 
         // mutual recursion
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 RUN_AS_USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey IN (SELECT orderkey FROM orders)"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("orderkey IN (SELECT orderkey FROM orders)")
+                        .build());
 
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey IN (SELECT orderkey FROM orders)"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("orderkey IN (SELECT orderkey FROM orders)")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(INVALID_ROW_FILTER)
                 .hasMessageMatching(".*\\QRow filter for 'local.tiny.orders' is recursive\\E.*");
     }
 
@@ -295,11 +382,17 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "customer"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "customer"),
                 USER,
-                new ViewExpression(USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey = 1"));
-        assertThatThrownBy(() -> assertions.query(
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("orderkey = 1")
+                        .build());
+        assertThat(assertions.query(
                 "SELECT (SELECT min(name) FROM customer WHERE customer.custkey = orders.custkey) FROM orders"))
+                .failure()
+                .hasErrorCode(COLUMN_NOT_FOUND)
                 .hasMessage("line 1:31: Invalid row filter for 'local.tiny.customer': Column 'orderkey' cannot be resolved");
     }
 
@@ -308,9 +401,13 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "nation"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "nation"),
                 USER,
-                new ViewExpression(USER, Optional.of(CATALOG), Optional.of("tiny"), "regionkey IN (SELECT regionkey FROM region WHERE name = 'ASIA')"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("regionkey IN (SELECT regionkey FROM region WHERE name = 'ASIA')")
+                        .build());
         assertThat(assertions.query(
                 "WITH region(regionkey, name) AS (VALUES (0, 'ASIA'), (1, 'ASIA'), (2, 'ASIA'), (3, 'ASIA'), (4, 'ASIA'))" +
                         "SELECT name FROM nation ORDER BY name LIMIT 1"))
@@ -323,61 +420,97 @@ public class TestRowFilter
         // parse error
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "$$$"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("$$$")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(INVALID_ROW_FILTER)
                 .hasMessage("line 1:22: Invalid row filter for 'local.tiny.orders': mismatched input '$'. Expecting: <expression>");
 
         // unknown column
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "unknown_column"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("unknown_column")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(COLUMN_NOT_FOUND)
                 .hasMessage("line 1:22: Invalid row filter for 'local.tiny.orders': Column 'unknown_column' cannot be resolved");
 
         // invalid type
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "1"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("1")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(TYPE_MISMATCH)
                 .hasMessage("line 1:22: Expected row filter for 'local.tiny.orders' to be of type BOOLEAN, but was integer");
 
         // aggregation
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "count(*) > 0"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("count(*) > 0")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(EXPRESSION_NOT_SCALAR)
                 .hasMessage("line 1:10: Row filter for 'local.tiny.orders' cannot contain aggregations, window functions or grouping operations: [count(*)]");
 
         // window function
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "row_number() OVER () > 0"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("row_number() OVER () > 0")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(EXPRESSION_NOT_SCALAR)
                 .hasMessage("line 1:22: Row filter for 'local.tiny.orders' cannot contain aggregations, window functions or grouping operations: [row_number() OVER ()]");
 
         // window function
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "grouping(orderkey) = 0"));
+                ViewExpression.builder()
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("grouping(orderkey) = 0")
+                        .build());
 
-        assertThatThrownBy(() -> assertions.query("SELECT count(*) FROM orders"))
+        assertThat(assertions.query("SELECT count(*) FROM orders"))
+                .failure()
+                .hasErrorCode(EXPRESSION_NOT_SCALAR)
                 .hasMessage("line 1:20: Row filter for 'local.tiny.orders' cannot contain aggregations, window functions or grouping operations: [GROUPING (orderkey)]");
     }
 
@@ -386,9 +519,14 @@ public class TestRowFilter
     {
         accessControl.reset();
         accessControl.rowFilter(
-                new QualifiedObjectName(CATALOG, "tiny", "orders"),
+                new QualifiedObjectName(LOCAL_CATALOG, "tiny", "orders"),
                 USER,
-                new ViewExpression(RUN_AS_USER, Optional.of(CATALOG), Optional.of("tiny"), "orderkey = 0"));
+                ViewExpression.builder()
+                        .identity(RUN_AS_USER)
+                        .catalog(LOCAL_CATALOG)
+                        .schema("tiny")
+                        .expression("orderkey = 0")
+                        .build());
 
         assertThat(assertions.query("SHOW STATS FOR (SELECT * FROM tiny.orders)"))
                 .containsAll(
@@ -398,6 +536,9 @@ public class TestRowFilter
                                 "(NULL, NULL, NULL, NULL, 0e1, NULL, NULL)");
     }
 
+    /**
+     * @see #testMergeDelete()
+     */
     @Test
     public void testDelete()
     {
@@ -405,7 +546,7 @@ public class TestRowFilter
         accessControl.rowFilter(
                 new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "nationkey < 10"));
+                ViewExpression.builder().expression("nationkey < 10").build());
 
         // Within allowed row filter
         assertions.query("DELETE FROM mock.tiny.nation WHERE nationkey < 3")
@@ -427,6 +568,58 @@ public class TestRowFilter
                 .matches("SELECT BIGINT '0'");
     }
 
+    /**
+     * Like {@link #testDelete()} but using the MERGE statement.
+     */
+    @Test
+    public void testMergeDelete()
+    {
+        accessControl.reset();
+        accessControl.rowFilter(
+                new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation"),
+                USER,
+                ViewExpression.builder().expression("nationkey < 10").build());
+
+        // Within allowed row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 1,2) t(x) ON nationkey = x
+                WHEN MATCHED THEN DELETE
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+
+        // Outside allowed row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 1,2,3,4,5) t(x) ON regionkey = x
+                WHEN MATCHED THEN DELETE
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 1,11) t(x) ON nationkey = x
+                WHEN MATCHED THEN DELETE
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 11,12,13,14,15) t(x) ON nationkey = x
+                WHEN MATCHED THEN DELETE
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+    }
+
+    /**
+     * @see #testMergeUpdate()
+     */
     @Test
     public void testUpdate()
     {
@@ -434,36 +627,150 @@ public class TestRowFilter
         accessControl.rowFilter(
                 new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "nationkey < 10"));
+                ViewExpression.builder().expression("nationkey < 10").build());
 
         // Within allowed row filter
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey < 3"))
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey < 3"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:1: Updating a table with a row filter is not supported");
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey IN (1, 2, 3)"))
-                .hasMessage("line 1:1: Updating a table with a row filter is not supported");
-
-        // Outside allowed row filter, only readable rows were update
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2"))
-                .hasMessage("line 1:1: Updating a table with a row filter is not supported");
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey IN (1, 11)"))
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey IN (1, 2, 3)"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:1: Updating a table with a row filter is not supported");
 
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey = 11"))
+        // Outside allowed row filter
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Updating a table with a row filter is not supported");
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey IN (1, 11)"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Updating a table with a row filter is not supported");
+
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET regionkey = regionkey * 2 WHERE nationkey = 11"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:1: Updating a table with a row filter is not supported");
 
         // Within allowed row filter, but updated rows are outside the row filter
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET nationkey = 10 WHERE nationkey < 3"))
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET nationkey = 10 WHERE nationkey < 3"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:1: Updating a table with a row filter is not supported");
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET nationkey = null WHERE nationkey < 3"))
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET nationkey = null WHERE nationkey < 3"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:1: Updating a table with a row filter is not supported");
 
-        // Outside allowed row filter, but updated rows are outside the row filter
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET nationkey = 10 WHERE nationkey = 10"))
+        // Outside allowed row filter, and updated rows are outside the row filter
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET nationkey = 10 WHERE nationkey = 10"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:1: Updating a table with a row filter is not supported");
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation SET nationkey = null WHERE nationkey = null "))
+        assertThat(assertions.query("UPDATE mock.tiny.nation SET nationkey = null WHERE nationkey = null "))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("line 1:1: Updating a table with a row filter is not supported");
     }
 
+    /**
+     * Like {@link #testUpdate()} but using the MERGE statement.
+     */
+    @Test
+    public void testMergeUpdate()
+    {
+        accessControl.reset();
+        accessControl.rowFilter(
+                new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation"),
+                USER,
+                ViewExpression.builder().expression("nationkey < 10").build());
+
+        // Within allowed row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 5) t(x) ON nationkey = x
+                WHEN MATCHED THEN UPDATE SET regionkey = regionkey * 2
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+
+        // Outside allowed row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 1,2,3,4,5,6) t(x) ON regionkey = x
+                WHEN MATCHED THEN UPDATE SET regionkey = regionkey * 2
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 1, 11) t(x) ON nationkey = x
+                WHEN MATCHED THEN UPDATE SET regionkey = regionkey * 2
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 11) t(x) ON nationkey = x
+                WHEN MATCHED THEN UPDATE SET regionkey = regionkey * 2
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+
+        // Within allowed row filter, but updated rows are outside the row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 1,2,3) t(x) ON nationkey = x
+                WHEN MATCHED THEN UPDATE SET nationkey = 10
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 1,2,3) t(x) ON nationkey = x
+                WHEN MATCHED THEN UPDATE SET nationkey = NULL
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+
+        // Outside allowed row filter, but updated rows are outside the row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 10) t(x) ON nationkey = x
+                WHEN MATCHED THEN UPDATE SET nationkey = 13
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 10) t(x) ON nationkey = x
+                WHEN MATCHED THEN UPDATE SET nationkey = NULL
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 10) t(x) ON nationkey IS NULL
+                WHEN MATCHED THEN UPDATE SET nationkey = 13
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+    }
+
+    /**
+     * @see #testMergeInsert()
+     */
     @Test
     public void testInsert()
     {
@@ -471,7 +778,7 @@ public class TestRowFilter
         accessControl.rowFilter(
                 new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "nationkey > 100"));
+                ViewExpression.builder().expression("nationkey > 100").build());
 
         // Within allowed row filter
         assertions.query("INSERT INTO mock.tiny.nation VALUES (101, 'POLAND', 0, 'No comment')")
@@ -480,20 +787,82 @@ public class TestRowFilter
                 .matches("SELECT BIGINT '1'");
 
         // Outside allowed row filter
-        assertThatThrownBy(() -> assertions.query("INSERT INTO mock.tiny.nation VALUES (26, 'POLAND', 0, 'No comment')"))
-                .hasMessage("Access Denied: Cannot insert row that does not match to a row filter");
-        assertThatThrownBy(() -> assertions.query("INSERT INTO mock.tiny.nation VALUES "
+        assertThat(assertions.query("INSERT INTO mock.tiny.nation VALUES (26, 'POLAND', 0, 'No comment')"))
+                .failure()
+                .hasErrorCode(PERMISSION_DENIED)
+                .hasMessage("Access Denied: Cannot insert row that does not match a row filter");
+        assertThat(assertions.query("INSERT INTO mock.tiny.nation VALUES "
                 + "(26, 'POLAND', 0, 'No comment'),"
                 + "(27, 'HOLLAND', 0, 'A comment')"))
-                .hasMessage("Access Denied: Cannot insert row that does not match to a row filter");
-        assertThatThrownBy(() -> assertions.query("INSERT INTO mock.tiny.nation VALUES "
-                + "(26, 'POLAND', 0, 'No comment'),"
-                + "(27, 'HOLLAND', 0, 'A comment')"))
-                .hasMessage("Access Denied: Cannot insert row that does not match to a row filter");
-        assertThatThrownBy(() -> assertions.query("INSERT INTO mock.tiny.nation(nationkey) VALUES (null)"))
-                .hasMessage("Access Denied: Cannot insert row that does not match to a row filter");
-        assertThatThrownBy(() -> assertions.query("INSERT INTO mock.tiny.nation(regionkey) VALUES (0)"))
-                .hasMessage("Access Denied: Cannot insert row that does not match to a row filter");
+                .failure()
+                .hasErrorCode(PERMISSION_DENIED)
+                .hasMessage("Access Denied: Cannot insert row that does not match a row filter");
+        assertThat(assertions.query("INSERT INTO mock.tiny.nation(nationkey) VALUES (null)"))
+                .failure()
+                .hasErrorCode(PERMISSION_DENIED)
+                .hasMessage("Access Denied: Cannot insert row that does not match a row filter");
+        assertThat(assertions.query("INSERT INTO mock.tiny.nation(regionkey) VALUES (0)"))
+                .failure()
+                .hasErrorCode(PERMISSION_DENIED)
+                .hasMessage("Access Denied: Cannot insert row that does not match a row filter");
+    }
+
+    /**
+     * Like {@link #testInsert()} but using the MERGE statement.
+     */
+    @Test
+    public void testMergeInsert()
+    {
+        accessControl.reset();
+        accessControl.rowFilter(
+                new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation"),
+                USER,
+                ViewExpression.builder().expression("nationkey > 100").build());
+
+        // Within allowed row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 42) t(dummy) ON false
+                WHEN NOT MATCHED THEN INSERT VALUES (101, 'POLAND', 0, 'No comment')
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+
+        // Outside allowed row filter
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 42) t(dummy) ON false
+                WHEN NOT MATCHED THEN INSERT VALUES (26, 'POLAND', 0, 'No comment')
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES (26, 'POLAND', 0, 'No comment'), (27, 'HOLLAND', 0, 'A comment')) t(a,b,c,d) ON nationkey = a
+                WHEN NOT MATCHED THEN INSERT VALUES (a,b,c,d)
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 42) t(dummy) ON false
+                WHEN NOT MATCHED THEN INSERT (nationkey) VALUES (NULL)
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
+        assertThat(assertions.query(
+                """
+                MERGE INTO mock.tiny.nation USING (VALUES 42) t(dummy) ON false
+                WHEN NOT MATCHED THEN INSERT (nationkey) VALUES (0)
+                """))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("line 1:1: Cannot merge into a table with row filters");
     }
 
     @Test
@@ -503,21 +872,23 @@ public class TestRowFilter
         accessControl.rowFilter(
                 new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation_with_hidden_column"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "nationkey < 1"));
+                ViewExpression.builder().expression("nationkey < 1").build());
 
         assertions.query("SELECT * FROM mock.tiny.nation_with_hidden_column")
                 .assertThat()
                 .skippingTypesCheck()
                 .matches("VALUES (BIGINT '0', 'ALGERIA', BIGINT '0', ' haggle. carefully final deposits detect slyly agai')");
-        assertThatThrownBy(() -> assertions.query("INSERT INTO mock.tiny.nation_with_hidden_column VALUES (101, 'POLAND', 0, 'No comment')"))
-                .isInstanceOf(TrinoException.class)
-                .hasMessage("Access Denied: Cannot insert row that does not match to a row filter");
+        assertThat(assertions.query("INSERT INTO mock.tiny.nation_with_hidden_column VALUES (101, 'POLAND', 0, 'No comment')"))
+                .failure()
+                .hasErrorCode(PERMISSION_DENIED)
+                .hasMessage("Access Denied: Cannot insert row that does not match a row filter");
         assertions.query("INSERT INTO mock.tiny.nation_with_hidden_column VALUES (0, 'POLAND', 0, 'No comment')")
                 .assertThat()
                 .skippingTypesCheck()
                 .matches("VALUES BIGINT '1'");
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation_with_hidden_column SET name = 'POLAND'"))
-                .isInstanceOf(TrinoException.class)
+        assertThat(assertions.query("UPDATE mock.tiny.nation_with_hidden_column SET name = 'POLAND'"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessageContaining("Updating a table with a row filter is not supported");
         assertions.query("DELETE FROM mock.tiny.nation_with_hidden_column WHERE regionkey < 5")
                 .assertThat()
@@ -536,22 +907,50 @@ public class TestRowFilter
         accessControl.rowFilter(
                 new QualifiedObjectName(MOCK_CATALOG, "tiny", "nation_with_hidden_column"),
                 USER,
-                new ViewExpression(USER, Optional.empty(), Optional.empty(), "\"$hidden\" < 1"));
+                ViewExpression.builder().expression("\"$hidden\" < 1").build());
 
         assertions.query("SELECT count(*) FROM mock.tiny.nation_with_hidden_column")
                 .assertThat()
                 .skippingTypesCheck()
                 .matches("VALUES BIGINT '25'");
         // TODO https://github.com/trinodb/trino/issues/10006 - support insert into a table with row filter that is using hidden columns
-        assertThatThrownBy(() -> assertions.query("INSERT INTO mock.tiny.nation_with_hidden_column VALUES (101, 'POLAND', 0, 'No comment')"))
-                .isInstanceOf(ArrayIndexOutOfBoundsException.class)
-                .hasMessage("Index 4 out of bounds for length 4");
-        assertThatThrownBy(() -> assertions.query("UPDATE mock.tiny.nation_with_hidden_column SET name = 'POLAND'"))
-                .isInstanceOf(TrinoException.class)
+        assertThat(assertions.query("INSERT INTO mock.tiny.nation_with_hidden_column VALUES (101, 'POLAND', 0, 'No comment')"))
+                // TODO this should be TrinoException (assertTrinoExceptionThrownBy)
+                .nonTrinoExceptionFailure()
+                .hasStackTraceContaining("ArrayIndexOutOfBoundsException: Index 4 out of bounds for length 4");
+        assertThat(assertions.query("UPDATE mock.tiny.nation_with_hidden_column SET name = 'POLAND'"))
+                .failure()
+                .hasErrorCode(NOT_SUPPORTED)
                 .hasMessageContaining("Updating a table with a row filter is not supported");
         assertions.query("DELETE FROM mock.tiny.nation_with_hidden_column WHERE regionkey < 5")
                 .assertThat()
                 .skippingTypesCheck()
                 .matches("SELECT BIGINT '25'");
+    }
+
+    @Test
+    public void testRowFilterOnOptionalColumn()
+    {
+        accessControl.reset();
+
+        accessControl.rowFilter(
+                new QualifiedObjectName(MOCK_CATALOG_MISSING_COLUMNS, "tiny", "nation_with_optional_column"),
+                USER,
+                ViewExpression.builder().expression("length(optional) > 2").build());
+
+        assertions.query("INSERT INTO mockmissingcolumns.tiny.nation_with_optional_column(nationkey, name, regionkey, comment, optional) VALUES (0, 'POLAND', 0, 'No comment', 'some string')")
+                .assertThat()
+                .skippingTypesCheck()
+                .matches("VALUES BIGINT '1'");
+
+        assertThat(assertions.query("INSERT INTO mockmissingcolumns.tiny.nation_with_optional_column(nationkey, name, regionkey, comment, optional) VALUES (0, 'POLAND', 0, 'No comment', 'so')"))
+                .failure()
+                .hasErrorCode(PERMISSION_DENIED)
+                .hasMessage("Access Denied: Cannot insert row that does not match a row filter");
+
+        assertThat(assertions.query("INSERT INTO mockmissingcolumns.tiny.nation_with_optional_column(nationkey, name, regionkey, comment, optional) VALUES (0, 'POLAND', 0, 'No comment', null)"))
+                .failure()
+                .hasErrorCode(PERMISSION_DENIED)
+                .hasMessage("Access Denied: Cannot insert row that does not match a row filter");
     }
 }

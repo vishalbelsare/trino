@@ -13,26 +13,25 @@
  */
 package io.trino.cli;
 
-import au.com.bytecode.opencsv.CSVWriter;
 import com.google.common.collect.ImmutableList;
-import io.trino.client.Row;
+import com.opencsv.CSVWriter;
+import com.opencsv.CSVWriterBuilder;
+import com.opencsv.ICSVWriter;
 
 import java.io.IOException;
 import java.io.Writer;
 import java.util.List;
-import java.util.Map;
 
-import static io.trino.cli.AlignedTablePrinter.formatHexDump;
-import static io.trino.cli.AlignedTablePrinter.formatList;
-import static io.trino.cli.AlignedTablePrinter.formatMap;
-import static io.trino.cli.AlignedTablePrinter.formatRow;
+import static com.opencsv.ICSVWriter.NO_ESCAPE_CHARACTER;
+import static com.opencsv.ICSVWriter.NO_QUOTE_CHARACTER;
+import static io.trino.cli.FormatUtils.formatValue;
 import static java.util.Objects.requireNonNull;
 
 public class CsvPrinter
         implements OutputPrinter
 {
     private final List<String> fieldNames;
-    private final CSVWriter writer;
+    private final ICSVWriter writer;
 
     private boolean needHeader;
 
@@ -43,8 +42,8 @@ public class CsvPrinter
         NO_QUOTES(true, false),
         NO_HEADER_AND_QUOTES(false, false);
 
-        private boolean header;
-        private boolean quote;
+        private final boolean header;
+        private final boolean quote;
 
         CsvOutputFormat(boolean header, boolean quote)
         {
@@ -68,7 +67,7 @@ public class CsvPrinter
         requireNonNull(fieldNames, "fieldNames is null");
         requireNonNull(writer, "writer is null");
         this.fieldNames = ImmutableList.copyOf(fieldNames);
-        this.writer = csvOutputFormat.isQuoted() ? new CSVWriter(writer) : new CSVWriter(writer, CSVWriter.DEFAULT_SEPARATOR, CSVWriter.NO_QUOTE_CHARACTER);
+        this.writer = csvOutputFormat.isQuoted() ? new CSVWriter(writer) : new CSVWriterBuilder(writer).withQuoteChar(NO_QUOTE_CHARACTER).withEscapeChar(NO_ESCAPE_CHARACTER).build();
         this.needHeader = csvOutputFormat.showHeader();
     }
 
@@ -76,13 +75,16 @@ public class CsvPrinter
     public void printRows(List<List<?>> rows, boolean complete)
             throws IOException
     {
+        String[] array = null;
         if (needHeader) {
             needHeader = false;
-            writer.writeNext(toStrings(fieldNames));
+            array = toStrings(fieldNames, array);
+            writer.writeNext(array);
         }
 
         for (List<?> row : rows) {
-            writer.writeNext(toStrings(row));
+            array = toStrings(row, array);
+            writer.writeNext(array);
             checkError();
         }
     }
@@ -104,37 +106,15 @@ public class CsvPrinter
         }
     }
 
-    private static String[] toStrings(List<?> values)
+    private static String[] toStrings(List<?> values, String[] array)
     {
-        String[] array = new String[values.size()];
-        for (int i = 0; i < values.size(); i++) {
-            array[i] = formatValue(values.get(i));
+        int rowSize = values.size();
+        if (array == null || rowSize != array.length) {
+            array = new String[rowSize];
+        }
+        for (int i = 0; i < rowSize; i++) {
+            array[i] = formatValue(values.get(i), "", -1);
         }
         return array;
-    }
-
-    static String formatValue(Object o)
-    {
-        if (o == null) {
-            return "";
-        }
-
-        if (o instanceof Map) {
-            return formatMap((Map<?, ?>) o);
-        }
-
-        if (o instanceof List) {
-            return formatList((List<?>) o);
-        }
-
-        if (o instanceof Row) {
-            return formatRow((Row) o);
-        }
-
-        if (o instanceof byte[]) {
-            return formatHexDump((byte[]) o);
-        }
-
-        return o.toString();
     }
 }

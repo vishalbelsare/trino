@@ -18,13 +18,12 @@ import io.trino.Session;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.ExpressionUtils;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
@@ -34,7 +33,6 @@ import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.TopNRankingNode.RankingType;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.Expression;
 
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -43,13 +41,13 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.SystemSessionProperties.isOptimizeTopNRanking;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.spi.predicate.Range.range;
-import static io.trino.sql.planner.DomainTranslator.fromPredicate;
+import static io.trino.sql.ir.Booleans.TRUE;
+import static io.trino.sql.ir.IrUtils.combineConjuncts;
 import static io.trino.sql.planner.iterative.rule.Util.toTopNRankingType;
 import static io.trino.sql.planner.plan.Patterns.filter;
 import static io.trino.sql.planner.plan.Patterns.project;
 import static io.trino.sql.planner.plan.Patterns.source;
 import static io.trino.sql.planner.plan.Patterns.window;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -60,19 +58,19 @@ import static java.util.Objects.requireNonNull;
  * TODO This rule should be removed as soon as WindowNode becomes capable of absorbing pruning projections (i.e. capable of pruning outputs).
  * <p>
  * Transforms:
- * <pre>
+ * <pre>{@code
  * - Filter (ranking <= 5 && a > 1)
  *     - Project (a, ranking)
  *         - Window ([row_number()|rank()] OVER (ORDER BY a))
  *             - source (a, b)
- * </pre>
+ * }</pre>
  * into:
- * <pre>
+ * <pre>{@code
  * - Filter (a > 1)
  *     - Project (a, ranking)
  *         - TopNRanking (type = [ROW_NUMBER|RANK], maxRankingPerPartition = 5, order by a)
  *             - source (a, b)
- * </pre>
+ * }</pre>
  */
 public class PushPredicateThroughProjectIntoWindow
         implements Rule<FilterNode>
@@ -80,14 +78,13 @@ public class PushPredicateThroughProjectIntoWindow
     private static final Capture<ProjectNode> PROJECT = newCapture();
     private static final Capture<WindowNode> WINDOW = newCapture();
 
+    private final PlannerContext plannerContext;
     private final Pattern<FilterNode> pattern;
-    private final Metadata metadata;
-    private final TypeOperators typeOperators;
+    private final DomainTranslator domainTranslator;
 
-    public PushPredicateThroughProjectIntoWindow(Metadata metadata, TypeOperators typeOperators)
+    public PushPredicateThroughProjectIntoWindow(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
         this.pattern = filter()
                 .with(source().matching(project()
                         .matching(ProjectNode::isIdentity)
@@ -95,6 +92,7 @@ public class PushPredicateThroughProjectIntoWindow
                         .with(source().matching(window()
                                 .matching(window -> toTopNRankingType(window).isPresent())
                                 .capturedAs(WINDOW)))));
+        this.domainTranslator = new DomainTranslator(plannerContext.getMetadata());
     }
 
     @Override
@@ -120,14 +118,17 @@ public class PushPredicateThroughProjectIntoWindow
             return Result.empty();
         }
 
-        DomainTranslator.ExtractionResult extractionResult = fromPredicate(metadata, typeOperators, context.getSession(), filter.getPredicate(), context.getSymbolAllocator().getTypes());
+        DomainTranslator.ExtractionResult extractionResult = DomainTranslator.getExtractionResult(
+                plannerContext,
+                context.getSession(),
+                filter.getPredicate());
         TupleDomain<Symbol> tupleDomain = extractionResult.getTupleDomain();
         OptionalInt upperBound = extractUpperBound(tupleDomain, rankingSymbol);
         if (upperBound.isEmpty()) {
             return Result.empty();
         }
         if (upperBound.getAsInt() <= 0) {
-            return Result.ofPlanNode(new ValuesNode(filter.getId(), filter.getOutputSymbols(), ImmutableList.of()));
+            return Result.ofPlanNode(new ValuesNode(filter.getId(), filter.getOutputSymbols()));
         }
         RankingType rankingType = toTopNRankingType(window).orElseThrow();
         project = (ProjectNode) project.replaceChildren(ImmutableList.of(new TopNRankingNode(
@@ -144,11 +145,10 @@ public class PushPredicateThroughProjectIntoWindow
         }
         // Remove the ranking domain because it is absorbed into the node
         TupleDomain<Symbol> newTupleDomain = tupleDomain.filter((symbol, domain) -> !symbol.equals(rankingSymbol));
-        Expression newPredicate = ExpressionUtils.combineConjuncts(
-                metadata,
+        Expression newPredicate = combineConjuncts(
                 extractionResult.getRemainingExpression(),
-                new DomainTranslator(context.getSession(), metadata).toPredicate(newTupleDomain));
-        if (newPredicate.equals(TRUE_LITERAL)) {
+                domainTranslator.toPredicate(newTupleDomain));
+        if (newPredicate.equals(TRUE)) {
             return Result.ofPlanNode(project);
         }
         return Result.ofPlanNode(new FilterNode(filter.getId(), project, newPredicate));

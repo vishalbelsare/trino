@@ -17,26 +17,30 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
+import io.trino.operator.RetryPolicy;
+import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.type.TypeSignature;
-import io.trino.sql.planner.FunctionCallBuilder;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.planner.BuiltinFunctionCallBuilder;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.LongLiteral;
-import io.trino.sql.tree.QualifiedName;
 
 import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.trino.SystemSessionProperties.getHashPartitionCount;
+import static io.trino.SystemSessionProperties.getFaultTolerantExecutionMaxPartitionCount;
+import static io.trino.SystemSessionProperties.getMaxHashPartitionCount;
+import static io.trino.SystemSessionProperties.getRetryPolicy;
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypeSignatures;
 import static io.trino.sql.planner.plan.Patterns.aggregation;
@@ -55,27 +59,27 @@ import static java.util.Objects.requireNonNull;
  *    - Project: envelope := ST_Envelope(geometry)
  *        - source
  * </pre>
- * , where partition_count is the value of session property hash_partition_count
+ * , where partition_count is the value of session property hash_partition_count (or fault_tolerant_execution_partition_count when task level retries are enabled)
  */
 public class RewriteSpatialPartitioningAggregation
         implements Rule<AggregationNode>
 {
     private static final TypeSignature GEOMETRY_TYPE_SIGNATURE = new TypeSignature("Geometry");
-    private static final String NAME = "spatial_partitioning";
+    private static final CatalogSchemaFunctionName NAME = builtinFunctionName("spatial_partitioning");
     private static final Pattern<AggregationNode> PATTERN = aggregation()
             .matching(RewriteSpatialPartitioningAggregation::hasSpatialPartitioningAggregation);
 
-    private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
-    public RewriteSpatialPartitioningAggregation(Metadata metadata)
+    public RewriteSpatialPartitioningAggregation(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     private static boolean hasSpatialPartitioningAggregation(AggregationNode aggregationNode)
     {
         return aggregationNode.getAggregations().values().stream()
-                .anyMatch(aggregation -> aggregation.getResolvedFunction().getSignature().getName().equals(NAME) && aggregation.getArguments().size() == 1);
+                .anyMatch(aggregation -> aggregation.getResolvedFunction().signature().getName().equals(NAME) && aggregation.getArguments().size() == 1);
     }
 
     @Override
@@ -87,24 +91,24 @@ public class RewriteSpatialPartitioningAggregation
     @Override
     public Result apply(AggregationNode node, Captures captures, Context context)
     {
-        ResolvedFunction spatialPartitioningFunction = metadata.resolveFunction(context.getSession(), QualifiedName.of(NAME), fromTypeSignatures(GEOMETRY_TYPE_SIGNATURE, INTEGER.getTypeSignature()));
-        ResolvedFunction stEnvelopeFunction = metadata.resolveFunction(context.getSession(), QualifiedName.of("ST_Envelope"), fromTypeSignatures(GEOMETRY_TYPE_SIGNATURE));
+        ResolvedFunction spatialPartitioningFunction = plannerContext.getMetadata().resolveBuiltinFunction(NAME.getFunctionName(), fromTypeSignatures(GEOMETRY_TYPE_SIGNATURE, INTEGER.getTypeSignature()));
+        ResolvedFunction stEnvelopeFunction = plannerContext.getMetadata().resolveBuiltinFunction("ST_Envelope", fromTypeSignatures(GEOMETRY_TYPE_SIGNATURE));
 
         ImmutableMap.Builder<Symbol, Aggregation> aggregations = ImmutableMap.builder();
         Symbol partitionCountSymbol = context.getSymbolAllocator().newSymbol("partition_count", INTEGER);
         ImmutableMap.Builder<Symbol, Expression> envelopeAssignments = ImmutableMap.builder();
         for (Map.Entry<Symbol, Aggregation> entry : node.getAggregations().entrySet()) {
             Aggregation aggregation = entry.getValue();
-            String name = aggregation.getResolvedFunction().getSignature().getName();
+            CatalogSchemaFunctionName name = aggregation.getResolvedFunction().signature().getName();
             if (name.equals(NAME) && aggregation.getArguments().size() == 1) {
                 Expression geometry = getOnlyElement(aggregation.getArguments());
-                Symbol envelopeSymbol = context.getSymbolAllocator().newSymbol("envelope", metadata.getType(GEOMETRY_TYPE_SIGNATURE));
+                Symbol envelopeSymbol = context.getSymbolAllocator().newSymbol("envelope", plannerContext.getTypeManager().getType(GEOMETRY_TYPE_SIGNATURE));
                 if (isStEnvelopeFunctionCall(geometry, stEnvelopeFunction)) {
                     envelopeAssignments.put(envelopeSymbol, geometry);
                 }
                 else {
-                    envelopeAssignments.put(envelopeSymbol, FunctionCallBuilder.resolve(context.getSession(), metadata)
-                            .setName(QualifiedName.of("ST_Envelope"))
+                    envelopeAssignments.put(envelopeSymbol, BuiltinFunctionCallBuilder.resolve(plannerContext.getMetadata())
+                            .setName("ST_Envelope")
                             .addArgument(GEOMETRY_TYPE_SIGNATURE, geometry)
                             .build());
                 }
@@ -122,34 +126,33 @@ public class RewriteSpatialPartitioningAggregation
             }
         }
 
+        int partitionCount;
+        if (getRetryPolicy(context.getSession()) == RetryPolicy.TASK) {
+            partitionCount = getFaultTolerantExecutionMaxPartitionCount(context.getSession());
+        }
+        else {
+            partitionCount = getMaxHashPartitionCount(context.getSession());
+        }
         return Result.ofPlanNode(
-                new AggregationNode(
-                        node.getId(),
-                        new ProjectNode(
+                AggregationNode.builderFrom(node)
+                        .setSource(new ProjectNode(
                                 context.getIdAllocator().getNextId(),
                                 node.getSource(),
                                 Assignments.builder()
                                         .putIdentities(node.getSource().getOutputSymbols())
-                                        .put(partitionCountSymbol, new LongLiteral(Integer.toString(getHashPartitionCount(context.getSession()))))
-                                        .putAll(envelopeAssignments.build())
-                                        .build()),
-                        aggregations.build(),
-                        node.getGroupingSets(),
-                        node.getPreGroupedSymbols(),
-                        node.getStep(),
-                        node.getHashSymbol(),
-                        node.getGroupIdSymbol()));
+                                        .put(partitionCountSymbol, new Constant(INTEGER, (long) partitionCount))
+                                        .putAll(envelopeAssignments.buildOrThrow())
+                                        .build()))
+                        .setAggregations(aggregations.buildOrThrow())
+                        .build());
     }
 
     private boolean isStEnvelopeFunctionCall(Expression expression, ResolvedFunction stEnvelopeFunction)
     {
-        if (!(expression instanceof FunctionCall)) {
+        if (!(expression instanceof Call call)) {
             return false;
         }
 
-        FunctionCall functionCall = (FunctionCall) expression;
-        return metadata.decodeFunction(functionCall.getName())
-                .getFunctionId()
-                .equals(stEnvelopeFunction.getFunctionId());
+        return call.function().functionId().equals(stEnvelopeFunction.functionId());
     }
 }

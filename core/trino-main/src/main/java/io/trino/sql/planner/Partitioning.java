@@ -17,15 +17,16 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.errorprone.annotations.DoNotCall;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.Session;
 import io.trino.metadata.Metadata;
 import io.trino.spi.predicate.NullableValue;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
-
-import javax.annotation.concurrent.Immutable;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
 
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -59,8 +60,8 @@ public final class Partitioning
                 .collect(toImmutableList()));
     }
 
-    // Factory method for JSON serde only!
     @JsonCreator
+    @DoNotCall // For JSON deserialization only
     public static Partitioning jsonCreate(
             @JsonProperty("handle") PartitioningHandle handle,
             @JsonProperty("arguments") List<ArgumentBinding> arguments)
@@ -140,26 +141,20 @@ public final class Partitioning
                 Set<Symbol> mappedColumns = leftToRightMappings.apply(leftArgument.getColumn());
                 return mappedColumns.contains(rightArgument.getColumn());
             }
-            else {
-                // variable == constant
-                // Normally, this would be a false condition, but if we happen to have an external
-                // mapping from the symbol to a constant value and that constant value matches the
-                // right value, then we are co-partitioned.
-                Optional<NullableValue> leftConstant = leftConstantMapping.apply(leftArgument.getColumn());
-                return leftConstant.isPresent() && leftConstant.get().equals(rightArgument.getConstant());
-            }
+            // variable == constant
+            // Normally, this would be a false condition, but if we happen to have an external
+            // mapping from the symbol to a constant value and that constant value matches the
+            // right value, then we are co-partitioned.
+            Optional<NullableValue> leftConstant = leftConstantMapping.apply(leftArgument.getColumn());
+            return leftConstant.isPresent() && leftConstant.get().equals(rightArgument.getConstant());
         }
-        else {
-            if (rightArgument.isConstant()) {
-                // constant == constant
-                return leftArgument.getConstant().equals(rightArgument.getConstant());
-            }
-            else {
-                // constant == variable
-                Optional<NullableValue> rightConstant = rightConstantMapping.apply(rightArgument.getColumn());
-                return rightConstant.isPresent() && rightConstant.get().equals(leftArgument.getConstant());
-            }
+        if (rightArgument.isConstant()) {
+            // constant == constant
+            return leftArgument.getConstant().equals(rightArgument.getConstant());
         }
+        // constant == variable
+        Optional<NullableValue> rightConstant = rightConstantMapping.apply(rightArgument.getColumn());
+        return rightConstant.isPresent() && rightConstant.get().equals(leftArgument.getConstant());
     }
 
     public boolean isPartitionedOn(Collection<Symbol> columns, Set<Symbol> knownConstants)
@@ -180,22 +175,29 @@ public final class Partitioning
         return true;
     }
 
+    public boolean isPartitionedOnExactly(Collection<Symbol> columns, Set<Symbol> knownConstants)
+    {
+        Set<Symbol> toCheck = new HashSet<>();
+        for (ArgumentBinding argument : arguments) {
+            // partitioned on (k_1, k_2, ..., k_n) => partitioned on (k_1, k_2, ..., k_n, k_n+1, ...)
+            // can safely ignore all constant columns when comparing partition properties
+            if (argument.isConstant()) {
+                continue;
+            }
+            if (!argument.isVariable()) {
+                return false;
+            }
+            if (knownConstants.contains(argument.getColumn())) {
+                continue;
+            }
+            toCheck.add(argument.getColumn());
+        }
+        return ImmutableSet.copyOf(columns).equals(toCheck);
+    }
+
     public boolean isEffectivelySinglePartition(Set<Symbol> knownConstants)
     {
         return isPartitionedOn(ImmutableSet.of(), knownConstants);
-    }
-
-    public boolean isRepartitionEffective(Collection<Symbol> keys, Set<Symbol> knownConstants)
-    {
-        Set<Symbol> keysWithoutConstants = keys.stream()
-                .filter(symbol -> !knownConstants.contains(symbol))
-                .collect(toImmutableSet());
-        Set<Symbol> nonConstantArgs = arguments.stream()
-                .filter(ArgumentBinding::isVariable)
-                .map(ArgumentBinding::getColumn)
-                .filter(symbol -> !knownConstants.contains(symbol))
-                .collect(toImmutableSet());
-        return !nonConstantArgs.equals(keysWithoutConstants);
     }
 
     public Partitioning translate(Function<Symbol, Symbol> translator)
@@ -219,9 +221,9 @@ public final class Partitioning
         return Optional.of(new Partitioning(handle, newArguments.build()));
     }
 
-    public Partitioning withAlternativePartitiongingHandle(PartitioningHandle partitiongingHandle)
+    public Partitioning withAlternativePartitioningHandle(PartitioningHandle partitioningHandle)
     {
-        return new Partitioning(partitiongingHandle, this.arguments);
+        return new Partitioning(partitioningHandle, this.arguments);
     }
 
     @Override
@@ -304,12 +306,12 @@ public final class Partitioning
 
         public boolean isVariable()
         {
-            return expression instanceof SymbolReference;
+            return expression instanceof Reference;
         }
 
         public Symbol getColumn()
         {
-            verify(expression instanceof SymbolReference, "Expect the expression to be a SymbolReference");
+            verify(expression instanceof Reference, "Expect the expression to be a SymbolReference");
             return Symbol.from(expression);
         }
 

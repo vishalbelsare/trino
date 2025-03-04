@@ -20,7 +20,7 @@ import io.trino.spi.function.Description;
 import io.trino.spi.function.LiteralParameters;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
-import org.tartarus.snowball.SnowballProgram;
+import org.tartarus.snowball.SnowballStemmer;
 import org.tartarus.snowball.ext.ArmenianStemmer;
 import org.tartarus.snowball.ext.BasqueStemmer;
 import org.tartarus.snowball.ext.CatalanStemmer;
@@ -29,7 +29,7 @@ import org.tartarus.snowball.ext.DutchStemmer;
 import org.tartarus.snowball.ext.EnglishStemmer;
 import org.tartarus.snowball.ext.FinnishStemmer;
 import org.tartarus.snowball.ext.FrenchStemmer;
-import org.tartarus.snowball.ext.German2Stemmer;
+import org.tartarus.snowball.ext.GermanStemmer;
 import org.tartarus.snowball.ext.HungarianStemmer;
 import org.tartarus.snowball.ext.IrishStemmer;
 import org.tartarus.snowball.ext.ItalianStemmer;
@@ -52,10 +52,10 @@ public final class WordStemFunction
 {
     private WordStemFunction() {}
 
-    private static final Map<Slice, Supplier<SnowballProgram>> STEMMERS = ImmutableMap.<Slice, Supplier<SnowballProgram>>builder()
+    private static final Map<Slice, Supplier<SnowballStemmer>> STEMMERS = ImmutableMap.<Slice, Supplier<SnowballStemmer>>builder()
             .put(utf8Slice("ca"), CatalanStemmer::new)
             .put(utf8Slice("da"), DanishStemmer::new)
-            .put(utf8Slice("de"), German2Stemmer::new)
+            .put(utf8Slice("de"), GermanStemmer::new)
             .put(utf8Slice("en"), EnglishStemmer::new)
             .put(utf8Slice("es"), SpanishStemmer::new)
             .put(utf8Slice("eu"), BasqueStemmer::new)
@@ -73,7 +73,7 @@ public final class WordStemFunction
             .put(utf8Slice("ru"), RussianStemmer::new)
             .put(utf8Slice("sv"), SwedishStemmer::new)
             .put(utf8Slice("tr"), TurkishStemmer::new)
-            .build();
+            .buildOrThrow();
 
     @Description("Returns the stem of a word in the English language")
     @ScalarFunction
@@ -90,14 +90,14 @@ public final class WordStemFunction
     @SqlType("varchar(x)")
     public static Slice wordStem(@SqlType("varchar(x)") Slice slice, @SqlType("varchar(2)") Slice language)
     {
-        Supplier<SnowballProgram> stemmer = STEMMERS.get(language);
+        Supplier<SnowballStemmer> stemmer = STEMMERS.get(language);
         if (stemmer == null) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Unknown stemmer language: " + language.toStringUtf8());
         }
         return wordStem(slice, stemmer.get());
     }
 
-    private static Slice wordStem(Slice slice, SnowballProgram stemmer)
+    private static Slice wordStem(Slice slice, SnowballStemmer stemmer)
     {
         stemmer.setCurrent(slice.toStringUtf8());
         return stemmer.stem() ? utf8Slice(stemmer.getCurrent()) : slice;

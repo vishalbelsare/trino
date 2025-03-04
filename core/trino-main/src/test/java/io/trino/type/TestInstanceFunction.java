@@ -13,28 +13,34 @@
  */
 package io.trino.type;
 
-import io.trino.operator.scalar.AbstractTestFunctions;
+import io.trino.metadata.InternalFunctionBundle;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import io.trino.sql.query.QueryAssertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
-import static io.trino.spi.type.BigintType.BIGINT;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestInstanceFunction
-        extends AbstractTestFunctions
 {
-    @BeforeClass
-    public void setUp()
-    {
-        registerParametricScalar(PrecomputedFunction.class);
-    }
-
     @Test
     public void test()
     {
-        assertFunction("precomputed()", BIGINT, 42L);
+        try (QueryAssertions assertions = new QueryAssertions()) {
+            assertions.addFunctions(InternalFunctionBundle.builder()
+                    .scalar(PrecomputedFunction.class)
+                    .build());
+
+            assertThat(assertions.expression("precomputed()"))
+                    .isEqualTo(42L);
+        }
     }
 
     @ScalarFunction("precomputed")

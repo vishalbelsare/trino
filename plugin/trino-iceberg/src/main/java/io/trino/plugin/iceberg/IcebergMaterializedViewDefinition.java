@@ -13,19 +13,22 @@
  */
 package io.trino.plugin.iceberg;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.ObjectMapperProvider;
+import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.ConnectorMaterializedViewDefinition;
 import io.trino.spi.type.TypeId;
 
+import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.StringJoiner;
+import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_VIEW_DATA;
 import static io.trino.plugin.hive.util.HiveUtil.checkCondition;
@@ -34,19 +37,20 @@ import static java.util.Objects.requireNonNull;
 /*
  * Serializable version of ConnectorMaterializedViewDefinition stored by iceberg connector
  */
-public class IcebergMaterializedViewDefinition
+public record IcebergMaterializedViewDefinition(
+        String originalSql,
+        Optional<String> catalog,
+        Optional<String> schema,
+        List<Column> columns,
+        Optional<Duration> gracePeriod,
+        Optional<String> comment,
+        List<CatalogSchemaName> path)
 {
     private static final String MATERIALIZED_VIEW_PREFIX = "/* Presto Materialized View: ";
     private static final String MATERIALIZED_VIEW_SUFFIX = " */";
 
     private static final JsonCodec<IcebergMaterializedViewDefinition> materializedViewCodec =
             new JsonCodecFactory(new ObjectMapperProvider()).jsonCodec(IcebergMaterializedViewDefinition.class);
-
-    private final String originalSql;
-    private final Optional<String> catalog;
-    private final Optional<String> schema;
-    private final List<Column> columns;
-    private final Optional<String> comment;
 
     public static String encodeMaterializedViewData(IcebergMaterializedViewDefinition definition)
     {
@@ -72,24 +76,22 @@ public class IcebergMaterializedViewDefinition
                 definition.getCatalog(),
                 definition.getSchema(),
                 definition.getColumns().stream()
-                        .map(column -> new Column(column.getName(), column.getType()))
+                        .map(column -> new Column(column.getName(), column.getType(), column.getComment()))
                         .collect(toImmutableList()),
-                definition.getComment());
+                definition.getGracePeriod(),
+                definition.getComment(),
+                definition.getPath());
     }
 
-    @JsonCreator
-    public IcebergMaterializedViewDefinition(
-            @JsonProperty("originalSql") String originalSql,
-            @JsonProperty("catalog") Optional<String> catalog,
-            @JsonProperty("schema") Optional<String> schema,
-            @JsonProperty("columns") List<Column> columns,
-            @JsonProperty("comment") Optional<String> comment)
+    public IcebergMaterializedViewDefinition
     {
-        this.originalSql = requireNonNull(originalSql, "originalSql is null");
-        this.catalog = requireNonNull(catalog, "catalog is null");
-        this.schema = requireNonNull(schema, "schema is null");
-        this.columns = List.copyOf(requireNonNull(columns, "columns is null"));
-        this.comment = requireNonNull(comment, "comment is null");
+        requireNonNull(originalSql, "originalSql is null");
+        requireNonNull(catalog, "catalog is null");
+        requireNonNull(schema, "schema is null");
+        columns = List.copyOf(requireNonNull(columns, "columns is null"));
+        checkArgument(gracePeriod.isEmpty() || !gracePeriod.get().isNegative(), "gracePeriod cannot be negative: %s", gracePeriod);
+        requireNonNull(comment, "comment is null");
+        path = path == null ? ImmutableList.of() : ImmutableList.copyOf(path);
 
         if (catalog.isEmpty() && schema.isPresent()) {
             throw new IllegalArgumentException("catalog must be present if schema is present");
@@ -97,36 +99,6 @@ public class IcebergMaterializedViewDefinition
         if (columns.isEmpty()) {
             throw new IllegalArgumentException("columns list is empty");
         }
-    }
-
-    @JsonProperty
-    public String getOriginalSql()
-    {
-        return originalSql;
-    }
-
-    @JsonProperty
-    public Optional<String> getCatalog()
-    {
-        return catalog;
-    }
-
-    @JsonProperty
-    public Optional<String> getSchema()
-    {
-        return schema;
-    }
-
-    @JsonProperty
-    public List<Column> getColumns()
-    {
-        return columns;
-    }
-
-    @JsonProperty
-    public Optional<String> getComment()
-    {
-        return comment;
     }
 
     @Override
@@ -137,34 +109,19 @@ public class IcebergMaterializedViewDefinition
         catalog.ifPresent(value -> joiner.add("catalog=" + value));
         schema.ifPresent(value -> joiner.add("schema=" + value));
         joiner.add("columns=" + columns);
+        gracePeriod.ifPresent(value -> joiner.add("gracePeriod≥=" + value));
         comment.ifPresent(value -> joiner.add("comment=" + value));
+        joiner.add(path.stream().map(CatalogSchemaName::toString).collect(Collectors.joining(", ", "path=(", ")")));
         return getClass().getSimpleName() + joiner;
     }
 
-    public static final class Column
+    public record Column(String name, TypeId type, Optional<String> comment)
     {
-        private final String name;
-        private final TypeId type;
-
-        @JsonCreator
-        public Column(
-                @JsonProperty("name") String name,
-                @JsonProperty("type") TypeId type)
+        public Column
         {
-            this.name = requireNonNull(name, "name is null");
-            this.type = requireNonNull(type, "type is null");
-        }
-
-        @JsonProperty
-        public String getName()
-        {
-            return name;
-        }
-
-        @JsonProperty
-        public TypeId getType()
-        {
-            return type;
+            requireNonNull(name, "name is null");
+            requireNonNull(type, "type is null");
+            requireNonNull(comment, "comment is null");
         }
 
         @Override

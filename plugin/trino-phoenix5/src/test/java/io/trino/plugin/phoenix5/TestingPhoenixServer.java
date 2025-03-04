@@ -14,20 +14,18 @@
 package io.trino.plugin.phoenix5;
 
 import io.airlift.log.Logger;
+import io.trino.testing.SharedResource;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
+import org.apache.hadoop.hbase.StartMiniClusterOption;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
-import org.apache.phoenix.shaded.org.apache.zookeeper.server.ZooKeeperServer;
-
-import javax.annotation.concurrent.GuardedBy;
+import org.apache.phoenix.query.HBaseFactoryProvider;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
 import static java.lang.String.format;
@@ -36,37 +34,21 @@ import static org.apache.hadoop.hbase.HConstants.MASTER_INFO_PORT;
 import static org.apache.hadoop.hbase.HConstants.REGIONSERVER_INFO_PORT;
 
 public final class TestingPhoenixServer
+        implements AutoCloseable
 {
     private static final Logger LOG = Logger.get(TestingPhoenixServer.class);
 
-    @GuardedBy("this")
-    private static int referenceCount;
-    @GuardedBy("this")
-    private static TestingPhoenixServer instance;
+    private static final SharedResource<TestingPhoenixServer> sharedResource = new SharedResource<>(TestingPhoenixServer::new);
 
-    public static synchronized TestingPhoenixServer getInstance()
+    public static synchronized SharedResource.Lease<TestingPhoenixServer> getInstance()
+            throws Exception
     {
-        if (referenceCount == 0) {
-            instance = new TestingPhoenixServer();
-        }
-        referenceCount++;
-        return instance;
-    }
-
-    public static synchronized void shutDown()
-    {
-        referenceCount--;
-        if (referenceCount == 0) {
-            instance.shutdown();
-            instance = null;
-        }
+        return sharedResource.getInstanceLease();
     }
 
     private HBaseTestingUtility hbaseTestingUtility;
     private final int port;
     private final Configuration conf = HBaseConfiguration.create();
-    private final AtomicBoolean tpchLoaded = new AtomicBoolean();
-    private final CountDownLatch tpchLoadComplete = new CountDownLatch(1);
 
     private final java.util.logging.Logger apacheLogger;
 
@@ -79,17 +61,17 @@ public final class TestingPhoenixServer
         // keep references to prevent GC from resetting the log levels
         apacheLogger = java.util.logging.Logger.getLogger("org.apache");
         apacheLogger.setLevel(Level.SEVERE);
-        zookeeperLogger = java.util.logging.Logger.getLogger(ZooKeeperServer.class.getName());
+        zookeeperLogger = java.util.logging.Logger.getLogger("org.apache.phoenix.shaded.org.apache.zookeeper.server.ZooKeeperServer");
         zookeeperLogger.setLevel(Level.OFF);
         securityLogger = java.util.logging.Logger.getLogger("SecurityLogger.org.apache");
         securityLogger.setLevel(Level.SEVERE);
         // to squelch the SecurityLogger,
-        // instantiate logger with config above before config is overriden again in HBase test franework
+        // instantiate logger with config above before config is overridden again in HBase test franework
         org.apache.commons.logging.LogFactory.getLog("SecurityLogger.org.apache.hadoop.hbase.server");
         this.conf.set("hbase.security.logger", "ERROR");
         this.conf.setInt(MASTER_INFO_PORT, -1);
         this.conf.setInt(REGIONSERVER_INFO_PORT, -1);
-        this.conf.setInt(HBASE_CLIENT_RETRIES_NUMBER, 1);
+        this.conf.setInt(HBASE_CLIENT_RETRIES_NUMBER, 15);
         this.conf.setBoolean("phoenix.schema.isNamespaceMappingEnabled", true);
         this.conf.set("hbase.regionserver.wal.codec", "org.apache.hadoop.hbase.regionserver.wal.IndexedWALEditCodec");
         this.hbaseTestingUtility = new HBaseTestingUtility(conf);
@@ -98,7 +80,8 @@ public final class TestingPhoenixServer
             MiniZooKeeperCluster zkCluster = this.hbaseTestingUtility.startMiniZKCluster();
             port = zkCluster.getClientPort();
 
-            MiniHBaseCluster hbaseCluster = hbaseTestingUtility.startMiniHBaseCluster(1, 4);
+            StartMiniClusterOption option = StartMiniClusterOption.builder().numMasters(1).numRegionServers(4).build();
+            MiniHBaseCluster hbaseCluster = hbaseTestingUtility.startMiniHBaseCluster(option);
             hbaseCluster.waitForActiveAndReadyMaster();
             LOG.info("Phoenix server ready: %s", getJdbcUrl());
         }
@@ -107,7 +90,14 @@ public final class TestingPhoenixServer
         }
     }
 
-    private void shutdown()
+    public Connection getConnection()
+            throws IOException
+    {
+        return HBaseFactoryProvider.getHConnectionFactory().createConnection(this.conf);
+    }
+
+    @Override
+    public void close()
     {
         if (hbaseTestingUtility == null) {
             return;
@@ -126,22 +116,7 @@ public final class TestingPhoenixServer
 
     public String getJdbcUrl()
     {
-        return format("jdbc:phoenix:localhost:%d:/hbase;phoenix.schema.isNamespaceMappingEnabled=true", port);
-    }
-
-    public boolean isTpchLoaded()
-    {
-        return tpchLoaded.getAndSet(true);
-    }
-
-    public void setTpchLoaded()
-    {
-        tpchLoadComplete.countDown();
-    }
-
-    public void waitTpchLoaded()
-            throws InterruptedException
-    {
-        tpchLoadComplete.await(2, TimeUnit.MINUTES);
+        // Alternative: "jdbc:phoenix+rpc:localhost\\:%d;phoenix.schema.isNamespaceMappingEnabled=true" where %d = master's port
+        return format("jdbc:phoenix+zk:localhost\\:%d:/hbase;phoenix.schema.isNamespaceMappingEnabled=true", port);
     }
 }

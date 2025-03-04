@@ -15,11 +15,12 @@ package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.rule.test.BaseRuleTest;
 import io.trino.sql.planner.iterative.rule.test.PlanBuilder;
 import io.trino.sql.planner.plan.StatisticAggregationsDescriptor;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
@@ -49,7 +50,7 @@ public class TestPruneTableWriterSourceColumns
                                 ImmutableList.of("a"),
                                 ImmutableList.of("column_a"),
                                 strictProject(
-                                        ImmutableMap.of("a", expression("a")),
+                                        ImmutableMap.of("a", expression(new Reference(BIGINT, "a"))),
                                         values("a", "b"))));
     }
 
@@ -85,7 +86,6 @@ public class TestPruneTableWriterSourceColumns
                                     hash)),
                             Optional.empty(),
                             Optional.empty(),
-                            Optional.empty(),
                             p.values(a, partition, hash));
                 })
                 .doesNotFire();
@@ -104,10 +104,9 @@ public class TestPruneTableWriterSourceColumns
                             ImmutableList.of(a),
                             ImmutableList.of("column_a"),
                             Optional.empty(),
-                            Optional.empty(),
                             Optional.of(
                                     p.statisticAggregations(
-                                            ImmutableMap.of(aggregation, p.aggregation(PlanBuilder.expression("avg(argument)"), ImmutableList.of(BIGINT))),
+                                            ImmutableMap.of(aggregation, p.aggregation(PlanBuilder.aggregation("avg", ImmutableList.of(new Reference(BIGINT, "argument"))), ImmutableList.of(BIGINT))),
                                             ImmutableList.of(group))),
                             Optional.of(StatisticAggregationsDescriptor.empty()),
                             p.values(a, group, argument));

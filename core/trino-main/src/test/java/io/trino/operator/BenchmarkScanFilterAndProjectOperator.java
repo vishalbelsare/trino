@@ -15,13 +15,13 @@ package io.trino.operator;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
 import io.trino.SequencePageBuilder;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
-import io.trino.execution.Lifespan;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.Split;
+import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.ScanFilterAndProjectOperator.ScanFilterAndProjectOperatorFactory;
 import io.trino.operator.project.CursorProcessor;
 import io.trino.operator.project.PageProcessor;
@@ -29,18 +29,28 @@ import io.trino.spi.Page;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedPageSource;
+import io.trino.spi.function.OperatorType;
 import io.trino.spi.type.Type;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.gen.CursorProcessorCompiler;
 import io.trino.sql.gen.ExpressionCompiler;
 import io.trino.sql.gen.PageFunctionCompiler;
+import io.trino.sql.gen.columnar.ColumnarFilterCompiler;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Comparison;
+import io.trino.sql.ir.Constant;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.relational.RowExpression;
 import io.trino.sql.relational.SqlToRowExpressionTranslator;
-import io.trino.sql.tree.Expression;
 import io.trino.testing.TestingMetadata.TestingColumnHandle;
 import io.trino.testing.TestingSession;
 import io.trino.testing.TestingTaskContext;
+import io.trino.transaction.TestingTransactionManager;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -54,7 +64,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.RunnerException;
-import org.testng.annotations.Test;
 
 import java.util.HashMap;
 import java.util.List;
@@ -70,11 +79,13 @@ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.trino.jmh.Benchmarks.benchmark;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.sql.ExpressionTestUtils.createExpression;
-import static io.trino.sql.ExpressionTestUtils.getTypes;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.ir.Comparison.Operator.EQUAL;
+import static io.trino.sql.planner.TestingPlannerContext.plannerContextBuilder;
+import static io.trino.testing.TestingHandles.TEST_CATALOG_HANDLE;
 import static io.trino.testing.TestingHandles.TEST_TABLE_HANDLE;
 import static io.trino.testing.TestingSplit.createLocalSplit;
 import static java.util.Locale.ENGLISH;
@@ -83,7 +94,6 @@ import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.stream.Collectors.toList;
 import static org.openjdk.jmh.annotations.Scope.Thread;
 
-@SuppressWarnings({"PackageVisibleField", "FieldCanBeLocal"})
 @State(Scope.Thread)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Fork(5)
@@ -92,19 +102,28 @@ import static org.openjdk.jmh.annotations.Scope.Thread;
 @BenchmarkMode(Mode.AverageTime)
 public class BenchmarkScanFilterAndProjectOperator
 {
+    private static final TestingTransactionManager TRANSACTION_MANAGER = new TestingTransactionManager();
+    private static final PlannerContext PLANNER_CONTEXT = plannerContextBuilder()
+            .withTransactionManager(TRANSACTION_MANAGER)
+            .build();
+
     private static final Map<String, Type> TYPE_MAP = ImmutableMap.of("bigint", BIGINT, "varchar", VARCHAR);
 
     private static final Session TEST_SESSION = TestingSession.testSessionBuilder().build();
-    private static final Metadata METADATA = createTestMetadataManager();
 
     private static final int TOTAL_POSITIONS = 1_000_000;
     private static final DataSize FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_SIZE = DataSize.of(500, KILOBYTE);
     private static final int FILTER_AND_PROJECT_MIN_OUTPUT_PAGE_ROW_COUNT = 256;
 
+    private static final TestingFunctionResolution FUNCTIONS = new TestingFunctionResolution();
+    private static final ResolvedFunction CONCAT = FUNCTIONS.resolveFunction("concat", fromTypes(VARCHAR, VARCHAR));
+    private static final ResolvedFunction MODULUS_INTEGER = FUNCTIONS.resolveOperator(OperatorType.MODULUS, ImmutableList.of(INTEGER, INTEGER));
+    private static final ResolvedFunction MODULUS_BIGINT = FUNCTIONS.resolveOperator(OperatorType.MODULUS, ImmutableList.of(BIGINT, BIGINT));
+    private static final ResolvedFunction ADD_BIGINT = FUNCTIONS.resolveOperator(OperatorType.ADD, ImmutableList.of(BIGINT, BIGINT));
+
     @State(Thread)
     public static class Context
     {
-        private final Map<Symbol, Type> symbolTypes = new HashMap<>();
         private final Map<Symbol, Integer> sourceLayout = new HashMap<>();
 
         private ExecutorService executor;
@@ -132,20 +151,21 @@ public class BenchmarkScanFilterAndProjectOperator
             Type type = TYPE_MAP.get(this.type);
 
             for (int i = 0; i < columnCount; i++) {
-                Symbol symbol = new Symbol(type.getDisplayName().toLowerCase(ENGLISH) + i);
-                symbolTypes.put(symbol, type);
+                Symbol symbol = new Symbol(type, type.getDisplayName().toLowerCase(ENGLISH) + i);
                 sourceLayout.put(symbol, i);
             }
 
             List<RowExpression> projections = getProjections(type);
-            List<Type> types = projections.stream().map(RowExpression::getType).collect(toList());
+            List<Type> types = projections.stream().map(RowExpression::type).collect(toList());
             List<ColumnHandle> columnHandles = IntStream.range(0, columnCount)
                     .mapToObj(i -> new TestingColumnHandle(Integer.toString(i)))
                     .collect(toImmutableList());
 
-            PageFunctionCompiler pageFunctionCompiler = new PageFunctionCompiler(METADATA, 0);
-            PageProcessor pageProcessor = new ExpressionCompiler(METADATA, pageFunctionCompiler).compilePageProcessor(Optional.of(getFilter(type)), projections).get();
-            CursorProcessor cursorProcessor = new ExpressionCompiler(METADATA, pageFunctionCompiler).compileCursorProcessor(Optional.of(getFilter(type)), projections, "key").get();
+            CursorProcessorCompiler cursorProcessorCompiler = new CursorProcessorCompiler(PLANNER_CONTEXT.getFunctionManager());
+            PageFunctionCompiler pageFunctionCompiler = new PageFunctionCompiler(PLANNER_CONTEXT.getFunctionManager(), 0);
+            ColumnarFilterCompiler compiler = new ColumnarFilterCompiler(PLANNER_CONTEXT.getFunctionManager(), 0);
+            PageProcessor pageProcessor = new ExpressionCompiler(cursorProcessorCompiler, pageFunctionCompiler, compiler).compilePageProcessor(Optional.of(getFilter(type)), projections).get();
+            CursorProcessor cursorProcessor = new ExpressionCompiler(cursorProcessorCompiler, pageFunctionCompiler, compiler).compileCursorProcessor(Optional.of(getFilter(type)), projections, "key").get();
 
             createTaskContext();
             createScanFilterAndProjectOperatorFactories(createInputPages(types), pageProcessor, cursorProcessor, columnHandles, types);
@@ -164,9 +184,9 @@ public class BenchmarkScanFilterAndProjectOperator
                     0,
                     new PlanNodeId("test"),
                     new PlanNodeId("test_source"),
-                    (session, split, table, columns, dynamicFilter) -> new FixedPageSource(inputPages),
+                    (catalog) -> (session, split, table, columns, dynamicFilter) -> new FixedPageSource(inputPages),
                     () -> cursorProcessor,
-                    () -> pageProcessor,
+                    (_) -> pageProcessor,
                     TEST_TABLE_HANDLE,
                     columnHandles,
                     DynamicFilter.EMPTY,
@@ -197,10 +217,10 @@ public class BenchmarkScanFilterAndProjectOperator
         private RowExpression getFilter(Type type)
         {
             if (type == VARCHAR) {
-                return rowExpression("cast(varchar0 as bigint) % 2 = 0");
+                return rowExpression(new Comparison(EQUAL, new Call(MODULUS_INTEGER, ImmutableList.of(new Cast(new Reference(VARCHAR, "varchar0"), INTEGER), new Constant(INTEGER, 2L))), new Constant(INTEGER, 0L)));
             }
             if (type == BIGINT) {
-                return rowExpression("bigint0 % 2 = 0");
+                return rowExpression(new Comparison(EQUAL, new Call(MODULUS_BIGINT, ImmutableList.of(new Reference(INTEGER, "bigint0"), new Constant(INTEGER, 2L))), new Constant(INTEGER, 0L)));
             }
             throw new IllegalArgumentException("filter not supported for type : " + type);
         }
@@ -210,30 +230,26 @@ public class BenchmarkScanFilterAndProjectOperator
             ImmutableList.Builder<RowExpression> builder = ImmutableList.builder();
             if (type == BIGINT) {
                 for (int i = 0; i < columnCount; i++) {
-                    builder.add(rowExpression("bigint" + i + " + 5"));
+                    builder.add(rowExpression(new Call(ADD_BIGINT, ImmutableList.of(new Reference(BIGINT, "bigint" + i), new Constant(BIGINT, 5L)))));
                 }
             }
             else if (type == VARCHAR) {
                 for (int i = 0; i < columnCount; i++) {
                     // alternatively use identity expression rowExpression("varchar" + i, type) or
                     // rowExpression("substr(varchar" + i + ", 1, 1)", type)
-                    builder.add(rowExpression("concat(varchar" + i + ", 'foo')"));
+                    builder.add(rowExpression(new Call(CONCAT, ImmutableList.of(new Reference(VARCHAR, "varchar" + i), new Constant(VARCHAR, Slices.utf8Slice("foo"))))));
                 }
             }
             return builder.build();
         }
 
-        private RowExpression rowExpression(String value)
+        private RowExpression rowExpression(Expression expression)
         {
-            Expression expression = createExpression(value, METADATA, TypeProvider.copyOf(symbolTypes));
-
             return SqlToRowExpressionTranslator.translate(
                     expression,
-                    getTypes(TEST_SESSION, METADATA, TypeProvider.copyOf(symbolTypes), expression),
                     sourceLayout,
-                    METADATA,
-                    TEST_SESSION,
-                    true);
+                    PLANNER_CONTEXT.getMetadata(),
+                    PLANNER_CONTEXT.getTypeManager());
         }
 
         private static Page createPage(List<? extends Type> types, int positions, boolean dictionary)
@@ -241,9 +257,7 @@ public class BenchmarkScanFilterAndProjectOperator
             if (dictionary) {
                 return SequencePageBuilder.createSequencePageWithDictionaryBlocks(types, positions);
             }
-            else {
-                return SequencePageBuilder.createSequencePage(types, positions);
-            }
+            return SequencePageBuilder.createSequencePage(types, positions);
         }
     }
 
@@ -254,7 +268,7 @@ public class BenchmarkScanFilterAndProjectOperator
         SourceOperator operator = (SourceOperator) context.getOperatorFactory().createOperator(driverContext);
 
         ImmutableList.Builder<Page> outputPages = ImmutableList.builder();
-        operator.addSplit(new Split(new CatalogName("test"), createLocalSplit(), Lifespan.taskWide()));
+        operator.addSplit(new Split(TEST_CATALOG_HANDLE, createLocalSplit()));
         operator.noMoreSplits();
 
         for (int loops = 0; !operator.isFinished() && loops < 1_000_000; loops++) {

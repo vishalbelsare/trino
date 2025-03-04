@@ -19,7 +19,6 @@ import io.trino.geospatial.KdbTreeUtils;
 import io.trino.geospatial.Rectangle;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.AggregationFunction;
-import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
 import io.trino.spi.function.SqlType;
@@ -31,7 +30,6 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static io.trino.geospatial.KdbTree.buildKdbTree;
 import static io.trino.geospatial.serde.GeometrySerde.deserializeEnvelope;
-import static io.trino.plugin.geospatial.GeometryType.GEOMETRY_TYPE_NAME;
 import static io.trino.plugin.geospatial.SpatialPartitioningAggregateFunction.NAME;
 import static io.trino.spi.type.StandardTypes.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -45,7 +43,7 @@ public final class SpatialPartitioningInternalAggregateFunction
     private SpatialPartitioningInternalAggregateFunction() {}
 
     @InputFunction
-    public static void input(SpatialPartitioningState state, @SqlType(GEOMETRY_TYPE_NAME) Slice slice, @SqlType(INTEGER) long partitionCount)
+    public static void input(SpatialPartitioningState state, @SqlType(StandardTypes.GEOMETRY) Slice slice, @SqlType(INTEGER) long partitionCount)
     {
         Envelope envelope = deserializeEnvelope(slice);
         if (envelope.isEmpty()) {
@@ -78,12 +76,6 @@ public final class SpatialPartitioningInternalAggregateFunction
         state.setCount(state.getCount() + 1);
     }
 
-    @CombineFunction
-    public static void combine(SpatialPartitioningState state, SpatialPartitioningState otherState)
-    {
-        throw new UnsupportedOperationException("spatial_partitioning must run on a single node");
-    }
-
     @OutputFunction(StandardTypes.VARCHAR)
     public static void output(SpatialPartitioningState state, BlockBuilder out)
     {
@@ -101,6 +93,6 @@ public final class SpatialPartitioningInternalAggregateFunction
         // Add a small buffer on the right and upper sides
         Rectangle paddedExtent = new Rectangle(envelope.getXMin(), envelope.getYMin(), Math.nextUp(envelope.getXMax()), Math.nextUp(envelope.getYMax()));
 
-        VARCHAR.writeString(out, KdbTreeUtils.toJson(buildKdbTree(maxItemsPerNode, paddedExtent, samples)));
+        VARCHAR.writeSlice(out, KdbTreeUtils.toJson(buildKdbTree(maxItemsPerNode, paddedExtent, samples)));
     }
 }

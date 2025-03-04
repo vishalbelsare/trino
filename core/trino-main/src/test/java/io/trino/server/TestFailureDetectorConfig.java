@@ -16,7 +16,7 @@ package io.trino.server;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
 import io.trino.failuredetector.FailureDetectorConfig;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -41,13 +41,13 @@ public class TestFailureDetectorConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("failure-detector.expiration-grace-interval", "5m")
                 .put("failure-detector.warmup-interval", "60s")
                 .put("failure-detector.heartbeat-interval", "10s")
                 .put("failure-detector.threshold", "0.5")
                 .put("failure-detector.enabled", "false")
-                .build();
+                .buildOrThrow();
 
         FailureDetectorConfig expected = new FailureDetectorConfig()
                 .setExpirationGraceInterval(new Duration(5, TimeUnit.MINUTES))

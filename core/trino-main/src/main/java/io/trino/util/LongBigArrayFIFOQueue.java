@@ -18,10 +18,10 @@ import io.trino.array.LongBigArray;
 import it.unimi.dsi.fastutil.PriorityQueue;
 import it.unimi.dsi.fastutil.longs.LongComparator;
 import it.unimi.dsi.fastutil.longs.LongPriorityQueue;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.NoSuchElementException;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.lang.Math.toIntExact;
 
 /**
@@ -42,7 +42,7 @@ import static java.lang.Math.toIntExact;
 public class LongBigArrayFIFOQueue
         implements LongPriorityQueue
 {
-    private static final long INSTANCE_SIZE = ClassLayout.parseClass(LongBigArrayFIFOQueue.class).instanceSize();
+    private static final long INSTANCE_SIZE = instanceSize(LongBigArrayFIFOQueue.class);
     /**
      * The standard initial capacity of a queue.
      */
@@ -141,7 +141,7 @@ public class LongBigArrayFIFOQueue
         return t;
     }
 
-    private final void resize(final long size, final long newLength)
+    private void resize(final long size, final long newLength)
     {
         final LongBigArray newArray = new LongBigArray();
         newArray.ensureCapacity(newLength);
@@ -160,12 +160,12 @@ public class LongBigArrayFIFOQueue
         length = newLength;
     }
 
-    private final void expand()
+    private void expand()
     {
         resize(length, 2L * length);
     }
 
-    private final void reduce()
+    private void reduce()
     {
         final long size = longSize();
         if (length > INITIAL_CAPACITY && size <= length / 4) {

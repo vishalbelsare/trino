@@ -33,10 +33,10 @@ public class RangeBoundValueSerializer
         }
         else {
             if (value.getValues().size() == 1) {
-                writeValue(value.getValues().get(0), gen);
+                writeValue(value.getValues().getFirst(), gen);
             }
             else {
-                gen.writeStartArray(value.getValues().size());
+                gen.writeStartArray();
                 for (Object obj : value.getValues()) {
                     writeValue(obj, gen);
                 }
@@ -51,7 +51,7 @@ public class RangeBoundValueSerializer
         if (obj == null) {
             throw new IllegalStateException("Unexpected null value");
         }
-        else if (obj instanceof String) {
+        if (obj instanceof String) {
             gen.writeString((String) obj);
         }
         else if (Number.class.isAssignableFrom(obj.getClass())) {

@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Doubles;
 import io.airlift.stats.TDigest;
 import io.trino.operator.aggregation.state.TDigestAndPercentileArrayState;
+import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.AggregationFunction;
@@ -29,6 +30,7 @@ import io.trino.spi.type.StandardTypes;
 
 import java.util.List;
 
+import static io.trino.operator.scalar.TDigestFunctions.verifyValue;
 import static io.trino.operator.scalar.TDigestFunctions.verifyWeight;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -42,6 +44,8 @@ public final class ApproximateDoublePercentileArrayAggregations
     @InputFunction
     public static void input(@AggregationState TDigestAndPercentileArrayState state, @SqlType(StandardTypes.DOUBLE) double value, @SqlType("array(double)") Block percentilesArrayBlock)
     {
+        verifyValue(value);
+
         initializePercentilesArray(state, percentilesArrayBlock);
         initializeDigest(state);
 
@@ -54,6 +58,7 @@ public final class ApproximateDoublePercentileArrayAggregations
     @InputFunction
     public static void weightedInput(@AggregationState TDigestAndPercentileArrayState state, @SqlType(StandardTypes.DOUBLE) double value, @SqlType(StandardTypes.DOUBLE) double weight, @SqlType("array(double)") Block percentilesArrayBlock)
     {
+        verifyValue(value);
         verifyWeight(weight);
 
         initializePercentilesArray(state, percentilesArrayBlock);
@@ -95,14 +100,12 @@ public final class ApproximateDoublePercentileArrayAggregations
             return;
         }
 
-        BlockBuilder blockBuilder = out.beginBlockEntry();
-
         List<Double> valuesAtPercentiles = valuesAtPercentiles(digest, percentiles);
-        for (double value : valuesAtPercentiles) {
-            DOUBLE.writeDouble(blockBuilder, value);
-        }
-
-        out.closeEntry();
+        ((ArrayBlockBuilder) out).buildEntry(elementBuilder -> {
+            for (double value : valuesAtPercentiles) {
+                DOUBLE.writeDouble(elementBuilder, value);
+            }
+        });
     }
 
     public static List<Double> valuesAtPercentiles(TDigest digest, List<Double> percentiles)
@@ -124,10 +127,10 @@ public final class ApproximateDoublePercentileArrayAggregations
             indexes[b] = tempIndex;
         });
 
-        List<Double> valuesAtPercentiles = digest.valuesAt(Doubles.asList(sortedPercentiles));
-        double[] result = new double[valuesAtPercentiles.size()];
-        for (int i = 0; i < valuesAtPercentiles.size(); i++) {
-            result[indexes[i]] = valuesAtPercentiles.get(i);
+        double[] valuesAtPercentiles = digest.valuesAt(sortedPercentiles);
+        double[] result = new double[valuesAtPercentiles.length];
+        for (int i = 0; i < valuesAtPercentiles.length; i++) {
+            result[indexes[i]] = valuesAtPercentiles[i];
         }
 
         return Doubles.asList(result);

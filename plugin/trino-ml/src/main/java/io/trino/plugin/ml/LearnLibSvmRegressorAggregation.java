@@ -15,11 +15,10 @@ package io.trino.plugin.ml;
 
 import io.airlift.slice.Slice;
 import io.trino.plugin.ml.type.RegressorType;
-import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.SqlMap;
 import io.trino.spi.function.AggregationFunction;
 import io.trino.spi.function.AggregationState;
-import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.InputFunction;
 import io.trino.spi.function.OutputFunction;
 import io.trino.spi.function.SqlType;
@@ -37,7 +36,7 @@ public final class LearnLibSvmRegressorAggregation
     public static void input(
             @AggregationState LearnState state,
             @SqlType(BIGINT) long label,
-            @SqlType("map(bigint,double)") Block features,
+            @SqlType("map(bigint,double)") SqlMap features,
             @SqlType(VARCHAR) Slice parameters)
     {
         input(state, (double) label, features, parameters);
@@ -47,7 +46,7 @@ public final class LearnLibSvmRegressorAggregation
     public static void input(
             @AggregationState LearnState state,
             @SqlType(DOUBLE) double label,
-            @SqlType("map(bigint,double)") Block features,
+            @SqlType("map(bigint,double)") SqlMap features,
             @SqlType(VARCHAR) Slice parameters)
     {
         state.getLabels().add(label);
@@ -55,12 +54,6 @@ public final class LearnLibSvmRegressorAggregation
         state.addMemoryUsage(featureVector.getEstimatedSize());
         state.getFeatureVectors().add(featureVector);
         state.setParameters(parameters);
-    }
-
-    @CombineFunction
-    public static void combine(@AggregationState LearnState state, @AggregationState LearnState otherState)
-    {
-        throw new UnsupportedOperationException("LEARN must run on a single machine");
     }
 
     @OutputFunction(RegressorType.NAME)

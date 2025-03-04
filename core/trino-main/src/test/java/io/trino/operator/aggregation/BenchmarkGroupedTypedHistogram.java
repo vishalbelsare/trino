@@ -15,11 +15,10 @@ package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.metadata.TestingFunctionResolution;
-import io.trino.operator.GroupByIdBlock;
-import io.trino.operator.aggregation.histogram.Histogram;
+import io.trino.operator.AggregationMetrics;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
-import io.trino.sql.tree.QualifiedName;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Measurement;
@@ -34,7 +33,7 @@ import org.openjdk.jmh.runner.RunnerException;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -44,6 +43,7 @@ import static io.trino.block.BlockAssertions.createStringsBlock;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 
 @OutputTimeUnit(TimeUnit.SECONDS)
 //@BenchmarkMode(Mode.AverageTime)
@@ -75,14 +75,16 @@ public class BenchmarkGroupedTypedHistogram
 
         private final Random random = new Random();
         private Page[] pages;
-        private GroupByIdBlock[] groupByIdBlocks;
-        private GroupedAccumulator groupedAccumulator;
+        private int[] groupCounts;
+        private int[][] groupByIdBlocks;
+        private GroupedAggregator groupedAggregator;
 
         @Setup
         public void setUp()
         {
             pages = new Page[numGroups];
-            groupByIdBlocks = new GroupByIdBlock[numGroups];
+            groupCounts = new int[numGroups];
+            groupByIdBlocks = new int[numGroups][];
 
             for (int j = 0; j < numGroups; j++) {
                 List<String> valueList = new ArrayList<>();
@@ -104,36 +106,46 @@ public class BenchmarkGroupedTypedHistogram
 
                 Block block = createStringsBlock(valueList);
                 Page page = new Page(block);
-                GroupByIdBlock groupByIdBlock = AggregationTestUtils.createGroupByIdBlock(j, page.getPositionCount());
+                int[] groupByIdBlock = AggregationTestUtils.createGroupByIdBlock(j, page.getPositionCount());
 
                 pages[j] = page;
+                groupCounts[j] = j;
                 groupByIdBlocks[j] = groupByIdBlock;
             }
 
             TestingAggregationFunction aggregationFunction = getInternalAggregationFunctionVarChar();
-            groupedAccumulator = aggregationFunction.bind(ImmutableList.of(0), Optional.empty())
-                    .createGroupedAccumulator();
+            groupedAggregator = aggregationFunction.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty())
+                    .createGroupedAggregator(new AggregationMetrics());
         }
     }
 
     @Benchmark
-    public GroupedAccumulator testSharedGroupWithLargeBlocksRunner(Data data)
+    public GroupedAggregator testSharedGroupWithLargeBlocksRunner(Data data)
     {
-        GroupedAccumulator groupedAccumulator = data.groupedAccumulator;
+        GroupedAggregator groupedAggregator = data.groupedAggregator;
 
         for (int i = 0; i < data.numGroups; i++) {
-            GroupByIdBlock groupByIdBlock = data.groupByIdBlocks[i];
+            int groupCount = data.groupCounts[i];
+            int[] groupByIdBlock = data.groupByIdBlocks[i];
             Page page = data.pages[i];
-            groupedAccumulator.addInput(groupByIdBlock, page);
+            groupedAggregator.processPage(groupCount, groupByIdBlock, page);
         }
 
-        return groupedAccumulator;
+        return groupedAggregator;
     }
 
     private static TestingAggregationFunction getInternalAggregationFunctionVarChar()
     {
         TestingFunctionResolution functionResolution = new TestingFunctionResolution();
-        return functionResolution.getAggregateFunction(QualifiedName.of(Histogram.NAME), fromTypes(VARCHAR));
+        return functionResolution.getAggregateFunction("histogram", fromTypes(VARCHAR));
+    }
+
+    @Test
+    public void test()
+    {
+        Data data = new Data();
+        data.setUp();
+        testSharedGroupWithLargeBlocksRunner(data);
     }
 
     public static void main(String[] args)

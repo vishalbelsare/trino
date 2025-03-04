@@ -15,30 +15,27 @@ package io.trino.operator.scalar;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.annotation.UsedByGeneratedCode;
-import io.trino.metadata.BoundSignature;
-import io.trino.metadata.FunctionDependencies;
-import io.trino.metadata.FunctionDependencyDeclaration;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
 import io.trino.metadata.SqlScalarFunction;
-import io.trino.spi.PageBuilder;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BufferedMapValueBuilder;
 import io.trino.spi.block.DuplicateMapKeyException;
-import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.SqlMap;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionDependencies;
+import io.trino.spi.function.FunctionDependencyDeclaration;
+import io.trino.spi.function.FunctionMetadata;
+import io.trino.spi.function.Signature;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.TypeSignature;
 
 import java.lang.invoke.MethodHandle;
 import java.util.Optional;
 
-import static io.trino.metadata.FunctionKind.SCALAR;
-import static io.trino.metadata.Signature.comparableTypeParameter;
-import static io.trino.metadata.Signature.typeVariable;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static io.trino.spi.block.MapHashTables.HashBuildMode.STRICT_NOT_DISTINCT_FROM;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
@@ -46,7 +43,7 @@ import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
 import static io.trino.spi.function.OperatorType.INDETERMINATE;
 import static io.trino.spi.type.TypeSignature.arrayType;
-import static io.trino.spi.type.TypeUtils.readNativeValue;
+import static io.trino.spi.type.TypeSignature.mapType;
 import static io.trino.util.Failures.checkCondition;
 import static io.trino.util.Failures.internalError;
 import static io.trino.util.Reflection.constructorMethodHandle;
@@ -71,19 +68,16 @@ public final class MapConstructor
 
     public MapConstructor()
     {
-        super(new FunctionMetadata(
-                new Signature(
-                        "map",
-                        ImmutableList.of(comparableTypeParameter("K"), typeVariable("V")),
-                        ImmutableList.of(),
-                        TypeSignature.mapType(new TypeSignature("K"), new TypeSignature("V")),
-                        ImmutableList.of(arrayType(new TypeSignature("K")), arrayType(new TypeSignature("V"))),
-                        false),
-                new FunctionNullability(false, ImmutableList.of(false, false)),
-                false,
-                true,
-                DESCRIPTION,
-                SCALAR));
+        super(FunctionMetadata.scalarBuilder("map")
+                .signature(Signature.builder()
+                        .comparableTypeParameter("K")
+                        .typeVariable("V")
+                        .returnType(mapType(new TypeSignature("K"), new TypeSignature("V")))
+                        .argumentType(arrayType(new TypeSignature("K")))
+                        .argumentType(arrayType(new TypeSignature("V")))
+                        .build())
+                .description(DESCRIPTION)
+                .build());
     }
 
     @Override
@@ -97,25 +91,26 @@ public final class MapConstructor
     }
 
     @Override
-    public ScalarFunctionImplementation specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
+    public SpecializedSqlScalarFunction specialize(BoundSignature boundSignature, FunctionDependencies functionDependencies)
     {
         MapType mapType = (MapType) boundSignature.getReturnType();
-        MethodHandle keyIndeterminate = functionDependencies.getOperatorInvoker(
+        MethodHandle keyIndeterminate = functionDependencies.getOperatorImplementation(
                 INDETERMINATE,
                 ImmutableList.of(mapType.getKeyType()),
-                simpleConvention(FAIL_ON_NULL, NEVER_NULL)).getMethodHandle();
+                simpleConvention(FAIL_ON_NULL, BLOCK_POSITION)).getMethodHandle();
         MethodHandle instanceFactory = constructorMethodHandle(State.class, MapType.class).bindTo(mapType);
 
-        return new ChoicesScalarFunctionImplementation(
+        MethodHandle methodHandle = METHOD_HANDLE.bindTo(mapType).bindTo(keyIndeterminate);
+        return new ChoicesSpecializedSqlScalarFunction(
                 boundSignature,
                 FAIL_ON_NULL,
                 ImmutableList.of(NEVER_NULL, NEVER_NULL),
-                METHOD_HANDLE.bindTo(mapType).bindTo(keyIndeterminate),
+                methodHandle,
                 Optional.of(instanceFactory));
     }
 
     @UsedByGeneratedCode
-    public static Block createMap(
+    public static SqlMap createMap(
             MapType mapType,
             MethodHandle keyIndeterminate,
             State state,
@@ -124,59 +119,40 @@ public final class MapConstructor
             Block valueBlock)
     {
         checkCondition(keyBlock.getPositionCount() == valueBlock.getPositionCount(), INVALID_FUNCTION_ARGUMENT, "Key and value arrays must be the same length");
-        PageBuilder pageBuilder = state.getPageBuilder();
-        if (pageBuilder.isFull()) {
-            pageBuilder.reset();
-        }
-
-        MapBlockBuilder mapBlockBuilder = (MapBlockBuilder) pageBuilder.getBlockBuilder(0);
-        mapBlockBuilder.strict();
-        BlockBuilder blockBuilder = mapBlockBuilder.beginBlockEntry();
         for (int i = 0; i < keyBlock.getPositionCount(); i++) {
             if (keyBlock.isNull(i)) {
-                // close block builder before throwing as we may be in a TRY() call
-                // so that subsequent calls do not find it in an inconsistent state
-                mapBlockBuilder.closeEntry();
                 throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "map key cannot be null");
             }
-            Object keyObject = readNativeValue(mapType.getKeyType(), keyBlock, i);
             try {
-                if ((boolean) keyIndeterminate.invoke(keyObject)) {
+                if ((boolean) keyIndeterminate.invoke(keyBlock, i)) {
                     throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "map key cannot be indeterminate: " + mapType.getKeyType().getObjectValue(session, keyBlock, i));
                 }
             }
             catch (Throwable t) {
-                mapBlockBuilder.closeEntry();
                 throw internalError(t);
             }
-            mapType.getKeyType().appendTo(keyBlock, i, blockBuilder);
-            mapType.getValueType().appendTo(valueBlock, i, blockBuilder);
         }
+
         try {
-            mapBlockBuilder.closeEntry();
+            return new SqlMap(mapType, STRICT_NOT_DISTINCT_FROM, keyBlock, valueBlock);
         }
         catch (DuplicateMapKeyException e) {
             throw e.withDetailedMessage(mapType.getKeyType(), session);
         }
-        finally {
-            pageBuilder.declarePosition();
-        }
-
-        return mapType.getObject(mapBlockBuilder, mapBlockBuilder.getPositionCount() - 1);
     }
 
     public static final class State
     {
-        private final PageBuilder pageBuilder;
+        private final BufferedMapValueBuilder mapValueBuilder;
 
         public State(MapType mapType)
         {
-            pageBuilder = new PageBuilder(ImmutableList.of(mapType));
+            mapValueBuilder = BufferedMapValueBuilder.createBufferedStrict(mapType);
         }
 
-        public PageBuilder getPageBuilder()
+        public BufferedMapValueBuilder getMapValueBuilder()
         {
-            return pageBuilder;
+            return mapValueBuilder;
         }
     }
 }

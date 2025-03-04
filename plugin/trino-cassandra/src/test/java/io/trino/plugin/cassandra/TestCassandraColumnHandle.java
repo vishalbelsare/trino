@@ -19,25 +19,19 @@ import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.ObjectMapperProvider;
 import io.trino.plugin.base.TypeDeserializer;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeOperators;
-import io.trino.type.InternalTypeManager;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
-import static org.testng.Assert.assertEquals;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestCassandraColumnHandle
 {
-    private JsonCodec<CassandraColumnHandle> codec;
+    private final JsonCodec<CassandraColumnHandle> codec;
 
-    @BeforeClass
-    public void setup()
+    public TestCassandraColumnHandle()
     {
         ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
-        TypeManager typeManager = new InternalTypeManager(createTestMetadataManager(), new TypeOperators());
-        objectMapperProvider.setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(typeManager)));
+        objectMapperProvider.setJsonDeserializers(ImmutableMap.of(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)));
         codec = new JsonCodecFactory(objectMapperProvider).jsonCodec(CassandraColumnHandle.class);
     }
 
@@ -49,11 +43,11 @@ public class TestCassandraColumnHandle
         String json = codec.toJson(expected);
         CassandraColumnHandle actual = codec.fromJson(json);
 
-        assertEquals(actual.getName(), expected.getName());
-        assertEquals(actual.getOrdinalPosition(), expected.getOrdinalPosition());
-        assertEquals(actual.getCassandraType(), expected.getCassandraType());
-        assertEquals(actual.isPartitionKey(), expected.isPartitionKey());
-        assertEquals(actual.isClusteringKey(), expected.isClusteringKey());
+        assertThat(actual.name()).isEqualTo(expected.name());
+        assertThat(actual.ordinalPosition()).isEqualTo(expected.ordinalPosition());
+        assertThat(actual.cassandraType()).isEqualTo(expected.cassandraType());
+        assertThat(actual.partitionKey()).isEqualTo(expected.partitionKey());
+        assertThat(actual.clusteringKey()).isEqualTo(expected.clusteringKey());
     }
 
     @Test
@@ -71,10 +65,10 @@ public class TestCassandraColumnHandle
         String json = codec.toJson(expected);
         CassandraColumnHandle actual = codec.fromJson(json);
 
-        assertEquals(actual.getName(), expected.getName());
-        assertEquals(actual.getOrdinalPosition(), expected.getOrdinalPosition());
-        assertEquals(actual.getCassandraType(), expected.getCassandraType());
-        assertEquals(actual.isPartitionKey(), expected.isPartitionKey());
-        assertEquals(actual.isClusteringKey(), expected.isClusteringKey());
+        assertThat(actual.name()).isEqualTo(expected.name());
+        assertThat(actual.ordinalPosition()).isEqualTo(expected.ordinalPosition());
+        assertThat(actual.cassandraType()).isEqualTo(expected.cassandraType());
+        assertThat(actual.partitionKey()).isEqualTo(expected.partitionKey());
+        assertThat(actual.clusteringKey()).isEqualTo(expected.clusteringKey());
     }
 }

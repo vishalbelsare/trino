@@ -14,11 +14,10 @@
 package io.trino.plugin.jmx;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.trino.spi.connector.SchemaTableName;
-
-import javax.annotation.PostConstruct;
-import javax.inject.Inject;
+import jakarta.annotation.PostConstruct;
 
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
@@ -52,7 +51,6 @@ public class JmxPeriodicSampler
         this.jmxHistoricalData = requireNonNull(jmxHistoricalData, "jmxHistoricalData is null");
         requireNonNull(jmxMetadata, "jmxMetadata is null");
         this.jmxRecordSetProvider = requireNonNull(jmxRecordSetProvider, "jmxRecordSetProvider is null");
-        requireNonNull(jmxConfig, "jmxConfig is null");
         this.period = jmxConfig.getDumpPeriod().toMillis();
 
         ImmutableList.Builder<JmxTableHandle> tableHandleBuilder = ImmutableList.builder();
@@ -116,12 +114,12 @@ public class JmxPeriodicSampler
 
         for (JmxTableHandle tableHandle : tableHandles) {
             try {
-                for (String objectName : tableHandle.getObjectNames()) {
+                for (String objectName : tableHandle.objectNames()) {
                     List<Object> row = jmxRecordSetProvider.getLiveRow(
                             objectName,
-                            tableHandle.getColumnHandles(),
+                            tableHandle.columnHandles(),
                             dumpTimestamp);
-                    jmxHistoricalData.addRow(tableHandle.getTableName().getTableName(), row);
+                    jmxHistoricalData.addRow(tableHandle.tableName().getTableName(), row);
                 }
             }
             catch (Exception exception) {

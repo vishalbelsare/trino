@@ -19,14 +19,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.errorprone.annotations.Immutable;
 import io.trino.metadata.ResolvedFunction;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.FrameBound;
-import io.trino.sql.tree.WindowFrame;
-
-import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Map;
@@ -37,9 +34,9 @@ import java.util.Set;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.concat;
-import static io.trino.sql.tree.FrameBound.Type.CURRENT_ROW;
-import static io.trino.sql.tree.FrameBound.Type.UNBOUNDED_PRECEDING;
-import static io.trino.sql.tree.WindowFrame.Type.RANGE;
+import static io.trino.sql.planner.plan.FrameBoundType.CURRENT_ROW;
+import static io.trino.sql.planner.plan.FrameBoundType.UNBOUNDED_PRECEDING;
+import static io.trino.sql.planner.plan.WindowFrameType.RANGE;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
@@ -48,7 +45,7 @@ public class WindowNode
 {
     private final PlanNode source;
     private final Set<Symbol> prePartitionedInputs;
-    private final Specification specification;
+    private final DataOrganizationSpecification specification;
     private final int preSortedOrderPrefix;
     private final Map<Symbol, Function> windowFunctions;
     private final Optional<Symbol> hashSymbol;
@@ -57,7 +54,7 @@ public class WindowNode
     public WindowNode(
             @JsonProperty("id") PlanNodeId id,
             @JsonProperty("source") PlanNode source,
-            @JsonProperty("specification") Specification specification,
+            @JsonProperty("specification") DataOrganizationSpecification specification,
             @JsonProperty("windowFunctions") Map<Symbol, Function> windowFunctions,
             @JsonProperty("hashSymbol") Optional<Symbol> hashSymbol,
             @JsonProperty("prePartitionedInputs") Set<Symbol> prePartitionedInputs,
@@ -69,13 +66,18 @@ public class WindowNode
         requireNonNull(specification, "specification is null");
         requireNonNull(windowFunctions, "windowFunctions is null");
         requireNonNull(hashSymbol, "hashSymbol is null");
-        checkArgument(specification.getPartitionBy().containsAll(prePartitionedInputs), "prePartitionedInputs must be contained in partitionBy");
-        Optional<OrderingScheme> orderingScheme = specification.getOrderingScheme();
-        checkArgument(preSortedOrderPrefix == 0 || (orderingScheme.isPresent() && preSortedOrderPrefix <= orderingScheme.get().getOrderBy().size()), "Cannot have sorted more symbols than those requested");
-        checkArgument(preSortedOrderPrefix == 0 || ImmutableSet.copyOf(prePartitionedInputs).equals(ImmutableSet.copyOf(specification.getPartitionBy())), "preSortedOrderPrefix can only be greater than zero if all partition symbols are pre-partitioned");
+        requireNonNull(prePartitionedInputs, "prePartitionedInputs is null");
+        // Make the defensive copy eagerly, so it can be used for both the validation checks and assigned directly to the field afterwards
+        prePartitionedInputs = ImmutableSet.copyOf(prePartitionedInputs);
+
+        ImmutableSet<Symbol> partitionBy = ImmutableSet.copyOf(specification.partitionBy());
+        Optional<OrderingScheme> orderingScheme = specification.orderingScheme();
+        checkArgument(partitionBy.containsAll(prePartitionedInputs), "prePartitionedInputs must be contained in partitionBy");
+        checkArgument(preSortedOrderPrefix == 0 || (orderingScheme.isPresent() && preSortedOrderPrefix <= orderingScheme.get().orderBy().size()), "Cannot have sorted more symbols than those requested");
+        checkArgument(preSortedOrderPrefix == 0 || partitionBy.equals(prePartitionedInputs), "preSortedOrderPrefix can only be greater than zero if all partition symbols are pre-partitioned");
 
         this.source = source;
-        this.prePartitionedInputs = ImmutableSet.copyOf(prePartitionedInputs);
+        this.prePartitionedInputs = prePartitionedInputs;
         this.specification = specification;
         this.windowFunctions = ImmutableMap.copyOf(windowFunctions);
         this.hashSymbol = hashSymbol;
@@ -106,19 +108,19 @@ public class WindowNode
     }
 
     @JsonProperty
-    public Specification getSpecification()
+    public DataOrganizationSpecification getSpecification()
     {
         return specification;
     }
 
     public List<Symbol> getPartitionBy()
     {
-        return specification.getPartitionBy();
+        return specification.partitionBy();
     }
 
     public Optional<OrderingScheme> getOrderingScheme()
     {
-        return specification.orderingScheme;
+        return specification.orderingScheme();
     }
 
     @JsonProperty
@@ -165,60 +167,6 @@ public class WindowNode
     }
 
     @Immutable
-    public static class Specification
-    {
-        private final List<Symbol> partitionBy;
-        private final Optional<OrderingScheme> orderingScheme;
-
-        @JsonCreator
-        public Specification(
-                @JsonProperty("partitionBy") List<Symbol> partitionBy,
-                @JsonProperty("orderingScheme") Optional<OrderingScheme> orderingScheme)
-        {
-            requireNonNull(partitionBy, "partitionBy is null");
-            requireNonNull(orderingScheme, "orderingScheme is null");
-
-            this.partitionBy = ImmutableList.copyOf(partitionBy);
-            this.orderingScheme = requireNonNull(orderingScheme, "orderingScheme is null");
-        }
-
-        @JsonProperty
-        public List<Symbol> getPartitionBy()
-        {
-            return partitionBy;
-        }
-
-        @JsonProperty
-        public Optional<OrderingScheme> getOrderingScheme()
-        {
-            return orderingScheme;
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return Objects.hash(partitionBy, orderingScheme);
-        }
-
-        @Override
-        public boolean equals(Object obj)
-        {
-            if (this == obj) {
-                return true;
-            }
-
-            if (obj == null || getClass() != obj.getClass()) {
-                return false;
-            }
-
-            Specification other = (Specification) obj;
-
-            return Objects.equals(this.partitionBy, other.partitionBy) &&
-                    Objects.equals(this.orderingScheme, other.orderingScheme);
-        }
-    }
-
-    @Immutable
     public static class Frame
     {
         public static final Frame DEFAULT_FRAME = new WindowNode.Frame(
@@ -228,33 +176,25 @@ public class WindowNode
                 Optional.empty(),
                 CURRENT_ROW,
                 Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
                 Optional.empty());
 
-        private final WindowFrame.Type type;
-        private final FrameBound.Type startType;
+        private final WindowFrameType type;
+        private final FrameBoundType startType;
         private final Optional<Symbol> startValue;
         private final Optional<Symbol> sortKeyCoercedForFrameStartComparison;
-        private final FrameBound.Type endType;
+        private final FrameBoundType endType;
         private final Optional<Symbol> endValue;
         private final Optional<Symbol> sortKeyCoercedForFrameEndComparison;
 
-        // This information is only used for printing the plan.
-        private final Optional<Expression> originalStartValue;
-        private final Optional<Expression> originalEndValue;
-
         @JsonCreator
         public Frame(
-                @JsonProperty("type") WindowFrame.Type type,
-                @JsonProperty("startType") FrameBound.Type startType,
+                @JsonProperty("type") WindowFrameType type,
+                @JsonProperty("startType") FrameBoundType startType,
                 @JsonProperty("startValue") Optional<Symbol> startValue,
                 @JsonProperty("sortKeyCoercedForFrameStartComparison") Optional<Symbol> sortKeyCoercedForFrameStartComparison,
-                @JsonProperty("endType") FrameBound.Type endType,
+                @JsonProperty("endType") FrameBoundType endType,
                 @JsonProperty("endValue") Optional<Symbol> endValue,
-                @JsonProperty("sortKeyCoercedForFrameEndComparison") Optional<Symbol> sortKeyCoercedForFrameEndComparison,
-                @JsonProperty("originalStartValue") Optional<Expression> originalStartValue,
-                @JsonProperty("originalEndValue") Optional<Expression> originalEndValue)
+                @JsonProperty("sortKeyCoercedForFrameEndComparison") Optional<Symbol> sortKeyCoercedForFrameEndComparison)
         {
             this.startType = requireNonNull(startType, "startType is null");
             this.startValue = requireNonNull(startValue, "startValue is null");
@@ -263,18 +203,14 @@ public class WindowNode
             this.endValue = requireNonNull(endValue, "endValue is null");
             this.sortKeyCoercedForFrameEndComparison = requireNonNull(sortKeyCoercedForFrameEndComparison, "sortKeyCoercedForFrameEndComparison is null");
             this.type = requireNonNull(type, "type is null");
-            this.originalStartValue = requireNonNull(originalStartValue, "originalStartValue is null");
-            this.originalEndValue = requireNonNull(originalEndValue, "originalEndValue is null");
 
             if (startValue.isPresent()) {
-                checkArgument(originalStartValue.isPresent(), "originalStartValue must be present if startValue is present");
                 if (type == RANGE) {
                     checkArgument(sortKeyCoercedForFrameStartComparison.isPresent(), "for frame of type RANGE, sortKeyCoercedForFrameStartComparison must be present if startValue is present");
                 }
             }
 
             if (endValue.isPresent()) {
-                checkArgument(originalEndValue.isPresent(), "originalEndValue must be present if endValue is present");
                 if (type == RANGE) {
                     checkArgument(sortKeyCoercedForFrameEndComparison.isPresent(), "for frame of type RANGE, sortKeyCoercedForFrameEndComparison must be present if endValue is present");
                 }
@@ -282,13 +218,13 @@ public class WindowNode
         }
 
         @JsonProperty
-        public WindowFrame.Type getType()
+        public WindowFrameType getType()
         {
             return type;
         }
 
         @JsonProperty
-        public FrameBound.Type getStartType()
+        public FrameBoundType getStartType()
         {
             return startType;
         }
@@ -306,7 +242,7 @@ public class WindowNode
         }
 
         @JsonProperty
-        public FrameBound.Type getEndType()
+        public FrameBoundType getEndType()
         {
             return endType;
         }
@@ -321,18 +257,6 @@ public class WindowNode
         public Optional<Symbol> getSortKeyCoercedForFrameEndComparison()
         {
             return sortKeyCoercedForFrameEndComparison;
-        }
-
-        @JsonProperty
-        public Optional<Expression> getOriginalStartValue()
-        {
-            return originalStartValue;
-        }
-
-        @JsonProperty
-        public Optional<Expression> getOriginalEndValue()
-        {
-            return originalEndValue;
         }
 
         @Override
@@ -366,20 +290,26 @@ public class WindowNode
     {
         private final ResolvedFunction resolvedFunction;
         private final List<Expression> arguments;
+        private final Optional<OrderingScheme> orderingScheme;
         private final Frame frame;
         private final boolean ignoreNulls;
+        private final boolean distinct;
 
         @JsonCreator
         public Function(
                 @JsonProperty("resolvedFunction") ResolvedFunction resolvedFunction,
                 @JsonProperty("arguments") List<Expression> arguments,
+                @JsonProperty("orderingScheme") Optional<OrderingScheme> orderingScheme,
                 @JsonProperty("frame") Frame frame,
-                @JsonProperty("ignoreNulls") boolean ignoreNulls)
+                @JsonProperty("ignoreNulls") boolean ignoreNulls,
+                @JsonProperty("distinct") boolean distinct)
         {
             this.resolvedFunction = requireNonNull(resolvedFunction, "resolvedFunction is null");
             this.arguments = requireNonNull(arguments, "arguments is null");
+            this.orderingScheme = requireNonNull(orderingScheme, "orderingScheme is null");
             this.frame = requireNonNull(frame, "frame is null");
             this.ignoreNulls = ignoreNulls;
+            this.distinct = distinct;
         }
 
         @JsonProperty
@@ -395,6 +325,12 @@ public class WindowNode
         }
 
         @JsonProperty
+        public Optional<OrderingScheme> getOrderingScheme()
+        {
+            return orderingScheme;
+        }
+
+        @JsonProperty
         public Frame getFrame()
         {
             return frame;
@@ -406,10 +342,16 @@ public class WindowNode
             return ignoreNulls;
         }
 
+        @JsonProperty
+        public boolean isDistinct()
+        {
+            return distinct;
+        }
+
         @Override
         public int hashCode()
         {
-            return Objects.hash(resolvedFunction, arguments, frame, ignoreNulls);
+            return Objects.hash(resolvedFunction, arguments, orderingScheme, frame, ignoreNulls, distinct);
         }
 
         @Override
@@ -424,8 +366,10 @@ public class WindowNode
             Function other = (Function) obj;
             return Objects.equals(this.resolvedFunction, other.resolvedFunction) &&
                     Objects.equals(this.arguments, other.arguments) &&
+                    Objects.equals(this.orderingScheme, other.orderingScheme) &&
                     Objects.equals(this.frame, other.frame) &&
-                    this.ignoreNulls == other.ignoreNulls;
+                    this.ignoreNulls == other.ignoreNulls &&
+                    this.distinct == other.distinct;
         }
     }
 }

@@ -20,17 +20,19 @@ import io.trino.spi.type.SqlDecimal;
 
 import java.math.BigDecimal;
 
-import static java.math.BigDecimal.ROUND_DOWN;
+import static java.math.RoundingMode.DOWN;
 
 public abstract class AbstractTestDecimalSumAggregation
         extends AbstractTestAggregationFunction
 {
     protected abstract DecimalType getDecimalType();
 
+    protected abstract DecimalType getExpectedType();
+
     @Override
     protected Block[] getSequenceBlocks(int start, int length)
     {
-        BlockBuilder blockBuilder = getDecimalType().createBlockBuilder(null, length);
+        BlockBuilder blockBuilder = getDecimalType().createFixedSizeBlockBuilder(length);
         for (int i = start; i < start + length; i++) {
             writeDecimalToBlock(getBigDecimalForCounter(i), blockBuilder);
         }
@@ -42,7 +44,7 @@ public abstract class AbstractTestDecimalSumAggregation
     private static BigDecimal getBigDecimalForCounter(int i)
     {
         String iAsString = String.valueOf(Math.abs(i));
-        return new BigDecimal(String.valueOf(i) + "." + iAsString + iAsString).setScale(2, ROUND_DOWN);
+        return new BigDecimal(String.valueOf(i) + "." + iAsString + iAsString).setScale(2, DOWN);
     }
 
     @Override
@@ -55,7 +57,9 @@ public abstract class AbstractTestDecimalSumAggregation
         for (int i = start; i < start + length; i++) {
             sum = sum.add(getBigDecimalForCounter(i));
         }
-        return new SqlDecimal(sum.unscaledValue(), sum.precision(), sum.scale());
+
+        DecimalType expectedType = getExpectedType();
+        return new SqlDecimal(sum.unscaledValue(), expectedType.getPrecision(), expectedType.getScale());
     }
 
     @Override

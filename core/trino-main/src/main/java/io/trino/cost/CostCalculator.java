@@ -14,12 +14,10 @@
 
 package io.trino.cost;
 
+import com.google.errorprone.annotations.ThreadSafe;
 import com.google.inject.BindingAnnotation;
 import io.trino.Session;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.plan.PlanNode;
-
-import javax.annotation.concurrent.ThreadSafe;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
@@ -40,8 +38,7 @@ public interface CostCalculator
             PlanNode node,
             StatsProvider stats,
             CostProvider sourcesCosts,
-            Session session,
-            TypeProvider types);
+            Session session);
 
     @BindingAnnotation
     @Target(PARAMETER)

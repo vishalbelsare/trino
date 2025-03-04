@@ -13,16 +13,15 @@
  */
 package io.trino.sql.planner;
 
-import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slices;
+import io.trino.sql.ir.Constant;
 import io.trino.sql.planner.assertions.BasePlanTest;
-import io.trino.sql.planner.plan.AggregationNode;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import java.util.Optional;
+import java.util.List;
 
-import static io.trino.sql.planner.assertions.PlanMatchPattern.aggregation;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
-import static io.trino.sql.planner.assertions.PlanMatchPattern.globalAggregation;
+import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.planner.assertions.PlanMatchPattern.output;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
 
 public class TestHaving
@@ -33,12 +32,6 @@ public class TestHaving
     {
         assertPlan(
                 "SELECT 'a' FROM (VALUES 1, 1, 2) t(a) HAVING true",
-                anyTree(
-                        aggregation(
-                                globalAggregation(),
-                                ImmutableMap.of(),
-                                Optional.empty(),
-                                AggregationNode.Step.SINGLE,
-                                values())));
+                output(values(List.of("a_symbol"), List.of(List.of(new Constant(createVarcharType(1), Slices.utf8Slice("a")))))));
     }
 }

@@ -15,7 +15,9 @@ package io.trino.tests.product.launcher.env.environment;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.Closer;
+import com.google.inject.Inject;
 import io.trino.tests.product.launcher.docker.DockerFiles;
+import io.trino.tests.product.launcher.docker.DockerFiles.ResourceProvider;
 import io.trino.tests.product.launcher.env.DockerContainer;
 import io.trino.tests.product.launcher.env.Environment;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
@@ -24,9 +26,7 @@ import io.trino.tests.product.launcher.env.common.HadoopKerberos;
 import io.trino.tests.product.launcher.env.common.Standard;
 import io.trino.tests.product.launcher.env.common.TestsEnvironment;
 import io.trino.tests.product.launcher.testcontainers.PortBinder;
-
-import javax.annotation.PreDestroy;
-import javax.inject.Inject;
+import jakarta.annotation.PreDestroy;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -40,7 +40,7 @@ import static io.trino.tests.product.launcher.env.EnvironmentContainers.COORDINA
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.HADOOP;
 import static io.trino.tests.product.launcher.env.common.Hadoop.CONTAINER_HADOOP_INIT_D;
 import static io.trino.tests.product.launcher.env.common.Hadoop.createHadoopContainer;
-import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_PRESTO_ETC;
+import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_TRINO_ETC;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
 import static org.testcontainers.containers.BindMode.READ_WRITE;
@@ -48,13 +48,14 @@ import static org.testcontainers.utility.MountableFile.forHostPath;
 
 /**
  * Two pseudo-distributed, kerberized Hadoop installations running on side-by-side,
- * each within single container, with single-node, kerberized Presto.
+ * each within single container, with single-node, kerberized Trino.
  */
 @TestsEnvironment
 public final class EnvTwoKerberosHives
         extends EnvironmentProvider
 {
     private final DockerFiles dockerFiles;
+    private final ResourceProvider configDir;
 
     private final String hadoopBaseImage;
     private final String hadoopImagesVersion;
@@ -72,9 +73,10 @@ public final class EnvTwoKerberosHives
     {
         super(ImmutableList.of(standard, hadoopKerberos));
         this.dockerFiles = requireNonNull(dockerFiles, "dockerFiles is null");
+        configDir = dockerFiles.getDockerFilesHostDirectory("conf/environment/two-kerberos-hives");
         this.portBinder = requireNonNull(portBinder, "portBinder is null");
-        hadoopBaseImage = requireNonNull(environmentConfig, "environmentConfig is null").getHadoopBaseImage();
-        hadoopImagesVersion = requireNonNull(environmentConfig, "environmentConfig is null").getHadoopImagesVersion();
+        hadoopBaseImage = environmentConfig.getHadoopBaseImage();
+        hadoopImagesVersion = environmentConfig.getHadoopImagesVersion();
     }
 
     @PreDestroy
@@ -92,33 +94,18 @@ public final class EnvTwoKerberosHives
         builder.configureContainer(COORDINATOR, container -> {
             container
                     .withFileSystemBind(keytabsHostDirectory, "/etc/trino/conf", READ_WRITE)
-
-                    .withCopyFileToContainer(
-                            forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/two-kerberos-hives/presto-krb5.conf")),
-                            "/etc/krb5.conf")
-
-                    .withCopyFileToContainer(
-                            forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/two-kerberos-hives/hive1.properties")),
-                            CONTAINER_PRESTO_ETC + "/catalog/hive1.properties")
-
-                    .withCopyFileToContainer(
-                            forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/two-kerberos-hives/hive2.properties")),
-                            CONTAINER_PRESTO_ETC + "/catalog/hive2.properties")
-
-                    .withCopyFileToContainer(
-                            forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/two-kerberos-hives/iceberg1.properties")),
-                            CONTAINER_PRESTO_ETC + "/catalog/iceberg1.properties")
-
-                    .withCopyFileToContainer(
-                            forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/two-kerberos-hives/iceberg2.properties")),
-                            CONTAINER_PRESTO_ETC + "/catalog/iceberg2.properties");
+                    .withCopyFileToContainer(forHostPath(configDir.getPath("trino-krb5.conf")), "/etc/krb5.conf");
         });
+        builder.addConnector("hive", forHostPath(configDir.getPath("hive1.properties")), CONTAINER_TRINO_ETC + "/catalog/hive1.properties");
+        builder.addConnector("hive", forHostPath(configDir.getPath("hive2.properties")), CONTAINER_TRINO_ETC + "/catalog/hive2.properties");
+        builder.addConnector("iceberg", forHostPath(configDir.getPath("iceberg1.properties")), CONTAINER_TRINO_ETC + "/catalog/iceberg1.properties");
+        builder.addConnector("iceberg", forHostPath(configDir.getPath("iceberg2.properties")), CONTAINER_TRINO_ETC + "/catalog/iceberg2.properties");
 
         builder.configureContainer(HADOOP, container -> {
             container.setDockerImageName(hadoopBaseImage + "-kerberized:" + hadoopImagesVersion);
             container.withFileSystemBind(keytabsHostDirectory, "/presto_keytabs", READ_WRITE);
             container.withCopyFileToContainer(
-                    forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/two-kerberos-hives/hadoop-master-copy-keytabs.sh")),
+                    forHostPath(configDir.getPath("hadoop-master-copy-keytabs.sh")),
                     CONTAINER_HADOOP_INIT_D + "copy-kerberos.sh");
         });
 
@@ -144,7 +131,10 @@ public final class EnvTwoKerberosHives
         return createHadoopContainer(dockerFiles, new PortBinder.ShiftingPortBinder(portBinder, 10000), hadoopBaseImage + "-kerberized-2:" + hadoopImagesVersion, HADOOP + "-2")
                 .withFileSystemBind(keytabsHostDirectory, "/presto_keytabs", READ_WRITE)
                 .withCopyFileToContainer(
-                        forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/two-kerberos-hives/hadoop-master-2-copy-keytabs.sh")),
-                        CONTAINER_HADOOP_INIT_D + "copy-kerberos.sh");
+                        forHostPath(configDir.getPath("hadoop-master-2-copy-keytabs.sh")),
+                        CONTAINER_HADOOP_INIT_D + "copy-kerberos.sh")
+                .withCopyFileToContainer(
+                        forHostPath(configDir.getPath("update-location.sh")),
+                        CONTAINER_HADOOP_INIT_D + "update-location.sh");
     }
 }

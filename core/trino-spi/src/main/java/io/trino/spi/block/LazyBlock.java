@@ -13,28 +13,26 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
-import org.openjdk.jol.info.ClassLayout;
-
-import javax.annotation.Nullable;
-import javax.annotation.concurrent.NotThreadSafe;
+import jakarta.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.BiConsumer;
+import java.util.OptionalInt;
 import java.util.function.Consumer;
+import java.util.function.ObjLongConsumer;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
 import static io.trino.spi.block.BlockUtil.checkValidRegion;
 import static java.lang.String.format;
 import static java.util.Collections.singletonList;
 import static java.util.Objects.requireNonNull;
 
-@NotThreadSafe
-public class LazyBlock
+// This class is not considered thread-safe.
+public final class LazyBlock
         implements Block
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(LazyBlock.class).instanceSize() + ClassLayout.parseClass(LazyData.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(LazyBlock.class) + instanceSize(LazyData.class);
 
     private final int positionCount;
     private final LazyData lazyData;
@@ -52,112 +50,18 @@ public class LazyBlock
     }
 
     @Override
-    public int getSliceLength(int position)
-    {
-        return getBlock().getSliceLength(position);
-    }
-
-    @Override
-    public byte getByte(int position, int offset)
-    {
-        return getBlock().getByte(position, offset);
-    }
-
-    @Override
-    public short getShort(int position, int offset)
-    {
-        return getBlock().getShort(position, offset);
-    }
-
-    @Override
-    public int getInt(int position, int offset)
-    {
-        return getBlock().getInt(position, offset);
-    }
-
-    @Override
-    public long getLong(int position, int offset)
-    {
-        return getBlock().getLong(position, offset);
-    }
-
-    @Override
-    public Slice getSlice(int position, int offset, int length)
-    {
-        return getBlock().getSlice(position, offset, length);
-    }
-
-    @Override
-    public <T> T getObject(int position, Class<T> clazz)
-    {
-        return getBlock().getObject(position, clazz);
-    }
-
-    @Override
-    public boolean bytesEqual(int position, int offset, Slice otherSlice, int otherOffset, int length)
-    {
-        return getBlock().bytesEqual(position, offset, otherSlice, otherOffset, length);
-    }
-
-    @Override
-    public int bytesCompare(int position, int offset, int length, Slice otherSlice, int otherOffset, int otherLength)
-    {
-        return getBlock().bytesCompare(
-                position,
-                offset,
-                length,
-                otherSlice,
-                otherOffset,
-                otherLength);
-    }
-
-    @Override
-    public void writeBytesTo(int position, int offset, int length, BlockBuilder blockBuilder)
-    {
-        getBlock().writeBytesTo(position, offset, length, blockBuilder);
-    }
-
-    @Override
-    public void writePositionTo(int position, BlockBuilder blockBuilder)
-    {
-        getBlock().writePositionTo(position, blockBuilder);
-    }
-
-    @Override
-    public boolean equals(int position, int offset, Block otherBlock, int otherPosition, int otherOffset, int length)
-    {
-        return getBlock().equals(
-                position,
-                offset,
-                otherBlock,
-                otherPosition,
-                otherOffset,
-                length);
-    }
-
-    @Override
-    public long hash(int position, int offset, int length)
-    {
-        return getBlock().hash(position, offset, length);
-    }
-
-    @Override
-    public int compareTo(int leftPosition, int leftOffset, int leftLength, Block rightBlock, int rightPosition, int rightOffset, int rightLength)
-    {
-        return getBlock().compareTo(
-                leftPosition,
-                leftOffset,
-                leftLength,
-                rightBlock,
-                rightPosition,
-                rightOffset,
-                rightLength);
-    }
-
-    @Override
-    public Block getSingleValueBlock(int position)
+    public ValueBlock getSingleValueBlock(int position)
     {
         return getBlock().getSingleValueBlock(position);
+    }
+
+    @Override
+    public OptionalInt fixedSizeInBytesPerPosition()
+    {
+        if (!isLoaded()) {
+            return OptionalInt.empty();
+        }
+        return getBlock().fixedSizeInBytesPerPosition();
     }
 
     @Override
@@ -179,12 +83,12 @@ public class LazyBlock
     }
 
     @Override
-    public long getPositionsSizeInBytes(boolean[] positions)
+    public long getPositionsSizeInBytes(boolean[] positions, int selectedPositionsCount)
     {
         if (!isLoaded()) {
             return 0;
         }
-        return getBlock().getPositionsSizeInBytes(positions);
+        return getBlock().getPositionsSizeInBytes(positions, selectedPositionsCount);
     }
 
     @Override
@@ -203,16 +107,16 @@ public class LazyBlock
     }
 
     @Override
-    public void retainedBytesForEachPart(BiConsumer<Object, Long> consumer)
+    public void retainedBytesForEachPart(ObjLongConsumer<Object> consumer)
     {
         getBlock().retainedBytesForEachPart(consumer);
-        consumer.accept(this, (long) INSTANCE_SIZE);
+        consumer.accept(this, INSTANCE_SIZE);
     }
 
     @Override
-    public String getEncodingName()
+    public Block copyWithAppendedNull()
     {
-        return LazyBlockEncoding.NAME;
+        throw new UnsupportedOperationException("LazyBlock does not support newBlockWithAppendedNull()");
     }
 
     @Override
@@ -260,9 +164,9 @@ public class LazyBlock
     }
 
     @Override
-    public final List<Block> getChildren()
+    public boolean hasNull()
     {
-        return singletonList(getBlock());
+        return getBlock().hasNull();
     }
 
     public Block getBlock()
@@ -280,6 +184,18 @@ public class LazyBlock
     public Block getLoadedBlock()
     {
         return lazyData.getFullyLoadedBlock();
+    }
+
+    @Override
+    public ValueBlock getUnderlyingValueBlock()
+    {
+        return getBlock().getUnderlyingValueBlock();
+    }
+
+    @Override
+    public int getUnderlyingValuePosition(int position)
+    {
+        return getBlock().getUnderlyingValuePosition(position);
     }
 
     public static void listenForLoads(Block block, Consumer<Block> listener)
@@ -425,21 +341,43 @@ public class LazyBlock
         }
 
         /**
-         * If block is unloaded, add the listeners; otherwise call this method on child blocks
+         * If the block is unloaded, add the listeners; otherwise call this method on the nested blocks
          */
-        @SuppressWarnings("AccessingNonPublicFieldOfAnotherObject")
         private static void addListenersRecursive(Block block, List<Consumer<Block>> listeners)
         {
-            if (block instanceof LazyBlock) {
-                LazyData lazyData = ((LazyBlock) block).lazyData;
-                if (!lazyData.isTopLevelBlockLoaded()) {
-                    lazyData.addListeners(listeners);
-                    return;
-                }
+            if (block == null) {
+                return;
             }
 
-            for (Block child : block.getChildren()) {
-                addListenersRecursive(child, listeners);
+            switch (block) {
+                case LazyBlock lazyBlock -> {
+                    LazyData lazyData = lazyBlock.lazyData;
+                    if (lazyData.isTopLevelBlockLoaded()) {
+                        addListenersRecursive(lazyBlock.getBlock(), listeners);
+                    }
+                    else {
+                        lazyData.addListeners(listeners);
+                    }
+                }
+                case DictionaryBlock dictionaryBlock -> addListenersRecursive(dictionaryBlock.getDictionary(), listeners);
+                case RunLengthEncodedBlock runLengthEncodedBlock -> addListenersRecursive(runLengthEncodedBlock.getValue(), listeners);
+                case ValueBlock valueBlock -> {
+                    switch (valueBlock) {
+                        case ArrayBlock arrayBlock -> addListenersRecursive(arrayBlock.getRawElementBlock(), listeners);
+                        case MapBlock mapBlock -> {
+                            addListenersRecursive(mapBlock.getRawKeyBlock(), listeners);
+                            addListenersRecursive(mapBlock.getRawValueBlock(), listeners);
+                        }
+                        case RowBlock rowBlock -> {
+                            for (Block fieldBlock : rowBlock.getFieldBlocks()) {
+                                addListenersRecursive(fieldBlock, listeners);
+                            }
+                        }
+                        default -> {
+                            // no other value blocks are container types
+                        }
+                    }
+                }
             }
         }
     }

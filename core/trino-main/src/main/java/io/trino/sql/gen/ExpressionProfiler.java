@@ -19,7 +19,7 @@ import io.airlift.units.Duration;
 
 import static com.google.common.base.Ticker.systemTicker;
 import static com.google.common.base.Verify.verify;
-import static io.trino.execution.executor.PrioritizedSplitRunner.SPLIT_RUN_QUANTA;
+import static io.trino.execution.executor.timesharing.PrioritizedSplitRunner.SPLIT_RUN_QUANTA;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
@@ -54,7 +54,7 @@ public class ExpressionProfiler
         previousTimestamp = ticker.read();
     }
 
-    public void stop(int batchSize)
+    public long stop(int batchSize)
     {
         verify(previousTimestamp != NOT_INITALIZED, "start() is not called");
         verify(batchSize > 0, "batchSize must be positive");
@@ -67,6 +67,7 @@ public class ExpressionProfiler
             isExpressionExpensive = false;
         }
         previousTimestamp = NOT_INITALIZED;
+        return delta;
     }
 
     public boolean isExpressionExpensive()

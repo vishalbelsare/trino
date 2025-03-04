@@ -13,18 +13,21 @@
  */
 package io.trino.cost;
 
+import com.google.inject.Inject;
 import io.trino.Session;
 import io.trino.execution.scheduler.NodeSchedulerConfig;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.InternalNodeManager;
-
-import javax.inject.Inject;
+import io.trino.operator.RetryPolicy;
 
 import java.util.Set;
 import java.util.function.IntSupplier;
 
+import static com.google.common.base.Preconditions.checkState;
 import static io.trino.SystemSessionProperties.getCostEstimationWorkerCount;
-import static io.trino.SystemSessionProperties.getHashPartitionCount;
+import static io.trino.SystemSessionProperties.getFaultTolerantExecutionMaxPartitionCount;
+import static io.trino.SystemSessionProperties.getMaxHashPartitionCount;
+import static io.trino.SystemSessionProperties.getRetryPolicy;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -36,16 +39,21 @@ public class TaskCountEstimator
     @Inject
     public TaskCountEstimator(NodeSchedulerConfig nodeSchedulerConfig, InternalNodeManager nodeManager)
     {
-        requireNonNull(nodeSchedulerConfig, "nodeSchedulerConfig is null");
+        boolean schedulerIncludeCoordinator = nodeSchedulerConfig.isIncludeCoordinator();
         requireNonNull(nodeManager, "nodeManager is null");
         this.numberOfNodes = () -> {
             Set<InternalNode> activeNodes = nodeManager.getAllNodes().getActiveNodes();
-            if (nodeSchedulerConfig.isIncludeCoordinator()) {
-                return activeNodes.size();
+            int count;
+            if (schedulerIncludeCoordinator) {
+                count = activeNodes.size();
             }
-            return toIntExact(activeNodes.stream()
-                    .filter(node -> !node.isCoordinator())
-                    .count());
+            else {
+                count = toIntExact(activeNodes.stream()
+                        .filter(node -> !node.isCoordinator())
+                        .count());
+            }
+            // At least 1 even if no worker nodes currently registered. This is to prevent underflow or other mis-estimations.
+            return Math.max(count, 1);
         };
     }
 
@@ -58,13 +66,23 @@ public class TaskCountEstimator
     {
         Integer costEstimationWorkerCount = getCostEstimationWorkerCount(session);
         if (costEstimationWorkerCount != null) {
+            // validated to be at least 1
             return costEstimationWorkerCount;
         }
-        return numberOfNodes.getAsInt();
+        int count = numberOfNodes.getAsInt();
+        checkState(count > 0, "%s should return positive number of nodes: %s", numberOfNodes, count);
+        return count;
     }
 
     public int estimateHashedTaskCount(Session session)
     {
-        return min(estimateSourceDistributedTaskCount(session), getHashPartitionCount(session));
+        int partitionCount;
+        if (getRetryPolicy(session) == RetryPolicy.TASK) {
+            partitionCount = getFaultTolerantExecutionMaxPartitionCount(session);
+        }
+        else {
+            partitionCount = getMaxHashPartitionCount(session);
+        }
+        return min(estimateSourceDistributedTaskCount(session), partitionCount);
     }
 }

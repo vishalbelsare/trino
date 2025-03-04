@@ -13,67 +13,52 @@
  */
 package io.trino.plugin.cassandra;
 
-import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.JdkSSLOptions;
-import com.datastax.driver.core.QueryOptions;
-import com.datastax.driver.core.SocketOptions;
-import com.datastax.driver.core.policies.ConstantSpeculativeExecutionPolicy;
-import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
-import com.datastax.driver.core.policies.ExponentialReconnectionPolicy;
-import com.datastax.driver.core.policies.LoadBalancingPolicy;
-import com.datastax.driver.core.policies.RoundRobinPolicy;
-import com.datastax.driver.core.policies.TokenAwarePolicy;
-import com.datastax.driver.core.policies.WhiteListPolicy;
+import com.datastax.oss.driver.api.core.CqlSession;
+import com.datastax.oss.driver.api.core.CqlSessionBuilder;
+import com.datastax.oss.driver.api.core.config.DefaultDriverOption;
+import com.datastax.oss.driver.api.core.config.DriverConfigLoader;
+import com.datastax.oss.driver.api.core.config.ProgrammaticDriverConfigLoaderBuilder;
+import com.datastax.oss.driver.internal.core.loadbalancing.DefaultLoadBalancingPolicy;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.deser.std.FromStringDeserializer;
 import com.google.inject.Binder;
+import com.google.inject.Inject;
 import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
+import com.google.inject.Singleton;
+import com.google.inject.multibindings.ProvidesIntoSet;
+import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.airlift.json.JsonCodec;
-import io.airlift.security.pem.PemReader;
-import io.trino.spi.TrinoException;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.instrumentation.cassandra.v4_4.CassandraTelemetry;
+import io.trino.plugin.cassandra.ptf.Query;
+import io.trino.plugin.cassandra.tls.CassandraTlsModule;
+import io.trino.spi.function.table.ConnectorTableFunction;
+import io.trino.spi.procedure.Procedure;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeId;
 import io.trino.spi.type.TypeManager;
 
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import javax.net.ssl.KeyManager;
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509TrustManager;
-import javax.security.auth.x500.X500Principal;
-
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.security.GeneralSecurityException;
-import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateExpiredException;
-import java.security.cert.CertificateNotYetValidException;
-import java.security.cert.X509Certificate;
-import java.util.ArrayList;
-import java.util.Arrays;
+import java.net.UnknownHostException;
+import java.time.Duration;
 import java.util.List;
-import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
+import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.json.JsonBinder.jsonBinder;
 import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
-import static io.trino.plugin.cassandra.CassandraErrorCode.CASSANDRA_SSL_INITIALIZATION_FAILURE;
-import static java.lang.Math.toIntExact;
-import static java.util.Collections.list;
+import static io.trino.plugin.base.ClosingBinder.closingBinder;
+import static io.trino.plugin.cassandra.CassandraClientConfig.CassandraAuthenticationType.PASSWORD;
 import static java.util.Objects.requireNonNull;
 
 public class CassandraClientModule
-        implements Module
+        extends AbstractConfigurationAwareModule
 {
     private final TypeManager typeManager;
 
@@ -83,7 +68,7 @@ public class CassandraClientModule
     }
 
     @Override
-    public void configure(Binder binder)
+    public void setup(Binder binder)
     {
         binder.bind(TypeManager.class).toInstance(typeManager);
 
@@ -95,11 +80,27 @@ public class CassandraClientModule
         binder.bind(CassandraPageSinkProvider.class).in(Scopes.SINGLETON);
         binder.bind(CassandraPartitionManager.class).in(Scopes.SINGLETON);
         binder.bind(CassandraSessionProperties.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, Procedure.class).addBinding().toProvider(ExecuteProcedure.class).in(Scopes.SINGLETON);
+        binder.bind(CassandraTypeManager.class).in(Scopes.SINGLETON);
 
         configBinder(binder).bindConfig(CassandraClientConfig.class);
 
+        install(conditionalModule(
+                CassandraClientConfig.class,
+                CassandraClientConfig::isTlsEnabled,
+                new CassandraTlsModule()));
+
+        install(conditionalModule(
+                CassandraClientConfig.class,
+                config -> config.getAuthenticationType() == PASSWORD,
+                new PasswordAuthenticationModule()));
+
         jsonCodecBinder(binder).bindListJsonCodec(ExtraColumnMetadata.class);
         jsonBinder(binder).addDeserializerBinding(Type.class).to(TypeDeserializer.class);
+        newSetBinder(binder, CassandraSessionConfigurator.class);
+
+        closingBinder(binder).registerCloseable(CassandraSession.class);
     }
 
     public static final class TypeDeserializer
@@ -123,195 +124,112 @@ public class CassandraClientModule
 
     @Singleton
     @Provides
-    public static CassandraSession createCassandraSession(CassandraClientConfig config, JsonCodec<List<ExtraColumnMetadata>> extraColumnMetadataCodec)
+    public static CassandraSession createCassandraSession(
+            CassandraTypeManager cassandraTypeManager,
+            CassandraClientConfig config,
+            Set<CassandraSessionConfigurator> sessionConfigurators,
+            JsonCodec<List<ExtraColumnMetadata>> extraColumnMetadataCodec,
+            OpenTelemetry openTelemetry)
     {
-        requireNonNull(config, "config is null");
         requireNonNull(extraColumnMetadataCodec, "extraColumnMetadataCodec is null");
 
-        Cluster.Builder clusterBuilder = Cluster.builder();
-        if (config.getProtocolVersion() != null) {
-            clusterBuilder.withProtocolVersion(config.getProtocolVersion());
-        }
+        CqlSessionBuilder cqlSessionBuilder = CqlSession.builder();
 
         List<String> contactPoints = requireNonNull(config.getContactPoints(), "contactPoints is null");
         checkArgument(!contactPoints.isEmpty(), "empty contactPoints");
-        clusterBuilder.withPort(config.getNativeProtocolPort());
-        clusterBuilder.withReconnectionPolicy(new ExponentialReconnectionPolicy(500, 10000));
-        clusterBuilder.withRetryPolicy(config.getRetryPolicy().getPolicy());
 
-        LoadBalancingPolicy loadPolicy = new RoundRobinPolicy();
-
-        if (config.isUseDCAware()) {
-            requireNonNull(config.getDcAwareLocalDC(), "DCAwarePolicy localDC is null");
-            DCAwareRoundRobinPolicy.Builder builder = DCAwareRoundRobinPolicy.builder()
-                    .withLocalDc(config.getDcAwareLocalDC());
-            if (config.getDcAwareUsedHostsPerRemoteDc() > 0) {
-                builder.withUsedHostsPerRemoteDc(config.getDcAwareUsedHostsPerRemoteDc());
-                if (config.isDcAwareAllowRemoteDCsForLocal()) {
-                    builder.allowRemoteDCsForLocalConsistencyLevel();
-                }
-            }
-            loadPolicy = builder.build();
-        }
-
-        if (config.isUseTokenAware()) {
-            loadPolicy = new TokenAwarePolicy(loadPolicy, config.isTokenAwareShuffleReplicas());
-        }
-
-        if (!config.getAllowedAddresses().isEmpty()) {
-            checkArgument(!config.getAllowedAddresses().isEmpty(), "empty AllowListAddresses");
-            List<InetSocketAddress> allowList = new ArrayList<>();
-            for (String point : config.getAllowedAddresses()) {
-                allowList.add(new InetSocketAddress(point, config.getNativeProtocolPort()));
-            }
-            loadPolicy = new WhiteListPolicy(loadPolicy, allowList);
-        }
-
-        clusterBuilder.withLoadBalancingPolicy(loadPolicy);
-
-        SocketOptions socketOptions = new SocketOptions();
-        socketOptions.setReadTimeoutMillis(toIntExact(config.getClientReadTimeout().toMillis()));
-        socketOptions.setConnectTimeoutMillis(toIntExact(config.getClientConnectTimeout().toMillis()));
-        if (config.getClientSoLinger() != null) {
-            socketOptions.setSoLinger(config.getClientSoLinger());
-        }
-        if (config.isTlsEnabled()) {
-            buildSslContext(config.getKeystorePath(), config.getKeystorePassword(), config.getTruststorePath(), config.getTruststorePassword())
-                    .ifPresent(context -> clusterBuilder.withSSL(JdkSSLOptions.builder().withSSLContext(context).build()));
-        }
-        clusterBuilder.withSocketOptions(socketOptions);
-
-        if (config.getUsername() != null && config.getPassword() != null) {
-            clusterBuilder.withCredentials(config.getUsername(), config.getPassword());
-        }
-
-        QueryOptions options = new QueryOptions();
-        options.setFetchSize(config.getFetchSize());
-        options.setConsistencyLevel(config.getConsistencyLevel());
-        clusterBuilder.withQueryOptions(options);
-
-        if (config.getSpeculativeExecutionLimit().isPresent()) {
-            clusterBuilder.withSpeculativeExecutionPolicy(new ConstantSpeculativeExecutionPolicy(
-                    config.getSpeculativeExecutionDelay().toMillis(), // delay before a new execution is launched
-                    config.getSpeculativeExecutionLimit().get())); // maximum number of executions
+        for (CassandraSessionConfigurator sessionConfigurator : sessionConfigurators) {
+            sessionConfigurator.configure(cqlSessionBuilder);
         }
 
         return new CassandraSession(
+                cassandraTypeManager,
                 extraColumnMetadataCodec,
-                new ReopeningCluster(() -> {
-                    contactPoints.forEach(clusterBuilder::addContactPoint);
-                    return clusterBuilder.build();
-                }),
+                () -> {
+                    contactPoints.forEach(contactPoint -> cqlSessionBuilder.addContactPoint(
+                            createInetSocketAddress(contactPoint, config.getNativeProtocolPort())));
+                    CassandraTelemetry cassandraTelemetry = CassandraTelemetry.create(openTelemetry);
+                    return cassandraTelemetry.wrap(cqlSessionBuilder.build());
+                },
                 config.getNoHostAvailableRetryTimeout());
     }
 
-    private static Optional<SSLContext> buildSslContext(
-            Optional<File> keystorePath,
-            Optional<String> keystorePassword,
-            Optional<File> truststorePath,
-            Optional<String> truststorePassword)
+    @ProvidesIntoSet
+    @Singleton
+    public CassandraSessionConfigurator configurationLoaderConfigurator(CassandraClientConfig config)
     {
-        if (keystorePath.isEmpty() && truststorePath.isEmpty()) {
-            return Optional.empty();
-        }
+        return builder -> {
+            ProgrammaticDriverConfigLoaderBuilder driverConfigLoaderBuilder = DriverConfigLoader.programmaticBuilder();
+            // allow the retrieval of metadata for the system keyspaces
+            driverConfigLoaderBuilder.withStringList(DefaultDriverOption.METADATA_SCHEMA_REFRESHED_KEYSPACES, List.of());
 
-        try {
-            // load KeyStore if configured and get KeyManagers
-            KeyStore keystore = null;
-            KeyManager[] keyManagers = null;
-            if (keystorePath.isPresent()) {
-                char[] keyManagerPassword;
-                try {
-                    // attempt to read the key store as a PEM file
-                    keystore = PemReader.loadKeyStore(keystorePath.get(), keystorePath.get(), keystorePassword);
-                    // for PEM encoded keys, the password is used to decrypt the specific key (and does not protect the keystore itself)
-                    keyManagerPassword = new char[0];
-                }
-                catch (IOException | GeneralSecurityException ignored) {
-                    keyManagerPassword = keystorePassword.map(String::toCharArray).orElse(null);
+            if (config.getProtocolVersion() != null) {
+                driverConfigLoaderBuilder.withString(DefaultDriverOption.PROTOCOL_VERSION, config.getProtocolVersion().name());
+            }
 
-                    keystore = KeyStore.getInstance(KeyStore.getDefaultType());
-                    try (InputStream in = new FileInputStream(keystorePath.get())) {
-                        keystore.load(in, keyManagerPassword);
+            driverConfigLoaderBuilder.withString(DefaultDriverOption.RECONNECTION_POLICY_CLASS, com.datastax.oss.driver.internal.core.connection.ExponentialReconnectionPolicy.class.getName());
+            driverConfigLoaderBuilder.withDuration(DefaultDriverOption.RECONNECTION_BASE_DELAY, Duration.ofMillis(500));
+            driverConfigLoaderBuilder.withDuration(DefaultDriverOption.RECONNECTION_MAX_DELAY, Duration.ofSeconds(10));
+            driverConfigLoaderBuilder.withString(DefaultDriverOption.RETRY_POLICY_CLASS, config.getRetryPolicy().getPolicyClass().getName());
+
+            driverConfigLoaderBuilder.withString(DefaultDriverOption.LOAD_BALANCING_POLICY_CLASS, DefaultLoadBalancingPolicy.class.getName());
+            if (config.isUseDCAware()) {
+                requireNonNull(config.getDcAwareLocalDC(), "DCAwarePolicy localDC is null");
+                driverConfigLoaderBuilder.withString(DefaultDriverOption.LOAD_BALANCING_LOCAL_DATACENTER, config.getDcAwareLocalDC());
+
+                if (config.getDcAwareUsedHostsPerRemoteDc() > 0) {
+                    driverConfigLoaderBuilder.withInt(DefaultDriverOption.LOAD_BALANCING_DC_FAILOVER_MAX_NODES_PER_REMOTE_DC, config.getDcAwareUsedHostsPerRemoteDc());
+                    if (config.isDcAwareAllowRemoteDCsForLocal()) {
+                        driverConfigLoaderBuilder.withBoolean(DefaultDriverOption.LOAD_BALANCING_DC_FAILOVER_ALLOW_FOR_LOCAL_CONSISTENCY_LEVELS, true);
                     }
                 }
-                validateCertificates(keystore);
-                KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-                keyManagerFactory.init(keystore, keyManagerPassword);
-                keyManagers = keyManagerFactory.getKeyManagers();
             }
 
-            // load TrustStore if configured, otherwise use KeyStore
-            KeyStore truststore = keystore;
-            if (truststorePath.isPresent()) {
-                truststore = loadTrustStore(truststorePath.get(), truststorePassword);
+            driverConfigLoaderBuilder.withDuration(DefaultDriverOption.REQUEST_TIMEOUT, config.getClientReadTimeout().toJavaTime());
+            driverConfigLoaderBuilder.withDuration(DefaultDriverOption.CONNECTION_CONNECT_TIMEOUT, config.getClientConnectTimeout().toJavaTime());
+            if (config.getClientSoLinger() != null) {
+                driverConfigLoaderBuilder.withInt(DefaultDriverOption.SOCKET_LINGER_INTERVAL, config.getClientSoLinger());
             }
 
-            // create TrustManagerFactory
-            TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            trustManagerFactory.init(truststore);
+            driverConfigLoaderBuilder.withInt(DefaultDriverOption.REQUEST_PAGE_SIZE, config.getFetchSize());
+            driverConfigLoaderBuilder.withString(DefaultDriverOption.REQUEST_CONSISTENCY, config.getConsistencyLevel().name());
 
-            // get X509TrustManager
-            TrustManager[] trustManagers = trustManagerFactory.getTrustManagers();
-            if (trustManagers.length != 1 || !(trustManagers[0] instanceof X509TrustManager)) {
-                throw new RuntimeException("Unexpected default trust managers:" + Arrays.toString(trustManagers));
+            if (config.getSpeculativeExecutionLimit().isPresent()) {
+                driverConfigLoaderBuilder.withString(DefaultDriverOption.SPECULATIVE_EXECUTION_POLICY_CLASS, com.datastax.oss.driver.internal.core.specex.ConstantSpeculativeExecutionPolicy.class.getName());
+                // maximum number of executions
+                driverConfigLoaderBuilder.withInt(DefaultDriverOption.SPECULATIVE_EXECUTION_MAX, config.getSpeculativeExecutionLimit().get());
+                // delay before a new execution is launched
+                driverConfigLoaderBuilder.withDuration(DefaultDriverOption.SPECULATIVE_EXECUTION_DELAY, Duration.ofMillis(config.getSpeculativeExecutionDelay().toMillis()));
             }
-            // create SSLContext
-            SSLContext result = SSLContext.getInstance("SSL");
-            result.init(keyManagers, trustManagers, null);
-            return Optional.of(result);
+
+            builder.withConfigLoader(driverConfigLoaderBuilder.build());
+        };
+    }
+
+    private static class PasswordAuthenticationModule
+            implements Module
+    {
+        @Override
+        public void configure(Binder binder)
+        {
+            configBinder(binder).bindConfig(CassandraPasswordConfig.class);
         }
-        catch (GeneralSecurityException | IOException e) {
-            throw new TrinoException(CASSANDRA_SSL_INITIALIZATION_FAILURE, e);
+
+        @ProvidesIntoSet
+        @Singleton
+        public CassandraSessionConfigurator passwordAuthenticationConfigurator(CassandraPasswordConfig config)
+        {
+            return builder -> builder.withAuthCredentials(config.getUsername(), config.getPassword());
         }
     }
 
-    private static KeyStore loadTrustStore(File trustStorePath, Optional<String> trustStorePassword)
-            throws IOException, GeneralSecurityException
+    private static InetSocketAddress createInetSocketAddress(String contactPoint, int port)
     {
-        KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
         try {
-            // attempt to read the trust store as a PEM file
-            List<X509Certificate> certificateChain = PemReader.readCertificateChain(trustStorePath);
-            if (!certificateChain.isEmpty()) {
-                trustStore.load(null, null);
-                for (X509Certificate certificate : certificateChain) {
-                    X500Principal principal = certificate.getSubjectX500Principal();
-                    trustStore.setCertificateEntry(principal.getName(), certificate);
-                }
-                return trustStore;
-            }
+            return new InetSocketAddress(InetAddress.getByName(contactPoint), port);
         }
-        catch (IOException | GeneralSecurityException ignored) {
-        }
-
-        try (InputStream in = new FileInputStream(trustStorePath)) {
-            trustStore.load(in, trustStorePassword.map(String::toCharArray).orElse(null));
-        }
-        return trustStore;
-    }
-
-    private static void validateCertificates(KeyStore keyStore)
-            throws GeneralSecurityException
-    {
-        for (String alias : list(keyStore.aliases())) {
-            if (!keyStore.isKeyEntry(alias)) {
-                continue;
-            }
-            Certificate certificate = keyStore.getCertificate(alias);
-            if (!(certificate instanceof X509Certificate)) {
-                continue;
-            }
-
-            try {
-                ((X509Certificate) certificate).checkValidity();
-            }
-            catch (CertificateExpiredException e) {
-                throw new CertificateExpiredException("KeyStore certificate is expired: " + e.getMessage());
-            }
-            catch (CertificateNotYetValidException e) {
-                throw new CertificateNotYetValidException("KeyStore certificate is not yet valid: " + e.getMessage());
-            }
+        catch (UnknownHostException e) {
+            throw new IllegalArgumentException("Failed to add contact point: " + contactPoint, e);
         }
     }
 }

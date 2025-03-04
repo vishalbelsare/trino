@@ -14,15 +14,11 @@
 package io.trino.verifier;
 
 import com.google.common.collect.ImmutableList;
-import io.airlift.event.client.EventField;
-import io.airlift.event.client.EventType;
-
-import javax.annotation.concurrent.Immutable;
+import com.google.errorprone.annotations.Immutable;
 
 import java.util.List;
 
 @Immutable
-@EventType("VerifierQuery")
 public class VerifierQueryEvent
 {
     private final String suite;
@@ -36,7 +32,9 @@ public class VerifierQueryEvent
     private final List<String> testSetupQueries;
     private final String testQuery;
     private final List<String> testTeardownQueries;
+    private final List<String> testSetupQueryIds;
     private final String testQueryId;
+    private final List<String> testTeardownQueryIds;
     private final Double testCpuTimeSecs;
     private final Double testWallTimeSecs;
 
@@ -45,7 +43,9 @@ public class VerifierQueryEvent
     private final List<String> controlSetupQueries;
     private final String controlQuery;
     private final List<String> controlTeardownQueries;
+    private final List<String> controlSetupQueryIds;
     private final String controlQueryId;
+    private final List<String> controlTeardownQueryIds;
     private final Double controlCpuTimeSecs;
     private final Double controlWallTimeSecs;
 
@@ -62,7 +62,9 @@ public class VerifierQueryEvent
             List<String> testSetupQueries,
             String testQuery,
             List<String> testTeardownQueries,
+            List<String> testSetupQueryIds,
             String testQueryId,
+            List<String> testTeardownQueryIds,
             Double testCpuTimeSecs,
             Double testWallTimeSecs,
             String controlCatalog,
@@ -70,7 +72,9 @@ public class VerifierQueryEvent
             List<String> controlSetupQueries,
             String controlQuery,
             List<String> controlTeardownQueries,
+            List<String> controlSetupQueryIds,
             String controlQueryId,
+            List<String> controlTeardownQueryIds,
             Double controlCpuTimeSecs,
             Double controlWallTimeSecs,
             String errorMessage)
@@ -86,7 +90,9 @@ public class VerifierQueryEvent
         this.testSetupQueries = ImmutableList.copyOf(testSetupQueries);
         this.testQuery = testQuery;
         this.testTeardownQueries = ImmutableList.copyOf(testTeardownQueries);
+        this.testSetupQueryIds = ImmutableList.copyOf(testSetupQueryIds);
         this.testQueryId = testQueryId;
+        this.testTeardownQueryIds = ImmutableList.copyOf(testTeardownQueryIds);
         this.testCpuTimeSecs = testCpuTimeSecs;
         this.testWallTimeSecs = testWallTimeSecs;
 
@@ -95,140 +101,140 @@ public class VerifierQueryEvent
         this.controlSetupQueries = ImmutableList.copyOf(controlSetupQueries);
         this.controlQuery = controlQuery;
         this.controlTeardownQueries = ImmutableList.copyOf(controlTeardownQueries);
+        this.controlSetupQueryIds = ImmutableList.copyOf(controlSetupQueryIds);
         this.controlQueryId = controlQueryId;
+        this.controlTeardownQueryIds = ImmutableList.copyOf(controlTeardownQueryIds);
         this.controlCpuTimeSecs = controlCpuTimeSecs;
         this.controlWallTimeSecs = controlWallTimeSecs;
 
         this.errorMessage = errorMessage;
     }
 
-    @EventField
     public String getSuite()
     {
         return suite;
     }
 
-    @EventField
     public String getRunId()
     {
         return runId;
     }
 
-    @EventField
     public String getSource()
     {
         return source;
     }
 
-    @EventField
     public String getName()
     {
         return name;
     }
 
-    @EventField
     public boolean isFailed()
     {
         return failed;
     }
 
-    @EventField
     public String getTestCatalog()
     {
         return testCatalog;
     }
 
-    @EventField
     public String getTestSchema()
     {
         return testSchema;
     }
 
-    @EventField
     public String getTestQuery()
     {
         return testQuery;
     }
 
-    @EventField
+    public List<String> getTestSetupQueryIds()
+    {
+        return testSetupQueryIds;
+    }
+
     public String getTestQueryId()
     {
         return testQueryId;
     }
 
-    @EventField
+    public List<String> getTestTeardownQueryIds()
+    {
+        return testTeardownQueryIds;
+    }
+
     public Double getTestCpuTimeSecs()
     {
         return testCpuTimeSecs;
     }
 
-    @EventField
     public Double getTestWallTimeSecs()
     {
         return testWallTimeSecs;
     }
 
-    @EventField
     public String getControlCatalog()
     {
         return controlCatalog;
     }
 
-    @EventField
     public String getControlSchema()
     {
         return controlSchema;
     }
 
-    @EventField
     public String getControlQuery()
     {
         return controlQuery;
     }
 
-    @EventField
+    public List<String> getControlSetupQueryIds()
+    {
+        return controlSetupQueryIds;
+    }
+
     public String getControlQueryId()
     {
         return controlQueryId;
     }
 
-    @EventField
+    public List<String> getControlTeardownQueryIds()
+    {
+        return controlTeardownQueryIds;
+    }
+
     public Double getControlCpuTimeSecs()
     {
         return controlCpuTimeSecs;
     }
 
-    @EventField
     public Double getControlWallTimeSecs()
     {
         return controlWallTimeSecs;
     }
 
-    @EventField
     public String getErrorMessage()
     {
         return errorMessage;
     }
 
-    @EventField
     public List<String> getTestSetupQueries()
     {
         return testSetupQueries;
     }
 
-    @EventField
     public List<String> getTestTeardownQueries()
     {
         return testTeardownQueries;
     }
 
-    @EventField
     public List<String> getControlSetupQueries()
     {
         return controlSetupQueries;
     }
 
-    @EventField
     public List<String> getControlTeardownQueries()
     {
         return controlTeardownQueries;

@@ -13,13 +13,10 @@
  */
 package io.trino.plugin.hive;
 
+import io.trino.hive.formats.avro.AvroCompressionKind;
 import io.trino.orc.metadata.CompressionKind;
-import org.apache.hadoop.io.compress.CompressionCodec;
-import org.apache.hadoop.io.compress.GzipCodec;
-import org.apache.hadoop.io.compress.Lz4Codec;
-import org.apache.hadoop.io.compress.SnappyCodec;
-import org.apache.hadoop.io.compress.ZStandardCodec;
-import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+import jakarta.annotation.Nullable;
+import org.apache.parquet.format.CompressionCodec;
 
 import java.util.Optional;
 
@@ -27,26 +24,35 @@ import static java.util.Objects.requireNonNull;
 
 public enum HiveCompressionCodec
 {
-    NONE(null, CompressionKind.NONE, CompressionCodecName.UNCOMPRESSED),
-    SNAPPY(SnappyCodec.class, CompressionKind.SNAPPY, CompressionCodecName.SNAPPY),
-    LZ4(Lz4Codec.class, CompressionKind.LZ4, CompressionCodecName.LZ4),
-    ZSTD(ZStandardCodec.class, CompressionKind.ZSTD, CompressionCodecName.ZSTD),
-    GZIP(GzipCodec.class, CompressionKind.ZLIB, CompressionCodecName.GZIP);
+    NONE(null, CompressionKind.NONE, CompressionCodec.UNCOMPRESSED, AvroCompressionKind.NULL),
+    SNAPPY(io.trino.hive.formats.compression.CompressionKind.SNAPPY, CompressionKind.SNAPPY, CompressionCodec.SNAPPY, AvroCompressionKind.SNAPPY),
+    LZ4(io.trino.hive.formats.compression.CompressionKind.LZ4, CompressionKind.LZ4, null, null),
+    ZSTD(io.trino.hive.formats.compression.CompressionKind.ZSTD, CompressionKind.ZSTD, CompressionCodec.ZSTD, AvroCompressionKind.ZSTANDARD),
+    // Using DEFLATE for GZIP for Avro for now so Avro files can be written in default configuration
+    // TODO(https://github.com/trinodb/trino/issues/12580) change GZIP to be unsupported for Avro when we change Trino default compression to be storage format aware
+    GZIP(io.trino.hive.formats.compression.CompressionKind.GZIP, CompressionKind.ZLIB, CompressionCodec.GZIP, AvroCompressionKind.DEFLATE);
 
-    private final Optional<Class<? extends CompressionCodec>> codec;
+    private final Optional<io.trino.hive.formats.compression.CompressionKind> hiveCompressionKind;
     private final CompressionKind orcCompressionKind;
-    private final CompressionCodecName parquetCompressionCodec;
+    private final Optional<CompressionCodec> parquetCompressionCodec;
 
-    HiveCompressionCodec(Class<? extends CompressionCodec> codec, CompressionKind orcCompressionKind, CompressionCodecName parquetCompressionCodec)
+    private final Optional<AvroCompressionKind> avroCompressionKind;
+
+    HiveCompressionCodec(
+            @Nullable io.trino.hive.formats.compression.CompressionKind hiveCompressionKind,
+            CompressionKind orcCompressionKind,
+            @Nullable CompressionCodec parquetCompressionCodec,
+            @Nullable AvroCompressionKind avroCompressionKind)
     {
-        this.codec = Optional.ofNullable(codec);
+        this.hiveCompressionKind = Optional.ofNullable(hiveCompressionKind);
         this.orcCompressionKind = requireNonNull(orcCompressionKind, "orcCompressionKind is null");
-        this.parquetCompressionCodec = requireNonNull(parquetCompressionCodec, "parquetCompressionCodec is null");
+        this.parquetCompressionCodec = Optional.ofNullable(parquetCompressionCodec);
+        this.avroCompressionKind = Optional.ofNullable(avroCompressionKind);
     }
 
-    public Optional<Class<? extends CompressionCodec>> getCodec()
+    public Optional<io.trino.hive.formats.compression.CompressionKind> getHiveCompressionKind()
     {
-        return codec;
+        return hiveCompressionKind;
     }
 
     public CompressionKind getOrcCompressionKind()
@@ -54,8 +60,13 @@ public enum HiveCompressionCodec
         return orcCompressionKind;
     }
 
-    public CompressionCodecName getParquetCompressionCodec()
+    public Optional<CompressionCodec> getParquetCompressionCodec()
     {
         return parquetCompressionCodec;
+    }
+
+    public Optional<AvroCompressionKind> getAvroCompressionKind()
+    {
+        return avroCompressionKind;
     }
 }

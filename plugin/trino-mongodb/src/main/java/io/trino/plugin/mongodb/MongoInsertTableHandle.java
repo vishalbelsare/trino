@@ -13,40 +13,36 @@
  */
 package io.trino.plugin.mongodb;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.google.common.collect.ImmutableList;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
-import io.trino.spi.connector.SchemaTableName;
 
 import java.util.List;
+import java.util.Optional;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 
-public class MongoInsertTableHandle
+public record MongoInsertTableHandle(
+        RemoteTableName remoteTableName,
+        List<MongoColumnHandle> columns,
+        Optional<String> temporaryTableName,
+        Optional<String> pageSinkIdColumnName)
         implements ConnectorInsertTableHandle
 {
-    private final SchemaTableName schemaTableName;
-    private final List<MongoColumnHandle> columns;
-
-    @JsonCreator
-    public MongoInsertTableHandle(
-            @JsonProperty("schemaTableName") SchemaTableName schemaTableName,
-            @JsonProperty("columns") List<MongoColumnHandle> columns)
+    public MongoInsertTableHandle
     {
-        this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
-        this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
+        requireNonNull(remoteTableName, "remoteTableName is null");
+        columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
+        requireNonNull(temporaryTableName, "temporaryTableName is null");
+        requireNonNull(pageSinkIdColumnName, "pageSinkIdColumnName is null");
+        checkArgument(temporaryTableName.isPresent() == pageSinkIdColumnName.isPresent(),
+                "temporaryTableName.isPresent is not equal to pageSinkIdColumnName.isPresent");
     }
 
-    @JsonProperty
-    public SchemaTableName getSchemaTableName()
+    @JsonIgnore
+    public Optional<RemoteTableName> getTemporaryRemoteTableName()
     {
-        return schemaTableName;
-    }
-
-    @JsonProperty
-    public List<MongoColumnHandle> getColumns()
-    {
-        return columns;
+        return temporaryTableName.map(tableName -> new RemoteTableName(remoteTableName.databaseName(), tableName));
     }
 }

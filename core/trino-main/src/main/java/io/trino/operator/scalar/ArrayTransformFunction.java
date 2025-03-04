@@ -24,21 +24,24 @@ import io.airlift.bytecode.Scope;
 import io.airlift.bytecode.Variable;
 import io.airlift.bytecode.control.ForLoop;
 import io.airlift.bytecode.control.IfStatement;
-import io.trino.metadata.BoundSignature;
-import io.trino.metadata.FunctionMetadata;
-import io.trino.metadata.FunctionNullability;
-import io.trino.metadata.Signature;
+import io.airlift.bytecode.expression.BytecodeExpression;
 import io.trino.metadata.SqlScalarFunction;
-import io.trino.spi.PageBuilder;
+import io.trino.spi.TrinoException;
+import io.trino.spi.block.ArrayValueBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BufferedArrayValueBuilder;
+import io.trino.spi.function.BoundSignature;
+import io.trino.spi.function.FunctionMetadata;
+import io.trino.spi.function.Signature;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 import io.trino.sql.gen.CallSiteBinder;
 import io.trino.sql.gen.lambda.UnaryFunctionInterface;
 
-import java.util.List;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodType;
 import java.util.Optional;
 
 import static io.airlift.bytecode.Access.FINAL;
@@ -52,107 +55,124 @@ import static io.airlift.bytecode.expression.BytecodeExpressions.constantInt;
 import static io.airlift.bytecode.expression.BytecodeExpressions.constantNull;
 import static io.airlift.bytecode.expression.BytecodeExpressions.equal;
 import static io.airlift.bytecode.expression.BytecodeExpressions.lessThan;
-import static io.airlift.bytecode.expression.BytecodeExpressions.newInstance;
-import static io.airlift.bytecode.expression.BytecodeExpressions.subtract;
 import static io.airlift.bytecode.instruction.VariableInstruction.incrementVariable;
-import static io.trino.metadata.FunctionKind.SCALAR;
-import static io.trino.metadata.Signature.typeVariable;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.FUNCTION;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.type.TypeSignature.arrayType;
 import static io.trino.spi.type.TypeSignature.functionType;
+import static io.trino.sql.gen.LambdaMetafactoryGenerator.generateMetafactory;
 import static io.trino.sql.gen.SqlTypeBytecodeExpression.constantType;
 import static io.trino.type.UnknownType.UNKNOWN;
 import static io.trino.util.CompilerUtils.defineClass;
 import static io.trino.util.CompilerUtils.makeClassName;
-import static io.trino.util.Reflection.methodHandle;
+import static java.lang.invoke.MethodHandles.lookup;
 
 public final class ArrayTransformFunction
         extends SqlScalarFunction
 {
+    private static final MethodHandle CREATE_STATE;
+
+    static {
+        try {
+            CREATE_STATE = lookup().findStatic(BufferedArrayValueBuilder.class, "createBuffered", MethodType.methodType(BufferedArrayValueBuilder.class, ArrayType.class));
+        }
+        catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
     public static final ArrayTransformFunction ARRAY_TRANSFORM_FUNCTION = new ArrayTransformFunction();
+    public static final String ARRAY_TRANSFORM_NAME = "transform";
 
     private ArrayTransformFunction()
     {
-        super(new FunctionMetadata(
-                new Signature(
-                        "transform",
-                        ImmutableList.of(typeVariable("T"), typeVariable("U")),
-                        ImmutableList.of(),
-                        arrayType(new TypeSignature("U")),
-                        ImmutableList.of(
-                                arrayType(new TypeSignature("T")),
-                                functionType(new TypeSignature("T"), new TypeSignature("U"))),
-                        false),
-                new FunctionNullability(false, ImmutableList.of(false, false)),
-                false,
-                false,
-                "Apply lambda to each element of the array",
-                SCALAR));
+        super(FunctionMetadata.scalarBuilder(ARRAY_TRANSFORM_NAME)
+                .signature(Signature.builder()
+                        .typeVariable("T")
+                        .typeVariable("U")
+                        .returnType(arrayType(new TypeSignature("U")))
+                        .argumentType(arrayType(new TypeSignature("T")))
+                        .argumentType(functionType(new TypeSignature("T"), new TypeSignature("U")))
+                        .build())
+                .description("Apply lambda to each element of the array")
+                .build());
     }
 
     @Override
-    protected ScalarFunctionImplementation specialize(BoundSignature boundSignature)
+    protected SpecializedSqlScalarFunction specialize(BoundSignature boundSignature)
     {
         Type inputType = ((ArrayType) boundSignature.getArgumentTypes().get(0)).getElementType();
-        Type outputType = ((ArrayType) boundSignature.getReturnType()).getElementType();
-        Class<?> generatedClass = generateTransform(inputType, outputType);
-        return new ChoicesScalarFunctionImplementation(
+        ArrayType returnType = (ArrayType) boundSignature.getReturnType();
+        Type outputType = returnType.getElementType();
+        return new ChoicesSpecializedSqlScalarFunction(
                 boundSignature,
                 FAIL_ON_NULL,
                 ImmutableList.of(NEVER_NULL, FUNCTION),
                 ImmutableList.of(UnaryFunctionInterface.class),
-                methodHandle(generatedClass, "transform", PageBuilder.class, Block.class, UnaryFunctionInterface.class),
-                Optional.of(methodHandle(generatedClass, "createPageBuilder")));
+                generateTransform(inputType, outputType),
+                Optional.of(CREATE_STATE.bindTo(returnType)));
     }
 
-    private static Class<?> generateTransform(Type inputType, Type outputType)
+    private static MethodHandle generateTransform(Type inputType, Type outputType)
     {
         CallSiteBinder binder = new CallSiteBinder();
-        Class<?> inputJavaType = Primitives.wrap(inputType.getJavaType());
-        Class<?> outputJavaType = Primitives.wrap(outputType.getJavaType());
-
         ClassDefinition definition = new ClassDefinition(
                 a(PUBLIC, FINAL),
                 makeClassName("ArrayTransform"),
                 type(Object.class));
         definition.declareDefaultConstructor(a(PRIVATE));
 
-        // define createPageBuilder
-        MethodDefinition createPageBuilderMethod = definition.declareMethod(a(PUBLIC, STATIC), "createPageBuilder", type(PageBuilder.class));
-        createPageBuilderMethod.getBody()
-                .append(newInstance(PageBuilder.class, constantType(binder, new ArrayType(outputType)).invoke("getTypeParameters", List.class)).ret());
+        MethodDefinition transformValue = generateTransformValueInner(definition, binder, inputType, outputType);
 
-        // define transform method
-        Parameter pageBuilder = arg("pageBuilder", PageBuilder.class);
+        Parameter arrayValueBuilder = arg("arrayValueBuilder", BufferedArrayValueBuilder.class);
         Parameter block = arg("block", Block.class);
         Parameter function = arg("function", UnaryFunctionInterface.class);
-
         MethodDefinition method = definition.declareMethod(
                 a(PUBLIC, STATIC),
                 "transform",
                 type(Block.class),
-                ImmutableList.of(pageBuilder, block, function));
+                ImmutableList.of(arrayValueBuilder, block, function));
+
+        BytecodeExpression arrayBuilder = generateMetafactory(ArrayValueBuilder.class, transformValue, ImmutableList.of(block, function));
+        BytecodeExpression entryCount = block.invoke("getPositionCount", int.class);
+
+        method.getBody().append(arrayValueBuilder.invoke("build", Block.class, entryCount, arrayBuilder).ret());
+
+        Class<?> generatedClass = defineClass(definition, Object.class, binder.getBindings(), ArrayTransformFunction.class.getClassLoader());
+        try {
+            return lookup().findStatic(generatedClass, "transform", MethodType.methodType(Block.class, BufferedArrayValueBuilder.class, Block.class, UnaryFunctionInterface.class));
+        }
+        catch (ReflectiveOperationException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, e);
+        }
+    }
+
+    private static MethodDefinition generateTransformValueInner(ClassDefinition definition, CallSiteBinder binder, Type inputType, Type outputType)
+    {
+        Class<?> inputJavaType = Primitives.wrap(inputType.getJavaType());
+        Class<?> outputJavaType = Primitives.wrap(outputType.getJavaType());
+
+        Parameter block = arg("block", Block.class);
+        Parameter function = arg("function", UnaryFunctionInterface.class);
+        Parameter elementBuilder = arg("elementBuilder", BlockBuilder.class);
+        MethodDefinition method = definition.declareMethod(
+                a(PRIVATE, STATIC),
+                "transformValue",
+                type(void.class),
+                ImmutableList.of(block, function, elementBuilder));
 
         BytecodeBlock body = method.getBody();
         Scope scope = method.getScope();
+
         Variable positionCount = scope.declareVariable(int.class, "positionCount");
         Variable position = scope.declareVariable(int.class, "position");
-        Variable blockBuilder = scope.declareVariable(BlockBuilder.class, "blockBuilder");
         Variable inputElement = scope.declareVariable(inputJavaType, "inputElement");
         Variable outputElement = scope.declareVariable(outputJavaType, "outputElement");
 
         // invoke block.getPositionCount()
         body.append(positionCount.set(block.invoke("getPositionCount", int.class)));
-
-        // reset page builder if it is full
-        body.append(new IfStatement()
-                .condition(pageBuilder.invoke("isFull", boolean.class))
-                .ifTrue(pageBuilder.invoke("reset", void.class)));
-
-        // get block builder
-        body.append(blockBuilder.set(pageBuilder.invoke("getBlockBuilder", BlockBuilder.class, constantInt(0))));
 
         BytecodeNode loadInputElement;
         if (!inputType.equals(UNKNOWN)) {
@@ -169,11 +189,11 @@ public final class ArrayTransformFunction
         if (!outputType.equals(UNKNOWN)) {
             writeOutputElement = new IfStatement()
                     .condition(equal(outputElement, constantNull(outputJavaType)))
-                    .ifTrue(blockBuilder.invoke("appendNull", BlockBuilder.class).pop())
-                    .ifFalse(constantType(binder, outputType).writeValue(blockBuilder, outputElement.cast(outputType.getJavaType())));
+                    .ifTrue(elementBuilder.invoke("appendNull", BlockBuilder.class).pop())
+                    .ifFalse(constantType(binder, outputType).writeValue(elementBuilder, outputElement.cast(outputType.getJavaType())));
         }
         else {
-            writeOutputElement = new BytecodeBlock().append(blockBuilder.invoke("appendNull", BlockBuilder.class).pop());
+            writeOutputElement = new BytecodeBlock().append(elementBuilder.invoke("appendNull", BlockBuilder.class).pop());
         }
 
         body.append(new ForLoop()
@@ -185,10 +205,7 @@ public final class ArrayTransformFunction
                         .append(outputElement.set(function.invoke("apply", Object.class, inputElement.cast(Object.class)).cast(outputJavaType)))
                         .append(writeOutputElement)));
 
-        body.append(pageBuilder.invoke("declarePositions", void.class, positionCount));
-
-        body.append(blockBuilder.invoke("getRegion", Block.class, subtract(blockBuilder.invoke("getPositionCount", int.class), positionCount), positionCount).ret());
-
-        return defineClass(definition, Object.class, binder.getBindings(), ArrayTransformFunction.class.getClassLoader());
+        body.ret();
+        return method;
     }
 }

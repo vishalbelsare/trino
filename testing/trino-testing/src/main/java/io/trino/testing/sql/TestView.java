@@ -13,22 +13,25 @@
  */
 package io.trino.testing.sql;
 
-import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import org.intellij.lang.annotations.Language;
+
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.lang.String.format;
 
 public class TestView
-        implements AutoCloseable
+        implements TemporaryRelation
 {
     private final SqlExecutor sqlExecutor;
     private final String name;
 
-    public TestView(SqlExecutor sqlExecutor, String namePrefix, String viewBody)
+    public TestView(SqlExecutor sqlExecutor, String namePrefix, @Language("SQL") String viewBody)
     {
         this.sqlExecutor = sqlExecutor;
-        this.name = namePrefix + "_" + randomTableSuffix();
+        this.name = namePrefix + "_" + randomNameSuffix();
         sqlExecutor.execute(format("CREATE VIEW %s AS %s", name, viewBody));
     }
 
+    @Override
     public String getName()
     {
         return name;

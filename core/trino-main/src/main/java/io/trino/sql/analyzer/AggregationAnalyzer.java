@@ -14,20 +14,24 @@
 package io.trino.sql.analyzer;
 
 import com.google.common.collect.ImmutableList;
-import io.trino.metadata.Metadata;
+import io.trino.Session;
+import io.trino.metadata.FunctionResolver;
+import io.trino.security.AccessControl;
 import io.trino.spi.StandardErrorCode;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.ScopeAware;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
 import io.trino.sql.tree.ArithmeticUnaryExpression;
-import io.trino.sql.tree.ArrayConstructor;
+import io.trino.sql.tree.Array;
 import io.trino.sql.tree.AstVisitor;
 import io.trino.sql.tree.AtTimeZone;
 import io.trino.sql.tree.BetweenPredicate;
-import io.trino.sql.tree.BindExpression;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.CoalesceExpression;
 import io.trino.sql.tree.ComparisonExpression;
+import io.trino.sql.tree.CurrentDate;
 import io.trino.sql.tree.CurrentTime;
+import io.trino.sql.tree.CurrentTimestamp;
 import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.ExistsPredicate;
 import io.trino.sql.tree.Expression;
@@ -42,9 +46,18 @@ import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.IsNotNullPredicate;
 import io.trino.sql.tree.IsNullPredicate;
+import io.trino.sql.tree.JsonArray;
+import io.trino.sql.tree.JsonExists;
+import io.trino.sql.tree.JsonObject;
+import io.trino.sql.tree.JsonPathInvocation;
+import io.trino.sql.tree.JsonPathParameter;
+import io.trino.sql.tree.JsonQuery;
+import io.trino.sql.tree.JsonValue;
 import io.trino.sql.tree.LambdaExpression;
 import io.trino.sql.tree.LikePredicate;
 import io.trino.sql.tree.Literal;
+import io.trino.sql.tree.LocalTime;
+import io.trino.sql.tree.LocalTimestamp;
 import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.MeasureDefinition;
 import io.trino.sql.tree.Node;
@@ -59,6 +72,7 @@ import io.trino.sql.tree.SimpleCaseExpression;
 import io.trino.sql.tree.SortItem;
 import io.trino.sql.tree.SubqueryExpression;
 import io.trino.sql.tree.SubscriptExpression;
+import io.trino.sql.tree.Trim;
 import io.trino.sql.tree.TryExpression;
 import io.trino.sql.tree.VariableDefinition;
 import io.trino.sql.tree.WhenClause;
@@ -67,8 +81,7 @@ import io.trino.sql.tree.WindowFrame;
 import io.trino.sql.tree.WindowOperation;
 import io.trino.sql.tree.WindowReference;
 import io.trino.sql.tree.WindowSpecification;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import java.util.List;
 import java.util.Map;
@@ -79,7 +92,6 @@ import java.util.Set;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.EXPRESSION_NOT_AGGREGATE;
@@ -108,10 +120,12 @@ class AggregationAnalyzer
     // fields and expressions in the group by clause
     private final Set<FieldId> groupingFields;
     private final Set<ScopeAware<Expression>> expressions;
-    private final Map<NodeRef<Expression>, FieldId> columnReferences;
+    private final Map<NodeRef<Expression>, ResolvedField> columnReferences;
 
-    private final Metadata metadata;
+    private final Session session;
     private final Analysis analysis;
+    private final FunctionResolver functionResolver;
+    private final AccessControl accessControl;
 
     private final Scope sourceScope;
     private final Optional<Scope> orderByScope;
@@ -119,50 +133,70 @@ class AggregationAnalyzer
     public static void verifySourceAggregations(
             List<Expression> groupByExpressions,
             Scope sourceScope,
-            Expression expression,
-            Metadata metadata,
+            List<Expression> expressions,
+            Session session,
+            PlannerContext plannerContext,
+            AccessControl accessControl,
             Analysis analysis)
     {
-        AggregationAnalyzer analyzer = new AggregationAnalyzer(groupByExpressions, sourceScope, Optional.empty(), metadata, analysis);
-        analyzer.analyze(expression);
+        AggregationAnalyzer analyzer = new AggregationAnalyzer(groupByExpressions, sourceScope, Optional.empty(), session, plannerContext, accessControl, analysis);
+        for (Expression expression : expressions) {
+            analyzer.analyze(expression);
+        }
     }
 
     public static void verifyOrderByAggregations(
             List<Expression> groupByExpressions,
             Scope sourceScope,
             Scope orderByScope,
-            Expression expression,
-            Metadata metadata,
+            List<Expression> expressions,
+            Session session,
+            PlannerContext plannerContext,
+            AccessControl accessControl,
             Analysis analysis)
     {
-        AggregationAnalyzer analyzer = new AggregationAnalyzer(groupByExpressions, sourceScope, Optional.of(orderByScope), metadata, analysis);
-        analyzer.analyze(expression);
+        AggregationAnalyzer analyzer = new AggregationAnalyzer(groupByExpressions, sourceScope, Optional.of(orderByScope), session, plannerContext, accessControl, analysis);
+        for (Expression expression : expressions) {
+            analyzer.analyze(expression);
+        }
     }
 
-    private AggregationAnalyzer(List<Expression> groupByExpressions, Scope sourceScope, Optional<Scope> orderByScope, Metadata metadata, Analysis analysis)
+    private AggregationAnalyzer(
+            List<Expression> groupByExpressions,
+            Scope sourceScope,
+            Optional<Scope> orderByScope,
+            Session session,
+            PlannerContext plannerContext,
+            AccessControl accessControl,
+            Analysis analysis)
     {
         requireNonNull(groupByExpressions, "groupByExpressions is null");
         requireNonNull(sourceScope, "sourceScope is null");
         requireNonNull(orderByScope, "orderByScope is null");
-        requireNonNull(metadata, "metadata is null");
+        requireNonNull(session, "session is null");
+        requireNonNull(plannerContext, "metadata is null");
+        requireNonNull(accessControl, "accessControl is null");
         requireNonNull(analysis, "analysis is null");
 
         this.sourceScope = sourceScope;
         this.orderByScope = orderByScope;
-        this.metadata = metadata;
+        this.session = session;
         this.analysis = analysis;
+        this.accessControl = accessControl;
         this.expressions = groupByExpressions.stream()
                 .map(expression -> scopeAwareKey(expression, analysis, sourceScope))
                 .collect(toImmutableSet());
+        functionResolver = plannerContext.getFunctionResolver();
 
-        this.columnReferences = analysis.getColumnReferenceFields()
-                .entrySet().stream()
-                .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().getFieldId()));
+        // No defensive copy here for performance reasons.
+        // Copying this map may lead to quadratic time complexity
+        this.columnReferences = analysis.getColumnReferenceFields();
 
         this.groupingFields = groupByExpressions.stream()
                 .map(NodeRef::of)
                 .filter(columnReferences::containsKey)
                 .map(columnReferences::get)
+                .map(ResolvedField::getFieldId)
                 .collect(toImmutableSet());
 
         this.groupingFields.forEach(fieldId -> {
@@ -231,7 +265,7 @@ class AggregationAnalyzer
         }
 
         @Override
-        protected Boolean visitArrayConstructor(ArrayConstructor node, Void context)
+        protected Boolean visitArray(Array node, Void context)
         {
             return node.getValues().stream().allMatch(expression -> process(expression, context));
         }
@@ -270,6 +304,30 @@ class AggregationAnalyzer
 
         @Override
         protected Boolean visitCurrentTime(CurrentTime node, Void context)
+        {
+            return true;
+        }
+
+        @Override
+        protected Boolean visitCurrentDate(CurrentDate node, Void context)
+        {
+            return true;
+        }
+
+        @Override
+        protected Boolean visitCurrentTimestamp(CurrentTimestamp node, Void context)
+        {
+            return true;
+        }
+
+        @Override
+        protected Boolean visitLocalTime(LocalTime node, Void context)
+        {
+            return true;
+        }
+
+        @Override
+        protected Boolean visitLocalTimestamp(LocalTimestamp node, Void context)
         {
             return true;
         }
@@ -329,6 +387,12 @@ class AggregationAnalyzer
         }
 
         @Override
+        protected Boolean visitTrim(Trim node, Void context)
+        {
+            return process(node.getTrimSource(), context) && (node.getTrimCharacter().isEmpty() || process(node.getTrimCharacter().get(), context));
+        }
+
+        @Override
         protected Boolean visitFormat(Format node, Void context)
         {
             return node.getArguments().stream().allMatch(expression -> process(expression, context));
@@ -337,9 +401,9 @@ class AggregationAnalyzer
         @Override
         protected Boolean visitFunctionCall(FunctionCall node, Void context)
         {
-            if (metadata.isAggregationFunction(node.getName())) {
+            if (functionResolver.isAggregationFunction(session, node.getName(), accessControl)) {
                 if (node.getWindow().isEmpty()) {
-                    List<FunctionCall> aggregateFunctions = extractAggregateFunctions(node.getArguments(), metadata);
+                    List<FunctionCall> aggregateFunctions = extractAggregateFunctions(node.getArguments(), session, functionResolver, accessControl);
                     List<Expression> windowExpressions = extractWindowExpressions(node.getArguments());
 
                     if (!aggregateFunctions.isEmpty()) {
@@ -367,13 +431,17 @@ class AggregationAnalyzer
                                     .map(NodeRef::of)
                                     .map(columnReferences::get)
                                     .filter(Objects::nonNull)
+                                    .map(ResolvedField::getFieldId)
                                     .collect(toImmutableList());
                             for (Expression sortKey : sortKeys) {
-                                if (!node.getArguments().contains(sortKey) && !fieldIds.contains(columnReferences.get(NodeRef.of(sortKey)))) {
-                                    throw semanticException(
-                                            EXPRESSION_NOT_IN_DISTINCT,
-                                            sortKey,
-                                            "For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments");
+                                if (!node.getArguments().contains(sortKey)) {
+                                    ResolvedField field = columnReferences.get(NodeRef.of(sortKey));
+                                    if (field == null || !fieldIds.contains(field.getFieldId())) {
+                                        throw semanticException(
+                                                EXPRESSION_NOT_IN_DISTINCT,
+                                                sortKey,
+                                                "For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments");
+                                    }
                                 }
                             }
                         }
@@ -390,7 +458,7 @@ class AggregationAnalyzer
 
                     // in case of aggregate function in ORDER BY, ensure that no output fields are referenced from aggregation's arguments or filter
                     if (orderByScope.isPresent()) {
-                        node.getArguments().stream()
+                        node.getArguments()
                                 .forEach(argument -> verifyNoOrderByReferencesToOutputColumns(
                                         argument,
                                         COLUMN_NOT_FOUND,
@@ -406,10 +474,7 @@ class AggregationAnalyzer
             }
             else {
                 if (node.getFilter().isPresent()) {
-                    throw semanticException(FUNCTION_NOT_AGGREGATE,
-                            node,
-                            "Filter is only valid for aggregation functions",
-                            node);
+                    throw semanticException(FUNCTION_NOT_AGGREGATE, node, "Filter is only valid for aggregation functions");
                 }
                 if (node.getOrderBy().isPresent()) {
                     throw semanticException(FUNCTION_NOT_AGGREGATE, node, "ORDER BY is only valid for aggregation functions");
@@ -436,17 +501,6 @@ class AggregationAnalyzer
         protected Boolean visitLambdaExpression(LambdaExpression node, Void context)
         {
             return process(node.getBody(), context);
-        }
-
-        @Override
-        protected Boolean visitBindExpression(BindExpression node, Void context)
-        {
-            for (Expression value : node.getValues()) {
-                if (!process(value, context)) {
-                    return false;
-                }
-            }
-            return process(node.getFunction(), context);
         }
 
         @Override
@@ -525,11 +579,6 @@ class AggregationAnalyzer
         @Override
         protected Boolean visitDereferenceExpression(DereferenceExpression node, Void context)
         {
-            ExpressionAnalyzer.LabelPrefixedReference labelDereference = analysis.getLabelDereference(node);
-            if (labelDereference != null) {
-                return labelDereference.getColumn().map(this::process).orElse(true);
-            }
-
             if (!hasReferencesToScope(node, analysis, sourceScope)) {
                 // reference to outer scope is group-invariant
                 return true;
@@ -545,8 +594,7 @@ class AggregationAnalyzer
 
         private boolean isGroupingKey(Expression node)
         {
-            FieldId fieldId = columnReferences.get(NodeRef.of(node));
-            requireNonNull(fieldId, () -> "No FieldId for " + node);
+            FieldId fieldId = requireNonNull(columnReferences.get(NodeRef.of(node)), () -> "No field for " + node).getFieldId();
 
             if (orderByScope.isPresent() && isFieldFromScope(fieldId, orderByScope.get())) {
                 return true;
@@ -562,7 +610,7 @@ class AggregationAnalyzer
                 return true;
             }
 
-            FieldId fieldId = requireNonNull(columnReferences.get(NodeRef.<Expression>of(node)), "No FieldId for FieldReference");
+            FieldId fieldId = requireNonNull(columnReferences.get(NodeRef.of(node)), () -> "No field for " + node).getFieldId();
             boolean inGroup = groupingFields.contains(fieldId);
             if (!inGroup) {
                 Field field = sourceScope.getRelationType().getFieldByIndex(node.getFieldIndex());
@@ -629,11 +677,7 @@ class AggregationAnalyzer
                 }
             }
 
-            if (node.getDefaultValue().isPresent() && !process(node.getDefaultValue().get(), context)) {
-                return false;
-            }
-
-            return true;
+            return node.getDefaultValue().isEmpty() || process(node.getDefaultValue().get(), context);
         }
 
         @Override
@@ -668,7 +712,7 @@ class AggregationAnalyzer
                 return true;
             }
             Map<NodeRef<Parameter>, Expression> parameters = analysis.getParameters();
-            checkArgument(node.getPosition() < parameters.size(), "Invalid parameter number %s, max values is %s", node.getPosition(), parameters.size() - 1);
+            checkArgument(node.getId() < parameters.size(), "Invalid parameter number %s, max values is %s", node.getId(), parameters.size() - 1);
             return process(parameters.get(NodeRef.of(node)), context);
         }
 
@@ -697,6 +741,49 @@ class AggregationAnalyzer
         }
 
         @Override
+        protected Boolean visitJsonExists(JsonExists node, Void context)
+        {
+            return process(node.getJsonPathInvocation(), context);
+        }
+
+        @Override
+        protected Boolean visitJsonValue(JsonValue node, Void context)
+        {
+            return process(node.getJsonPathInvocation(), context) &&
+                    node.getEmptyDefault().map(expression -> process(expression, context)).orElse(true) &&
+                    node.getErrorDefault().map(expression -> process(expression, context)).orElse(true);
+        }
+
+        @Override
+        protected Boolean visitJsonQuery(JsonQuery node, Void context)
+        {
+            return process(node.getJsonPathInvocation(), context);
+        }
+
+        @Override
+        protected Boolean visitJsonPathInvocation(JsonPathInvocation node, Void context)
+        {
+            return process(node.getInputExpression(), context) &&
+                    node.getPathParameters().stream()
+                            .map(JsonPathParameter::getParameter)
+                            .allMatch(expression -> process(expression, context));
+        }
+
+        @Override
+        protected Boolean visitJsonObject(JsonObject node, Void context)
+        {
+            return node.getMembers().stream()
+                    .allMatch(member -> process(member.getKey(), context) && process(member.getValue(), context));
+        }
+
+        @Override
+        protected Boolean visitJsonArray(JsonArray node, Void context)
+        {
+            return node.getElements().stream()
+                    .allMatch(element -> process(element.getValue(), context));
+        }
+
+        @Override
         public Boolean process(Node node, @Nullable Void context)
         {
             if (node instanceof Expression
@@ -720,7 +807,7 @@ class AggregationAnalyzer
         getReferencesToScope(node, analysis, orderByScope.get())
                 .findFirst()
                 .ifPresent(expression -> {
-                    throw semanticException(errorCode, expression, errorString);
+                    throw semanticException(errorCode, expression, "%s", errorString);
                 });
     }
 }

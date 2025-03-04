@@ -14,12 +14,12 @@
 package io.trino.orc.metadata.statistics;
 
 import io.trino.orc.metadata.statistics.StatisticsHasher.Hashable;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.List;
 import java.util.Objects;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.statistics.BinaryStatisticsBuilder.mergeBinaryStatistics;
 import static io.trino.orc.metadata.statistics.BooleanStatisticsBuilder.mergeBooleanStatistics;
 import static io.trino.orc.metadata.statistics.DateStatisticsBuilder.mergeDateStatistics;
@@ -32,7 +32,7 @@ import static io.trino.orc.metadata.statistics.TimestampStatisticsBuilder.mergeT
 public class ColumnStatistics
         implements Hashable
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(ColumnStatistics.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(ColumnStatistics.class);
 
     private final boolean hasNumberOfValues;
     private final long numberOfValues;
@@ -40,6 +40,7 @@ public class ColumnStatistics
     private final BooleanStatistics booleanStatistics;
     private final IntegerStatistics integerStatistics;
     private final DoubleStatistics doubleStatistics;
+    private final long numberOfNanValues;
     private final StringStatistics stringStatistics;
     private final DateStatistics dateStatistics;
     private final TimestampStatistics timestampStatistics;
@@ -53,6 +54,7 @@ public class ColumnStatistics
             BooleanStatistics booleanStatistics,
             IntegerStatistics integerStatistics,
             DoubleStatistics doubleStatistics,
+            Long numberOfNanValues,
             StringStatistics stringStatistics,
             DateStatistics dateStatistics,
             TimestampStatistics timestampStatistics,
@@ -66,6 +68,7 @@ public class ColumnStatistics
         this.booleanStatistics = booleanStatistics;
         this.integerStatistics = integerStatistics;
         this.doubleStatistics = doubleStatistics;
+        this.numberOfNanValues = numberOfNanValues != null ? numberOfNanValues : 0;
         this.stringStatistics = stringStatistics;
         this.dateStatistics = dateStatistics;
         this.timestampStatistics = timestampStatistics;
@@ -115,6 +118,11 @@ public class ColumnStatistics
         return doubleStatistics;
     }
 
+    public long getNumberOfNanValues()
+    {
+        return numberOfNanValues;
+    }
+
     public IntegerStatistics getIntegerStatistics()
     {
         return integerStatistics;
@@ -153,6 +161,7 @@ public class ColumnStatistics
                 booleanStatistics,
                 integerStatistics,
                 doubleStatistics,
+                numberOfNanValues,
                 stringStatistics,
                 dateStatistics,
                 timestampStatistics,
@@ -204,8 +213,8 @@ public class ColumnStatistics
             return false;
         }
         ColumnStatistics that = (ColumnStatistics) o;
-        return Objects.equals(hasNumberOfValues, that.hasNumberOfValues) &&
-                Objects.equals(getNumberOfValues(), that.getNumberOfValues()) &&
+        return hasNumberOfValues == that.hasNumberOfValues &&
+                getNumberOfValues() == that.getNumberOfValues() &&
                 Objects.equals(booleanStatistics, that.booleanStatistics) &&
                 Objects.equals(integerStatistics, that.integerStatistics) &&
                 Objects.equals(doubleStatistics, that.doubleStatistics) &&
@@ -280,12 +289,17 @@ public class ColumnStatistics
                     .sum() / numberOfRows;
         }
 
+        long numberOfNanValues = stats.stream()
+                .mapToLong(ColumnStatistics::getNumberOfNanValues)
+                .sum();
+
         return new ColumnStatistics(
                 numberOfRows,
                 minAverageValueBytes,
                 mergeBooleanStatistics(stats).orElse(null),
                 mergeIntegerStatistics(stats).orElse(null),
                 mergeDoubleStatistics(stats).orElse(null),
+                numberOfNanValues,
                 mergeStringStatistics(stats).orElse(null),
                 mergeDateStatistics(stats).orElse(null),
                 mergeTimestampStatistics(stats).orElse(null),

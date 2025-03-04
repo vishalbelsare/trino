@@ -14,16 +14,16 @@
 package io.trino.connector.system;
 
 import io.trino.metadata.InternalNodeManager;
+import io.trino.security.AccessControl;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
-import io.trino.spi.connector.SystemTable;
 import io.trino.spi.transaction.IsolationLevel;
 import io.trino.transaction.InternalConnector;
 import io.trino.transaction.TransactionId;
 
-import java.util.Set;
 import java.util.function.Function;
 
 import static java.util.Objects.requireNonNull;
@@ -38,24 +38,20 @@ public class SystemConnector
 
     public SystemConnector(
             InternalNodeManager nodeManager,
-            Set<SystemTable> tables,
-            Function<TransactionId, ConnectorTransactionHandle> transactionHandleFunction)
-    {
-        this(nodeManager, new StaticSystemTablesProvider(tables), transactionHandleFunction);
-    }
-
-    public SystemConnector(
-            InternalNodeManager nodeManager,
             SystemTablesProvider tables,
-            Function<TransactionId, ConnectorTransactionHandle> transactionHandleFunction)
+            Function<TransactionId, ConnectorTransactionHandle> transactionHandleFunction,
+            AccessControl accessControl,
+            String catalogName)
     {
         requireNonNull(nodeManager, "nodeManager is null");
         requireNonNull(tables, "tables is null");
         requireNonNull(transactionHandleFunction, "transactionHandleFunction is null");
+        requireNonNull(accessControl, "accessControl is null");
+        requireNonNull(catalogName, "catalogName is null");
 
         this.metadata = new SystemTablesMetadata(tables);
         this.splitManager = new SystemSplitManager(nodeManager, tables);
-        this.pageSourceProvider = new SystemPageSourceProvider(tables);
+        this.pageSourceProvider = new SystemPageSourceProvider(tables, accessControl, catalogName);
         this.transactionHandleFunction = transactionHandleFunction;
     }
 
@@ -66,7 +62,7 @@ public class SystemConnector
     }
 
     @Override
-    public ConnectorMetadata getMetadata(ConnectorTransactionHandle transactionHandle)
+    public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle)
     {
         return metadata;
     }

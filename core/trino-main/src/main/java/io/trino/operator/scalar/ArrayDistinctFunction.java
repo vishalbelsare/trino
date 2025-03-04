@@ -13,40 +13,39 @@
  */
 package io.trino.operator.scalar;
 
-import com.google.common.collect.ImmutableList;
-import io.trino.operator.aggregation.TypedSet;
-import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.BufferedArrayValueBuilder;
 import io.trino.spi.function.Convention;
 import io.trino.spi.function.Description;
 import io.trino.spi.function.OperatorDependency;
 import io.trino.spi.function.ScalarFunction;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
 import io.trino.type.BlockTypeOperators.BlockPositionHashCode;
-import io.trino.type.BlockTypeOperators.BlockPositionIsDistinctFrom;
+import io.trino.type.BlockTypeOperators.BlockPositionIsIdentical;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 
-import static io.trino.operator.aggregation.TypedSet.createDistinctTypedSet;
+import static io.trino.operator.scalar.BlockSet.MAX_FUNCTION_MEMORY;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
-import static io.trino.spi.function.OperatorType.IS_DISTINCT_FROM;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.type.BigintType.BIGINT;
 
 @ScalarFunction("array_distinct")
 @Description("Remove duplicate values from the given array")
 public final class ArrayDistinctFunction
 {
-    private final PageBuilder pageBuilder;
+    public static final String NAME = "array_distinct";
+    private final BufferedArrayValueBuilder arrayValueBuilder;
 
     @TypeParameter("E")
     public ArrayDistinctFunction(@TypeParameter("E") Type elementType)
     {
-        pageBuilder = new PageBuilder(ImmutableList.of(elementType));
+        arrayValueBuilder = BufferedArrayValueBuilder.createBuffered(new ArrayType(elementType));
     }
 
     @TypeParameter("E")
@@ -54,9 +53,9 @@ public final class ArrayDistinctFunction
     public Block distinct(
             @TypeParameter("E") Type type,
             @OperatorDependency(
-                    operator = IS_DISTINCT_FROM,
+                    operator = IDENTICAL,
                     argumentTypes = {"E", "E"},
-                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = FAIL_ON_NULL)) BlockPositionIsDistinctFrom elementIsDistinctFrom,
+                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = FAIL_ON_NULL)) BlockPositionIsIdentical elementIdentical,
             @OperatorDependency(
                     operator = HASH_CODE,
                     argumentTypes = "E",
@@ -68,34 +67,26 @@ public final class ArrayDistinctFunction
         }
 
         if (array.getPositionCount() == 2) {
-            boolean distinct = elementIsDistinctFrom.isDistinctFrom(array, 0, array, 1);
-            if (distinct) {
+            boolean identical = elementIdentical.isIdentical(array, 0, array, 1);
+            if (!identical) {
                 return array;
             }
             return array.getSingleValueBlock(0);
         }
 
-        if (pageBuilder.isFull()) {
-            pageBuilder.reset();
-        }
-
-        BlockBuilder distinctElementsBlockBuilder = pageBuilder.getBlockBuilder(0);
-        TypedSet distinctElements = createDistinctTypedSet(
+        BlockSet distinctElements = new BlockSet(
                 type,
-                elementIsDistinctFrom,
+                elementIdentical,
                 elementHashCode,
-                distinctElementsBlockBuilder,
-                array.getPositionCount(),
-                "array_distinct");
+                array.getPositionCount());
 
         for (int i = 0; i < array.getPositionCount(); i++) {
             distinctElements.add(array, i);
         }
 
-        pageBuilder.declarePositions(distinctElements.size());
-        return distinctElementsBlockBuilder.getRegion(
-                distinctElementsBlockBuilder.getPositionCount() - distinctElements.size(),
-                distinctElements.size());
+        return arrayValueBuilder.build(
+                distinctElements.size(),
+                blockBuilder -> distinctElements.getAllWithSizeLimit(blockBuilder, "array_distinct", MAX_FUNCTION_MEMORY));
     }
 
     @SqlType("array(bigint)")
@@ -105,36 +96,23 @@ public final class ArrayDistinctFunction
             return array;
         }
 
-        boolean containsNull = false;
-        LongSet set = new LongOpenHashSet(array.getPositionCount());
-        int distinctCount = 0;
+        return arrayValueBuilder.build(array.getPositionCount(), distinctElementBlockBuilder -> {
+            boolean containsNull = false;
+            LongSet set = new LongOpenHashSet(array.getPositionCount());
 
-        if (pageBuilder.isFull()) {
-            pageBuilder.reset();
-        }
-
-        BlockBuilder distinctElementBlockBuilder = pageBuilder.getBlockBuilder(0);
-        for (int i = 0; i < array.getPositionCount(); i++) {
-            if (array.isNull(i)) {
-                if (!containsNull) {
-                    containsNull = true;
-                    distinctElementBlockBuilder.appendNull();
-                    distinctCount++;
+            for (int i = 0; i < array.getPositionCount(); i++) {
+                if (array.isNull(i)) {
+                    if (!containsNull) {
+                        containsNull = true;
+                        distinctElementBlockBuilder.appendNull();
+                    }
+                    continue;
                 }
-                continue;
+                long value = BIGINT.getLong(array, i);
+                if (set.add(value)) {
+                    BIGINT.writeLong(distinctElementBlockBuilder, value);
+                }
             }
-            long value = BIGINT.getLong(array, i);
-            if (!set.contains(value)) {
-                set.add(value);
-                distinctCount++;
-                BIGINT.appendTo(array, i, distinctElementBlockBuilder);
-            }
-        }
-
-        pageBuilder.declarePositions(distinctCount);
-
-        return distinctElementBlockBuilder.getRegion(
-                distinctElementBlockBuilder.getPositionCount() - distinctCount,
-                distinctCount);
+        });
     }
 }

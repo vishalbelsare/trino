@@ -29,10 +29,10 @@ import io.airlift.bytecode.ParameterizedType;
 import io.airlift.bytecode.Scope;
 import io.airlift.bytecode.Variable;
 import io.airlift.bytecode.expression.BytecodeExpression;
-import io.trino.metadata.Metadata;
+import io.trino.metadata.FunctionManager;
 import io.trino.operator.aggregation.AccumulatorCompiler;
-import io.trino.operator.aggregation.LambdaProvider;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.sql.planner.Symbol;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.ConstantExpression;
 import io.trino.sql.relational.InputReferenceExpression;
@@ -46,10 +46,12 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.bytecode.Access.PRIVATE;
@@ -81,26 +83,26 @@ public final class LambdaBytecodeGenerator
             CallSiteBinder callSiteBinder,
             CachedInstanceBinder cachedInstanceBinder,
             RowExpression expression,
-            Metadata metadata)
+            FunctionManager functionManager)
     {
         Set<LambdaDefinitionExpression> lambdaExpressions = ImmutableSet.copyOf(extractLambdaExpressions(expression));
         ImmutableMap.Builder<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap = ImmutableMap.builder();
 
         int counter = 0;
         for (LambdaDefinitionExpression lambdaExpression : lambdaExpressions) {
-            CompiledLambda compiledLambda = LambdaBytecodeGenerator.preGenerateLambdaExpression(
+            CompiledLambda compiledLambda = preGenerateLambdaExpression(
                     lambdaExpression,
                     "lambda_" + counter,
                     containerClassDefinition,
-                    compiledLambdaMap.build(),
+                    compiledLambdaMap.buildOrThrow(),
                     callSiteBinder,
                     cachedInstanceBinder,
-                    metadata);
+                    functionManager);
             compiledLambdaMap.put(lambdaExpression, compiledLambda);
             counter++;
         }
 
-        return compiledLambdaMap.build();
+        return compiledLambdaMap.buildOrThrow();
     }
 
     /**
@@ -113,26 +115,29 @@ public final class LambdaBytecodeGenerator
             Map<LambdaDefinitionExpression, CompiledLambda> compiledLambdaMap,
             CallSiteBinder callSiteBinder,
             CachedInstanceBinder cachedInstanceBinder,
-            Metadata metadata)
+            FunctionManager functionManager)
     {
         ImmutableList.Builder<Parameter> parameters = ImmutableList.builder();
         ImmutableMap.Builder<String, ParameterAndType> parameterMapBuilder = ImmutableMap.builder();
 
         parameters.add(arg("session", ConnectorSession.class));
-        for (int i = 0; i < lambdaExpression.getArguments().size(); i++) {
-            Class<?> type = Primitives.wrap(lambdaExpression.getArgumentTypes().get(i).getJavaType());
-            String argumentName = lambdaExpression.getArguments().get(i);
+        for (int i = 0; i < lambdaExpression.arguments().size(); i++) {
+            Symbol argument = lambdaExpression.arguments().get(i);
+            Class<?> type = Primitives.wrap(argument.type().getJavaType());
+            String argumentName = argument.name();
             Parameter arg = arg("lambda_" + i + "_" + BytecodeUtils.sanitizeName(argumentName), type);
             parameters.add(arg);
             parameterMapBuilder.put(argumentName, new ParameterAndType(arg, type));
         }
 
         RowExpressionCompiler innerExpressionCompiler = new RowExpressionCompiler(
+                classDefinition,
                 callSiteBinder,
                 cachedInstanceBinder,
-                variableReferenceCompiler(parameterMapBuilder.build()),
-                metadata,
-                compiledLambdaMap);
+                variableReferenceCompiler(parameterMapBuilder.buildOrThrow()),
+                functionManager,
+                compiledLambdaMap,
+                parameters.build());
 
         return defineLambdaMethod(
                 innerExpressionCompiler,
@@ -150,12 +155,12 @@ public final class LambdaBytecodeGenerator
             LambdaDefinitionExpression lambda)
     {
         checkCondition(inputParameters.size() <= 254, NOT_SUPPORTED, "Too many arguments for lambda expression");
-        Class<?> returnType = Primitives.wrap(lambda.getBody().getType().getJavaType());
+        Class<?> returnType = Primitives.wrap(lambda.body().type().getJavaType());
         MethodDefinition method = classDefinition.declareMethod(a(PUBLIC), methodName, type(returnType), inputParameters);
 
         Scope scope = method.getScope();
         Variable wasNull = scope.declareVariable(boolean.class, "wasNull");
-        BytecodeNode compiledBody = innerExpressionCompiler.compile(lambda.getBody(), scope);
+        BytecodeNode compiledBody = innerExpressionCompiler.compile(lambda.body(), scope);
         method.getBody()
                 .putVariable(wasNull, false)
                 .append(compiledBody)
@@ -192,10 +197,12 @@ public final class LambdaBytecodeGenerator
         Variable wasNull = scope.getVariable("wasNull");
 
         // generate values to be captured
-        ImmutableList.Builder<BytecodeExpression> captureVariableBuilder = ImmutableList.builder();
+        ImmutableList.Builder<BytecodeExpression> captureVariableBuilder = ImmutableList.builderWithExpectedSize(captureExpressions.size());
+        List<Variable> captureTempVariables = new ArrayList<>(captureExpressions.size());
         for (RowExpression captureExpression : captureExpressions) {
-            Class<?> valueType = Primitives.wrap(captureExpression.getType().getJavaType());
-            Variable valueVariable = scope.createTempVariable(valueType);
+            Class<?> valueType = Primitives.wrap(captureExpression.type().getJavaType());
+            Variable valueVariable = scope.getOrCreateTempVariable(valueType);
+            captureTempVariables.add(valueVariable);
             block.append(context.generate(captureExpression));
             block.append(boxPrimitiveIfNecessary(scope, valueType));
             block.putVariable(valueVariable);
@@ -213,7 +220,7 @@ public final class LambdaBytecodeGenerator
                 compiledLambda.getParameterTypes().stream()
                         .skip(captureExpressions.size() + 1) // skip capture variables and ConnectorSession
                         .map(ParameterizedType::getAsmType)
-                        .collect(toImmutableList()).toArray(new Type[0]));
+                        .toArray(Type[]::new));
 
         block.append(
                 invokeDynamic(
@@ -225,16 +232,17 @@ public final class LambdaBytecodeGenerator
                         "apply",
                         type(lambdaInterface),
                         captureVariables));
+        captureTempVariables.forEach(scope::releaseTempVariableForReuse);
         return block;
     }
 
-    public static Class<? extends LambdaProvider> compileLambdaProvider(LambdaDefinitionExpression lambdaExpression, Metadata metadata, Class<?> lambdaInterface)
+    public static Class<? extends Supplier<Object>> compileLambdaProvider(LambdaDefinitionExpression lambdaExpression, FunctionManager functionManager, Class<?> lambdaInterface)
     {
         ClassDefinition lambdaProviderClassDefinition = new ClassDefinition(
                 a(PUBLIC, Access.FINAL),
                 makeClassName("LambdaProvider"),
                 type(Object.class),
-                type(LambdaProvider.class));
+                type(Supplier.class, Object.class));
 
         FieldDefinition sessionField = lambdaProviderClassDefinition.declareField(a(PRIVATE), "session", ConnectorSession.class);
 
@@ -246,11 +254,11 @@ public final class LambdaBytecodeGenerator
                 callSiteBinder,
                 cachedInstanceBinder,
                 lambdaExpression,
-                metadata);
+                functionManager);
 
         MethodDefinition method = lambdaProviderClassDefinition.declareMethod(
                 a(PUBLIC),
-                "getLambda",
+                "get",
                 type(Object.class),
                 ImmutableList.of());
 
@@ -260,18 +268,30 @@ public final class LambdaBytecodeGenerator
         scope.declareVariable("session", body, method.getThis().getField(sessionField));
 
         RowExpressionCompiler rowExpressionCompiler = new RowExpressionCompiler(
+                lambdaProviderClassDefinition,
                 callSiteBinder,
                 cachedInstanceBinder,
                 variableReferenceCompiler(ImmutableMap.of()),
-                metadata,
-                compiledLambdaMap);
+                functionManager,
+                compiledLambdaMap,
+                ImmutableList.of());
+
+        List<Parameter> parameters = new ArrayList<>();
+        parameters.add(arg("session", ConnectorSession.class));
+        for (int i = 0; i < lambdaExpression.arguments().size(); i++) {
+            Symbol argument = lambdaExpression.arguments().get(i);
+            Class<?> type = Primitives.wrap(argument.type().getJavaType());
+            parameters.add(arg("lambda_" + i + "_" + BytecodeUtils.sanitizeName(argument.name()), type));
+        }
 
         BytecodeGeneratorContext generatorContext = new BytecodeGeneratorContext(
                 rowExpressionCompiler,
                 scope,
                 callSiteBinder,
                 cachedInstanceBinder,
-                metadata);
+                functionManager,
+                lambdaProviderClassDefinition,
+                parameters);
 
         body.append(
                 generateLambda(
@@ -296,7 +316,8 @@ public final class LambdaBytecodeGenerator
         cachedInstanceBinder.generateInitializations(constructorThisVariable, constructorBody);
         constructorBody.ret();
 
-        return defineClass(lambdaProviderClassDefinition, LambdaProvider.class, callSiteBinder.getBindings(), AccumulatorCompiler.class.getClassLoader());
+        //noinspection unchecked
+        return (Class<? extends Supplier<Object>>) defineClass(lambdaProviderClassDefinition, Supplier.class, callSiteBinder.getBindings(), AccumulatorCompiler.class.getClassLoader());
     }
 
     private static Method getSingleApplyMethod(Class<?> lambdaFunctionInterface)
@@ -307,7 +328,7 @@ public final class LambdaBytecodeGenerator
                 .filter(method -> method.getName().equals("apply"))
                 .collect(toImmutableList());
 
-        checkCondition(applyMethods.size() == 1, COMPILER_ERROR, "Expect to have exactly 1 method with name 'apply' in interface " + lambdaFunctionInterface.getName());
+        checkCondition(applyMethods.size() == 1, COMPILER_ERROR, "Expect to have exactly 1 method with name 'apply' in interface %s", lambdaFunctionInterface.getName());
         return applyMethods.get(0);
     }
 
@@ -348,7 +369,7 @@ public final class LambdaBytecodeGenerator
             @Override
             public BytecodeNode visitVariableReference(VariableReferenceExpression reference, Scope context)
             {
-                ParameterAndType parameterAndType = parameterMap.get(reference.getName());
+                ParameterAndType parameterAndType = parameterMap.get(reference.name());
                 Parameter parameter = parameterAndType.getParameter();
                 Class<?> type = parameterAndType.getType();
                 return new BytecodeBlock()
@@ -358,7 +379,7 @@ public final class LambdaBytecodeGenerator
         };
     }
 
-    static class CompiledLambda
+    public static class CompiledLambda
     {
         // lambda method information
         private final Handle lambdaAsmHandle;

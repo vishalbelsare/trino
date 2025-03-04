@@ -29,6 +29,7 @@ import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.SqlDate;
 import io.trino.spi.type.SqlDecimal;
+import io.trino.spi.type.SqlTime;
 import io.trino.spi.type.SqlTimestamp;
 import io.trino.spi.type.SqlTimestampWithTimeZone;
 import io.trino.spi.type.Type;
@@ -51,6 +52,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
@@ -58,20 +60,19 @@ import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.UuidType.UUID;
 import static java.util.stream.Collectors.toList;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Fail.fail;
 
 public final class TestingOrcPredicate
 {
     public static final int ORC_STRIPE_SIZE = 30_000;
     public static final int ORC_ROW_GROUP_SIZE = 10_000;
 
-    private TestingOrcPredicate()
-    {
-    }
+    private TestingOrcPredicate() {}
 
     public static OrcPredicate createOrcPredicate(Type type, Iterable<?> values)
     {
@@ -88,7 +89,7 @@ public final class TestingOrcPredicate
         if (REAL.equals(type) || DOUBLE.equals(type)) {
             return new DoubleOrcPredicate(transform(expectedValues, value -> ((Number) value).doubleValue()));
         }
-        if (type instanceof VarbinaryType) {
+        if (type instanceof VarbinaryType || type.equals(UUID)) {
             // binary does not have stats
             return new BasicOrcPredicate<>(expectedValues, Object.class);
         }
@@ -102,6 +103,9 @@ public final class TestingOrcPredicate
             return new DecimalOrcPredicate(expectedValues);
         }
 
+        if (TIME_MICROS.equals(type)) {
+            return new LongOrcPredicate(false, transform(expectedValues, value -> ((SqlTime) value).getPicos() / PICOSECONDS_PER_MICROSECOND));
+        }
         if (TIMESTAMP_MILLIS.equals(type)) {
             return new LongOrcPredicate(false, transform(expectedValues, value -> ((SqlTimestamp) value).getMillis()));
         }
@@ -160,7 +164,7 @@ public final class TestingOrcPredicate
         public boolean matches(long numberOfRows, ColumnMetadata<ColumnStatistics> allColumnStatistics)
         {
             ColumnStatistics columnStatistics = allColumnStatistics.get(new OrcColumnId(1));
-            assertTrue(columnStatistics.hasNumberOfValues());
+            assertThat(columnStatistics.hasNumberOfValues()).isTrue();
 
             if (numberOfRows == expectedValues.size()) {
                 // whole file
@@ -199,7 +203,7 @@ public final class TestingOrcPredicate
 
         private void assertChunkStats(List<T> chunk, ColumnStatistics columnStatistics)
         {
-            assertTrue(chunkMatchesStats(chunk, columnStatistics));
+            assertThat(chunkMatchesStats(chunk, columnStatistics)).isTrue();
         }
 
         protected boolean chunkMatchesStats(List<T> chunk, ColumnStatistics columnStatistics)
@@ -220,10 +224,10 @@ public final class TestingOrcPredicate
         @Override
         protected boolean chunkMatchesStats(List<Boolean> chunk, ColumnStatistics columnStatistics)
         {
-            assertNull(columnStatistics.getIntegerStatistics());
-            assertNull(columnStatistics.getDoubleStatistics());
-            assertNull(columnStatistics.getStringStatistics());
-            assertNull(columnStatistics.getDateStatistics());
+            assertThat(columnStatistics.getIntegerStatistics()).isNull();
+            assertThat(columnStatistics.getDoubleStatistics()).isNull();
+            assertThat(columnStatistics.getStringStatistics()).isNull();
+            assertThat(columnStatistics.getDateStatistics()).isNull();
 
             // check basic statistics
             if (!super.chunkMatchesStats(chunk, columnStatistics)) {
@@ -251,10 +255,10 @@ public final class TestingOrcPredicate
         @Override
         protected boolean chunkMatchesStats(List<Double> chunk, ColumnStatistics columnStatistics)
         {
-            assertNull(columnStatistics.getBooleanStatistics());
-            assertNull(columnStatistics.getIntegerStatistics());
-            assertNull(columnStatistics.getStringStatistics());
-            assertNull(columnStatistics.getDateStatistics());
+            assertThat(columnStatistics.getBooleanStatistics()).isNull();
+            assertThat(columnStatistics.getIntegerStatistics()).isNull();
+            assertThat(columnStatistics.getStringStatistics()).isNull();
+            assertThat(columnStatistics.getDateStatistics()).isNull();
 
             // check basic statistics
             if (!super.chunkMatchesStats(chunk, columnStatistics)) {
@@ -316,10 +320,10 @@ public final class TestingOrcPredicate
         @Override
         protected boolean chunkMatchesStats(List<Long> chunk, ColumnStatistics columnStatistics)
         {
-            assertNull(columnStatistics.getBooleanStatistics());
-            assertNull(columnStatistics.getDoubleStatistics());
-            assertNull(columnStatistics.getStringStatistics());
-            assertNull(columnStatistics.getDateStatistics());
+            assertThat(columnStatistics.getBooleanStatistics()).isNull();
+            assertThat(columnStatistics.getDoubleStatistics()).isNull();
+            assertThat(columnStatistics.getStringStatistics()).isNull();
+            assertThat(columnStatistics.getDateStatistics()).isNull();
 
             // check basic statistics
             if (!super.chunkMatchesStats(chunk, columnStatistics)) {
@@ -377,10 +381,10 @@ public final class TestingOrcPredicate
         @Override
         protected boolean chunkMatchesStats(List<String> chunk, ColumnStatistics columnStatistics)
         {
-            assertNull(columnStatistics.getBooleanStatistics());
-            assertNull(columnStatistics.getIntegerStatistics());
-            assertNull(columnStatistics.getDoubleStatistics());
-            assertNull(columnStatistics.getDateStatistics());
+            assertThat(columnStatistics.getBooleanStatistics()).isNull();
+            assertThat(columnStatistics.getIntegerStatistics()).isNull();
+            assertThat(columnStatistics.getDoubleStatistics()).isNull();
+            assertThat(columnStatistics.getDateStatistics()).isNull();
 
             // check basic statistics
             if (!super.chunkMatchesStats(chunk, columnStatistics)) {
@@ -442,14 +446,14 @@ public final class TestingOrcPredicate
         @Override
         protected boolean chunkMatchesStats(List<String> chunk, ColumnStatistics columnStatistics)
         {
-            assertNull(columnStatistics.getBooleanStatistics());
-            assertNull(columnStatistics.getIntegerStatistics());
-            assertNull(columnStatistics.getDoubleStatistics());
-            assertNull(columnStatistics.getDateStatistics());
+            assertThat(columnStatistics.getBooleanStatistics()).isNull();
+            assertThat(columnStatistics.getIntegerStatistics()).isNull();
+            assertThat(columnStatistics.getDoubleStatistics()).isNull();
+            assertThat(columnStatistics.getDateStatistics()).isNull();
 
             // bloom filter for char type in ORC require padded values (padded according to the type in the footer)
             // this is difficult to support so we skip for now
-            assertNull(columnStatistics.getBloomFilter());
+            assertThat(columnStatistics.getBloomFilter()).isNull();
 
             // check basic statistics
             if (!super.chunkMatchesStats(chunk, columnStatistics)) {
@@ -498,10 +502,10 @@ public final class TestingOrcPredicate
         @Override
         protected boolean chunkMatchesStats(List<Long> chunk, ColumnStatistics columnStatistics)
         {
-            assertNull(columnStatistics.getBooleanStatistics());
-            assertNull(columnStatistics.getIntegerStatistics());
-            assertNull(columnStatistics.getDoubleStatistics());
-            assertNull(columnStatistics.getStringStatistics());
+            assertThat(columnStatistics.getBooleanStatistics()).isNull();
+            assertThat(columnStatistics.getIntegerStatistics()).isNull();
+            assertThat(columnStatistics.getDoubleStatistics()).isNull();
+            assertThat(columnStatistics.getStringStatistics()).isNull();
 
             // check basic statistics
             if (!super.chunkMatchesStats(chunk, columnStatistics)) {

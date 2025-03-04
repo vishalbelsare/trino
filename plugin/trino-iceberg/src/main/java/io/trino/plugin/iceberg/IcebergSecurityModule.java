@@ -16,13 +16,13 @@ package io.trino.plugin.iceberg;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.plugin.base.security.AllowAllSecurityModule;
 import io.trino.plugin.base.security.ConnectorAccessControlModule;
+import io.trino.plugin.base.security.FileBasedAccessControlModule;
 import io.trino.plugin.base.security.ReadOnlySecurityModule;
-import io.trino.plugin.iceberg.IcebergSecurityConfig.IcebergSecurity;
+import io.trino.plugin.hive.security.UsingSystemSecurity;
 
-import static io.airlift.configuration.ConditionalModule.conditionalModule;
-import static io.trino.plugin.iceberg.IcebergSecurityConfig.IcebergSecurity.ALLOW_ALL;
-import static io.trino.plugin.iceberg.IcebergSecurityConfig.IcebergSecurity.READ_ONLY;
+import static io.airlift.configuration.ConfigurationAwareModule.combine;
 
 public class IcebergSecurityModule
         extends AbstractConfigurationAwareModule
@@ -31,16 +31,17 @@ public class IcebergSecurityModule
     protected void setup(Binder binder)
     {
         install(new ConnectorAccessControlModule());
-        bindSecurityModule(ALLOW_ALL, new AllowAllSecurityModule());
-        bindSecurityModule(READ_ONLY, new ReadOnlySecurityModule());
-        // SYSTEM: do not bind an ConnectorAccessControl so the engine will use system security with system roles
+        install(switch (buildConfigObject(IcebergSecurityConfig.class).getSecuritySystem()) {
+            case ALLOW_ALL -> combine(new AllowAllSecurityModule(), usingSystemSecurity(false));
+            case READ_ONLY -> combine(new ReadOnlySecurityModule(), usingSystemSecurity(false));
+            case FILE -> combine(new FileBasedAccessControlModule(), usingSystemSecurity(false));
+            // do not bind a ConnectorAccessControl so the engine will use system security with system roles
+            case SYSTEM -> usingSystemSecurity(true);
+        });
     }
 
-    private void bindSecurityModule(IcebergSecurity icebergSecurity, Module module)
+    private static Module usingSystemSecurity(boolean system)
     {
-        install(conditionalModule(
-                IcebergSecurityConfig.class,
-                security -> icebergSecurity == security.getSecuritySystem(),
-                module));
+        return binder -> binder.bind(boolean.class).annotatedWith(UsingSystemSecurity.class).toInstance(system);
     }
 }

@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.hive;
 
+import com.google.common.collect.ImmutableList;
+import io.trino.metastore.HivePartition;
 import io.trino.plugin.hive.util.HiveBucketing.HiveBucketFilter;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.predicate.TupleDomain;
@@ -35,27 +37,27 @@ public class HivePartitionResult
 {
     private final List<HiveColumnHandle> partitionColumns;
     private final Iterable<HivePartition> partitions;
+    private final TupleDomain<ColumnHandle> effectivePredicate;
     private final TupleDomain<HiveColumnHandle> compactEffectivePredicate;
-    private final TupleDomain<ColumnHandle> unenforcedConstraint;
-    private final TupleDomain<ColumnHandle> enforcedConstraint;
-    private final Optional<HiveBucketHandle> bucketHandle;
+    private final Optional<HiveTablePartitioning> tablePartitioning;
     private final Optional<HiveBucketFilter> bucketFilter;
+    private final Optional<List<String>> partitionNames;
 
     public HivePartitionResult(
             List<HiveColumnHandle> partitionColumns,
+            Optional<List<String>> partitionNames,
             Iterable<HivePartition> partitions,
+            TupleDomain<ColumnHandle> effectivePredicate,
             TupleDomain<HiveColumnHandle> compactEffectivePredicate,
-            TupleDomain<ColumnHandle> unenforcedConstraint,
-            TupleDomain<ColumnHandle> enforcedConstraint,
-            Optional<HiveBucketHandle> bucketHandle,
+            Optional<HiveTablePartitioning> tablePartitioning,
             Optional<HiveBucketFilter> bucketFilter)
     {
         this.partitionColumns = requireNonNull(partitionColumns, "partitionColumns is null");
+        this.partitionNames = partitionNames.map(ImmutableList::copyOf);
         this.partitions = requireNonNull(partitions, "partitions is null");
+        this.effectivePredicate = requireNonNull(effectivePredicate, "effectivePredicate is null");
         this.compactEffectivePredicate = requireNonNull(compactEffectivePredicate, "compactEffectivePredicate is null");
-        this.unenforcedConstraint = requireNonNull(unenforcedConstraint, "unenforcedConstraint is null");
-        this.enforcedConstraint = requireNonNull(enforcedConstraint, "enforcedConstraint is null");
-        this.bucketHandle = requireNonNull(bucketHandle, "bucketHandle is null");
+        this.tablePartitioning = requireNonNull(tablePartitioning, "tablePartitioning is null");
         this.bucketFilter = requireNonNull(bucketFilter, "bucketFilter is null");
     }
 
@@ -64,9 +66,19 @@ public class HivePartitionResult
         return partitionColumns;
     }
 
+    public Optional<List<String>> getPartitionNames()
+    {
+        return partitionNames;
+    }
+
     public Iterator<HivePartition> getPartitions()
     {
         return partitions.iterator();
+    }
+
+    public TupleDomain<ColumnHandle> getEffectivePredicate()
+    {
+        return effectivePredicate;
     }
 
     public TupleDomain<HiveColumnHandle> getCompactEffectivePredicate()
@@ -74,19 +86,9 @@ public class HivePartitionResult
         return compactEffectivePredicate;
     }
 
-    public TupleDomain<ColumnHandle> getUnenforcedConstraint()
+    public Optional<HiveTablePartitioning> getTablePartitioning()
     {
-        return unenforcedConstraint;
-    }
-
-    public TupleDomain<ColumnHandle> getEnforcedConstraint()
-    {
-        return enforcedConstraint;
-    }
-
-    public Optional<HiveBucketHandle> getBucketHandle()
-    {
-        return bucketHandle;
+        return tablePartitioning;
     }
 
     public Optional<HiveBucketFilter> getBucketFilter()

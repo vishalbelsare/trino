@@ -15,18 +15,19 @@ package io.trino.plugin.oracle;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.DefunctConfig;
 import io.airlift.units.Duration;
-
-import javax.validation.constraints.AssertTrue;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 
 import java.math.RoundingMode;
 import java.util.Optional;
 
 import static java.util.concurrent.TimeUnit.MINUTES;
 
+@DefunctConfig("oracle.disable-automatic-fetch-size")
 public class OracleConfig
 {
     private boolean synonymsEnabled;
@@ -37,8 +38,8 @@ public class OracleConfig
     private int connectionPoolMinSize = 1;
     private int connectionPoolMaxSize = 30;
     private Duration inactiveConnectionTimeout = new Duration(20, MINUTES);
+    private Integer fetchSize;
 
-    @NotNull
     public boolean isSynonymsEnabled()
     {
         return synonymsEnabled;
@@ -89,7 +90,6 @@ public class OracleConfig
         return this;
     }
 
-    @NotNull
     public boolean isConnectionPoolEnabled()
     {
         return connectionPoolEnabled;
@@ -139,6 +139,19 @@ public class OracleConfig
     public OracleConfig setInactiveConnectionTimeout(Duration inactiveConnectionTimeout)
     {
         this.inactiveConnectionTimeout = inactiveConnectionTimeout;
+        return this;
+    }
+
+    public Optional<@Min(0) Integer> getFetchSize()
+    {
+        return Optional.ofNullable(fetchSize);
+    }
+
+    @Config("oracle.fetch-size")
+    @ConfigDescription("Oracle fetch size, trino specific heuristic is applied if empty")
+    public OracleConfig setFetchSize(Integer fetchSize)
+    {
+        this.fetchSize = fetchSize;
         return this;
     }
 

@@ -22,22 +22,22 @@ import io.trino.spi.Page;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
+import io.trino.sql.gen.OrderingCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.MaterializedResult;
 import io.trino.type.BlockTypeOperators;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.airlift.testing.Assertions.assertGreaterThan;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.operator.GroupByHashYieldAssertion.createPagesWithDistinctHashKeys;
@@ -53,220 +53,205 @@ import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNotNull;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestTopNRankingOperator
 {
-    private ExecutorService executor;
-    private ScheduledExecutorService scheduledExecutor;
-    private DriverContext driverContext;
-    private JoinCompiler joinCompiler;
-    private TypeOperators typeOperators = new TypeOperators();
-    private BlockTypeOperators blockTypeOperators = new BlockTypeOperators(typeOperators);
+    private final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
+    private final ScheduledExecutorService scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
+    private final TypeOperators typeOperators = new TypeOperators();
+    private final OrderingCompiler orderingCompiler = new OrderingCompiler(typeOperators);
+    private final FlatHashStrategyCompiler hashStrategyCompiler = new FlatHashStrategyCompiler(typeOperators);
+    private final BlockTypeOperators blockTypeOperators = new BlockTypeOperators(typeOperators);
 
-    @BeforeMethod
-    public void setUp()
-    {
-        executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
-        scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
-        driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION)
-                .addPipelineContext(0, true, true, false)
-                .addDriverContext();
-        joinCompiler = new JoinCompiler(typeOperators);
-    }
-
-    @AfterMethod(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         executor.shutdownNow();
         scheduledExecutor.shutdownNow();
     }
 
-    @DataProvider(name = "hashEnabledValues")
-    public static Object[][] hashEnabledValuesProvider()
+    @Test
+    public void testPartitioned()
     {
-        return new Object[][] {{true}, {false}};
-    }
+        for (boolean hashEnabled : Arrays.asList(true, false)) {
+            DriverContext driverContext = newDriverContext();
 
-    @DataProvider
-    public Object[][] partial()
-    {
-        return new Object[][] {{true}, {false}};
-    }
-
-    @Test(dataProvider = "hashEnabledValues")
-    public void testPartitioned(boolean hashEnabled)
-    {
-        RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, Ints.asList(0), VARCHAR, DOUBLE);
-        List<Page> input = rowPagesBuilder
-                .row("a", 0.3)
-                .row("b", 0.2)
-                .row("c", 0.1)
-                .row("c", 0.91)
-                .pageBreak()
-                .row("a", 0.4)
-                .pageBreak()
-                .row("a", 0.5)
-                .row("a", 0.6)
-                .row("b", 0.7)
-                .row("b", 0.8)
-                .pageBreak()
-                .row("b", 0.9)
-                .build();
-
-        TopNRankingOperatorFactory operatorFactory = new TopNRankingOperatorFactory(
-                0,
-                new PlanNodeId("test"),
-                ROW_NUMBER,
-                ImmutableList.of(VARCHAR, DOUBLE),
-                Ints.asList(1, 0),
-                Ints.asList(0),
-                ImmutableList.of(VARCHAR),
-                Ints.asList(1),
-                ImmutableList.of(SortOrder.ASC_NULLS_LAST),
-                3,
-                false,
-                Optional.empty(),
-                10,
-                Optional.empty(),
-                joinCompiler,
-                typeOperators,
-                blockTypeOperators);
-
-        MaterializedResult expected = resultBuilder(driverContext.getSession(), DOUBLE, VARCHAR, BIGINT)
-                .row(0.3, "a", 1L)
-                .row(0.4, "a", 2L)
-                .row(0.5, "a", 3L)
-                .row(0.2, "b", 1L)
-                .row(0.7, "b", 2L)
-                .row(0.8, "b", 3L)
-                .row(0.1, "c", 1L)
-                .row(0.91, "c", 2L)
-                .build();
-
-        assertOperatorEquals(operatorFactory, driverContext, input, expected);
-    }
-
-    @Test(dataProvider = "partial")
-    public void testUnPartitioned(boolean partial)
-    {
-        List<Page> input = rowPagesBuilder(VARCHAR, DOUBLE)
-                .row("a", 0.3)
-                .row("b", 0.2)
-                .row("c", 0.1)
-                .row("c", 0.91)
-                .pageBreak()
-                .row("a", 0.4)
-                .pageBreak()
-                .row("a", 0.5)
-                .row("a", 0.6)
-                .row("b", 0.7)
-                .row("b", 0.8)
-                .pageBreak()
-                .row("b", 0.9)
-                .build();
-
-        TopNRankingOperatorFactory operatorFactory = new TopNRankingOperatorFactory(
-                0,
-                new PlanNodeId("test"),
-                ROW_NUMBER,
-                ImmutableList.of(VARCHAR, DOUBLE),
-                Ints.asList(1, 0),
-                Ints.asList(),
-                ImmutableList.of(),
-                Ints.asList(1),
-                ImmutableList.of(SortOrder.ASC_NULLS_LAST),
-                3,
-                partial,
-                Optional.empty(),
-                10,
-                partial ? Optional.of(DataSize.ofBytes(1)) : Optional.empty(),
-                joinCompiler,
-                typeOperators,
-                blockTypeOperators);
-
-        MaterializedResult expected;
-        if (partial) {
-            expected = resultBuilder(driverContext.getSession(), DOUBLE, VARCHAR)
-                    .row(0.1, "c")
-                    .row(0.2, "b")
-                    .row(0.3, "a")
-                    .row(0.4, "a")
-                    .row(0.5, "a")
-                    .row(0.6, "a")
-                    .row(0.7, "b")
-                    .row(0.9, "b")
+            RowPagesBuilder rowPagesBuilder = rowPagesBuilder(hashEnabled, Ints.asList(0), VARCHAR, DOUBLE);
+            List<Page> input = rowPagesBuilder
+                    .row("a", 0.3)
+                    .row("b", 0.2)
+                    .row("c", 0.1)
+                    .row("c", 0.91)
+                    .pageBreak()
+                    .row("a", 0.4)
+                    .pageBreak()
+                    .row("a", 0.5)
+                    .row("a", 0.6)
+                    .row("b", 0.7)
+                    .row("b", 0.8)
+                    .pageBreak()
+                    .row("b", 0.9)
                     .build();
-        }
-        else {
-            expected = resultBuilder(driverContext.getSession(), DOUBLE, VARCHAR, BIGINT)
+
+            TopNRankingOperatorFactory operatorFactory = new TopNRankingOperatorFactory(
+                    0,
+                    new PlanNodeId("test"),
+                    ROW_NUMBER,
+                    ImmutableList.of(VARCHAR, DOUBLE),
+                    Ints.asList(1, 0),
+                    Ints.asList(0),
+                    ImmutableList.of(VARCHAR),
+                    Ints.asList(1),
+                    3,
+                    false,
+                    Optional.empty(),
+                    10,
+                    Optional.empty(),
+                    hashStrategyCompiler,
+                    orderingCompiler.compilePageWithPositionComparator(ImmutableList.of(DOUBLE), Ints.asList(1), ImmutableList.of(SortOrder.ASC_NULLS_LAST)),
+                    blockTypeOperators);
+
+            MaterializedResult expected = resultBuilder(driverContext.getSession(), DOUBLE, VARCHAR, BIGINT)
+                    .row(0.3, "a", 1L)
+                    .row(0.4, "a", 2L)
+                    .row(0.5, "a", 3L)
+                    .row(0.2, "b", 1L)
+                    .row(0.7, "b", 2L)
+                    .row(0.8, "b", 3L)
                     .row(0.1, "c", 1L)
-                    .row(0.2, "b", 2L)
-                    .row(0.3, "a", 3L)
+                    .row(0.91, "c", 2L)
                     .build();
-        }
 
-        assertOperatorEquals(operatorFactory, driverContext, input, expected);
+            assertOperatorEquals(operatorFactory, driverContext, input, expected);
+        }
     }
 
-    @Test(dataProvider = "partial")
-    public void testPartialFlush(boolean partial)
+    @Test
+    public void testUnPartitioned()
     {
-        List<Page> input = rowPagesBuilder(BIGINT, DOUBLE)
-                .row(1L, 0.3)
-                .row(2L, 0.2)
-                .row(3L, 0.1)
-                .row(3L, 0.91)
-                .pageBreak()
-                .row(1L, 0.4)
-                .pageBreak()
-                .row(1L, 0.5)
-                .row(1L, 0.6)
-                .row(2L, 0.7)
-                .row(2L, 0.8)
-                .pageBreak()
-                .row(2L, 0.9)
-                .build();
+        for (boolean partial : Arrays.asList(true, false)) {
+            DriverContext driverContext = newDriverContext();
 
-        TopNRankingOperatorFactory operatorFactory = new TopNRankingOperatorFactory(
-                0,
-                new PlanNodeId("test"),
-                ROW_NUMBER,
-                ImmutableList.of(BIGINT, DOUBLE),
-                Ints.asList(1, 0),
-                Ints.asList(),
-                ImmutableList.of(),
-                Ints.asList(1),
-                ImmutableList.of(SortOrder.ASC_NULLS_LAST),
-                3,
-                partial,
-                Optional.empty(),
-                10,
-                partial ? Optional.of(DataSize.of(1, DataSize.Unit.BYTE)) : Optional.empty(),
-                joinCompiler,
-                typeOperators,
-                blockTypeOperators);
+            List<Page> input = rowPagesBuilder(VARCHAR, DOUBLE)
+                    .row("a", 0.3)
+                    .row("b", 0.2)
+                    .row("c", 0.1)
+                    .row("c", 0.91)
+                    .pageBreak()
+                    .row("a", 0.4)
+                    .pageBreak()
+                    .row("a", 0.5)
+                    .row("a", 0.6)
+                    .row("b", 0.7)
+                    .row("b", 0.8)
+                    .pageBreak()
+                    .row("b", 0.9)
+                    .build();
 
-        TopNRankingOperator operator = (TopNRankingOperator) operatorFactory.createOperator(driverContext);
-        for (Page inputPage : input) {
-            operator.addInput(inputPage);
+            TopNRankingOperatorFactory operatorFactory = new TopNRankingOperatorFactory(
+                    0,
+                    new PlanNodeId("test"),
+                    ROW_NUMBER,
+                    ImmutableList.of(VARCHAR, DOUBLE),
+                    Ints.asList(1, 0),
+                    Ints.asList(),
+                    ImmutableList.of(),
+                    Ints.asList(1),
+                    3,
+                    partial,
+                    Optional.empty(),
+                    10,
+                    partial ? Optional.of(DataSize.ofBytes(1)) : Optional.empty(),
+                    hashStrategyCompiler,
+                    orderingCompiler.compilePageWithPositionComparator(ImmutableList.of(DOUBLE), Ints.asList(1), ImmutableList.of(SortOrder.ASC_NULLS_LAST)),
+                    blockTypeOperators);
+
+            MaterializedResult expected;
             if (partial) {
-                assertFalse(operator.needsInput()); // full
-                assertNotNull(operator.getOutput()); // partial flush
-                assertFalse(operator.isFinished()); // not finished. just partial flushing.
-                assertThatThrownBy(() -> operator.addInput(inputPage)).isInstanceOf(IllegalStateException.class); // while flushing
-                assertNull(operator.getOutput()); // clear flushing
-                assertTrue(operator.needsInput()); // flushing done
+                expected = resultBuilder(driverContext.getSession(), DOUBLE, VARCHAR)
+                        .row(0.1, "c")
+                        .row(0.2, "b")
+                        .row(0.3, "a")
+                        .row(0.4, "a")
+                        .row(0.5, "a")
+                        .row(0.6, "a")
+                        .row(0.7, "b")
+                        .row(0.9, "b")
+                        .build();
             }
             else {
-                assertTrue(operator.needsInput());
-                assertNull(operator.getOutput());
+                expected = resultBuilder(driverContext.getSession(), DOUBLE, VARCHAR, BIGINT)
+                        .row(0.1, "c", 1L)
+                        .row(0.2, "b", 2L)
+                        .row(0.3, "a", 3L)
+                        .build();
+            }
+
+            assertOperatorEquals(operatorFactory, driverContext, input, expected);
+        }
+    }
+
+    @Test
+    public void testPartialFlush()
+    {
+        for (boolean partial : Arrays.asList(true, false)) {
+            DriverContext driverContext = newDriverContext();
+
+            List<Page> input = rowPagesBuilder(BIGINT, DOUBLE)
+                    .row(1L, 0.3)
+                    .row(2L, 0.2)
+                    .row(3L, 0.1)
+                    .row(3L, 0.91)
+                    .pageBreak()
+                    .row(1L, 0.4)
+                    .pageBreak()
+                    .row(1L, 0.5)
+                    .row(1L, 0.6)
+                    .row(2L, 0.7)
+                    .row(2L, 0.8)
+                    .pageBreak()
+                    .row(2L, 0.9)
+                    .build();
+
+            TopNRankingOperatorFactory operatorFactory = new TopNRankingOperatorFactory(
+                    0,
+                    new PlanNodeId("test"),
+                    ROW_NUMBER,
+                    ImmutableList.of(BIGINT, DOUBLE),
+                    Ints.asList(1, 0),
+                    Ints.asList(),
+                    ImmutableList.of(),
+                    Ints.asList(1),
+                    3,
+                    partial,
+                    Optional.empty(),
+                    10,
+                    partial ? Optional.of(DataSize.of(1, DataSize.Unit.BYTE)) : Optional.empty(),
+                    hashStrategyCompiler,
+                    orderingCompiler.compilePageWithPositionComparator(ImmutableList.of(DOUBLE), Ints.asList(1), ImmutableList.of(SortOrder.ASC_NULLS_LAST)),
+                    blockTypeOperators);
+
+            TopNRankingOperator operator = (TopNRankingOperator) operatorFactory.createOperator(driverContext);
+            for (Page inputPage : input) {
+                operator.addInput(inputPage);
+                if (partial) {
+                    assertThat(operator.needsInput()).isFalse(); // full
+                    assertThat(operator.getOutput()).isNotNull(); // partial flush
+                    assertThat(operator.isFinished()).isFalse(); // not finished. just partial flushing.
+                    assertThatThrownBy(() -> operator.addInput(inputPage)).isInstanceOf(IllegalStateException.class); // while flushing
+                    assertThat(operator.getOutput()).isNull(); // clear flushing
+                    assertThat(operator.needsInput()).isTrue(); // flushing done
+                }
+                else {
+                    assertThat(operator.needsInput()).isTrue();
+                    assertThat(operator.getOutput()).isNull();
+                }
             }
         }
     }
@@ -286,14 +271,13 @@ public class TestTopNRankingOperator
                 ImmutableList.of(0),
                 ImmutableList.of(type),
                 Ints.asList(0),
-                ImmutableList.of(SortOrder.ASC_NULLS_LAST),
                 3,
                 false,
                 Optional.empty(),
                 10,
                 Optional.empty(),
-                joinCompiler,
-                typeOperators,
+                hashStrategyCompiler,
+                orderingCompiler.compilePageWithPositionComparator(ImmutableList.of(type), Ints.asList(0), ImmutableList.of(SortOrder.ASC_NULLS_LAST)),
                 blockTypeOperators);
 
         // get result with yield; pick a relatively small buffer for heaps
@@ -302,24 +286,25 @@ public class TestTopNRankingOperator
                 type,
                 operatorFactory,
                 operator -> ((TopNRankingOperator) operator).getGroupedTopNBuilder() == null ? 0 : ((GroupedTopNRowNumberBuilder) ((TopNRankingOperator) operator).getGroupedTopNBuilder()).getGroupByHash().getCapacity(),
-                1_000_000);
-        assertGreaterThan(result.getYieldCount(), 3);
-        assertGreaterThan(result.getMaxReservedBytes(), 5L << 20);
+                450_000);
+        assertThat(result.getYieldCount()).isGreaterThan(3);
+        assertThat(result.getMaxReservedBytes()).isGreaterThan(5L << 20);
 
         int count = 0;
         for (Page page : result.getOutput()) {
-            assertEquals(page.getChannelCount(), 2);
+            assertThat(page.getChannelCount()).isEqualTo(2);
             for (int i = 0; i < page.getPositionCount(); i++) {
-                assertEquals(page.getBlock(1).getByte(i, 0), 1);
+                assertThat(BIGINT.getLong(page.getBlock(1), i)).isEqualTo((byte) 1);
                 count++;
             }
         }
-        assertEquals(count, 1_000 * 500);
+        assertThat(count).isEqualTo(1_000 * 500);
     }
 
     @Test
     public void testRankNullAndNan()
     {
+        DriverContext driverContext = newDriverContext();
         RowPagesBuilder rowPagesBuilder = rowPagesBuilder(VARCHAR, DOUBLE);
         List<Page> input = rowPagesBuilder
                 .row("a", null)
@@ -346,14 +331,13 @@ public class TestTopNRankingOperator
                 Ints.asList(0),
                 ImmutableList.of(VARCHAR),
                 Ints.asList(1),
-                ImmutableList.of(ASC_NULLS_FIRST),
                 3,
                 false,
                 Optional.empty(),
                 10,
                 Optional.empty(),
-                joinCompiler,
-                typeOperators,
+                hashStrategyCompiler,
+                orderingCompiler.compilePageWithPositionComparator(ImmutableList.of(DOUBLE), Ints.asList(1), ImmutableList.of(ASC_NULLS_FIRST)),
                 blockTypeOperators);
 
         MaterializedResult expected = resultBuilder(driverContext.getSession(), DOUBLE, VARCHAR, BIGINT)
@@ -368,5 +352,12 @@ public class TestTopNRankingOperator
                 .build();
 
         assertOperatorEquals(operatorFactory, driverContext, input, expected);
+    }
+
+    private DriverContext newDriverContext()
+    {
+        return createTaskContext(executor, scheduledExecutor, TEST_SESSION)
+                .addPipelineContext(0, true, true, false)
+                .addDriverContext();
     }
 }

@@ -13,27 +13,28 @@
  */
 package io.trino.plugin.google.sheets;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Resources;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.nio.file.Files;
 import java.util.Base64;
 
-import static com.google.common.collect.ImmutableMap.Builder;
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.trino.plugin.google.sheets.TestGoogleSheets.GOOGLE_SHEETS;
+import static io.trino.plugin.google.sheets.SheetsQueryRunner.GOOGLE_SHEETS;
 import static java.io.File.createTempFile;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.testng.Assert.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestSheetsPlugin
 {
     static final String TEST_METADATA_SHEET_ID = "1Es4HhWALUQjoa-bQh4a8B5HROz7dpGMfq_HbfoaW5LM#Tables";
+    static final String DATA_SHEET_ID = "1S625j2oTptRepg6Yci68fCYE1269tdoSjljNOmTgQ3U";
 
     static String getTestCredentialsPath()
             throws Exception
@@ -52,9 +53,12 @@ public class TestSheetsPlugin
     {
         Plugin plugin = new SheetsPlugin();
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        Builder<String, String> propertiesMap = new Builder<String, String>().put("credentials-path", getTestCredentialsPath()).put("metadata-sheet-id", TEST_METADATA_SHEET_ID);
-        Connector connector = factory.create(GOOGLE_SHEETS, propertiesMap.build(), new TestingConnectorContext());
-        assertNotNull(connector);
+        ImmutableMap.Builder<String, String> propertiesMap = ImmutableMap.<String, String>builder()
+                .put("gsheets.credentials-path", getTestCredentialsPath())
+                .put("gsheets.metadata-sheet-id", TEST_METADATA_SHEET_ID)
+                .put("bootstrap.quiet", "true");
+        Connector connector = factory.create(GOOGLE_SHEETS, propertiesMap.buildOrThrow(), new TestingConnectorContext());
+        assertThat(connector).isNotNull();
         connector.shutdown();
     }
 }

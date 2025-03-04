@@ -13,23 +13,26 @@
  */
 package io.trino.plugin.kafka;
 
-import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.DefunctConfig;
+import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
 import io.trino.plugin.kafka.schema.file.FileTableDescriptionSupplier;
 import io.trino.spi.HostAddress;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
-import javax.validation.constraints.Size;
-
+import java.io.File;
+import java.util.List;
 import java.util.Set;
-import java.util.stream.StreamSupport;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 
 @DefunctConfig("kafka.connect-timeout")
@@ -44,6 +47,8 @@ public class KafkaConfig
     private int messagesPerSplit = 100_000;
     private boolean timestampUpperBoundPushDownEnabled;
     private String tableDescriptionSupplier = FileTableDescriptionSupplier.NAME;
+    private List<File> resourceConfigFiles = ImmutableList.of();
+    private String internalFieldPrefix = "_";
 
     @Size(min = 1)
     public Set<HostAddress> getNodes()
@@ -53,9 +58,11 @@ public class KafkaConfig
 
     @Config("kafka.nodes")
     @ConfigDescription("Seed nodes for Kafka cluster. At least one must exist")
-    public KafkaConfig setNodes(String nodes)
+    public KafkaConfig setNodes(Set<String> nodes)
     {
-        this.nodes = (nodes == null) ? null : parseNodes(nodes);
+        this.nodes = nodes.stream()
+                .map(KafkaConfig::toHostAddress)
+                .collect(toImmutableSet());
         return this;
     }
 
@@ -113,14 +120,6 @@ public class KafkaConfig
         return this;
     }
 
-    private static ImmutableSet<HostAddress> parseNodes(String nodes)
-    {
-        Splitter splitter = Splitter.on(',').omitEmptyStrings().trimResults();
-        return StreamSupport.stream(splitter.split(nodes).spliterator(), false)
-                .map(KafkaConfig::toHostAddress)
-                .collect(toImmutableSet());
-    }
-
     private static HostAddress toHostAddress(String value)
     {
         return HostAddress.fromString(value).withDefaultPort(KAFKA_DEFAULT_PORT);
@@ -150,6 +149,36 @@ public class KafkaConfig
     public KafkaConfig setTimestampUpperBoundPushDownEnabled(boolean timestampUpperBoundPushDownEnabled)
     {
         this.timestampUpperBoundPushDownEnabled = timestampUpperBoundPushDownEnabled;
+        return this;
+    }
+
+    @NotNull
+    public List<@FileExists File> getResourceConfigFiles()
+    {
+        return resourceConfigFiles;
+    }
+
+    @Config("kafka.config.resources")
+    @ConfigDescription("Optional config files")
+    public KafkaConfig setResourceConfigFiles(List<String> files)
+    {
+        this.resourceConfigFiles = files.stream()
+                .map(File::new)
+                .collect(toImmutableList());
+        return this;
+    }
+
+    @NotEmpty
+    public String getInternalFieldPrefix()
+    {
+        return internalFieldPrefix;
+    }
+
+    @Config("kafka.internal-column-prefix")
+    @ConfigDescription("Prefix for internal columns")
+    public KafkaConfig setInternalFieldPrefix(String internalFieldPrefix)
+    {
+        this.internalFieldPrefix = internalFieldPrefix;
         return this;
     }
 }

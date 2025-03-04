@@ -13,8 +13,42 @@
  */
 package io.trino.plugin.iceberg;
 
+import org.apache.iceberg.FileFormat;
+
 public enum IcebergFileFormat
 {
     ORC,
     PARQUET,
+    AVRO,
+    /**/;
+
+    public FileFormat toIceberg()
+    {
+        return switch (this) {
+            case ORC -> FileFormat.ORC;
+            case PARQUET -> FileFormat.PARQUET;
+            case AVRO -> FileFormat.AVRO;
+        };
+    }
+
+    public static IcebergFileFormat fromIceberg(FileFormat format)
+    {
+        return switch (format) {
+            case ORC -> ORC;
+            case PARQUET -> PARQUET;
+            case AVRO -> AVRO;
+            // Not used as a data file format
+            case METADATA -> throw new IllegalArgumentException("Unexpected METADATA file format");
+            case PUFFIN -> throw new IllegalArgumentException("Unexpected PUFFIN file format");
+        };
+    }
+
+    public String humanName()
+    {
+        return switch (this) {
+            case AVRO -> "Avro";
+            case ORC -> "ORC";
+            case PARQUET -> "Parquet";
+        };
+    }
 }

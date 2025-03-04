@@ -19,7 +19,8 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.PlanNodeDecorrelator;
@@ -29,10 +30,10 @@ import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
 import io.trino.sql.planner.plan.JoinNode;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.Patterns;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
-import io.trino.sql.tree.Expression;
 
 import java.util.Map;
 import java.util.Optional;
@@ -43,39 +44,41 @@ import static io.trino.matching.Pattern.empty;
 import static io.trino.matching.Pattern.nonEmpty;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.sql.ExpressionUtils.and;
+import static io.trino.sql.ir.Booleans.TRUE;
+import static io.trino.sql.ir.IrUtils.and;
 import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.isDistinctOperator;
+import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.restoreDistinctAggregation;
 import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.rewriteWithMasks;
 import static io.trino.sql.planner.iterative.rule.Util.restrictOutputs;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
-import static io.trino.sql.planner.plan.CorrelatedJoinNode.Type.INNER;
-import static io.trino.sql.planner.plan.CorrelatedJoinNode.Type.LEFT;
+import static io.trino.sql.planner.plan.JoinType.INNER;
+import static io.trino.sql.planner.plan.JoinType.LEFT;
 import static io.trino.sql.planner.plan.Patterns.Aggregation.groupingColumns;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.filter;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.subquery;
 import static io.trino.sql.planner.plan.Patterns.aggregation;
 import static io.trino.sql.planner.plan.Patterns.correlatedJoin;
 import static io.trino.sql.planner.plan.Patterns.source;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static java.util.Objects.requireNonNull;
 
 /**
  * This rule decorrelates a correlated subquery with:
  * - single global aggregation, or
- * - global aggregation over distinct operator (grouped aggregation with no aggregation assignments)
+ * - global aggregation over distinct operator (grouped aggregation with no aggregation assignments),
+ * in case when the distinct operator cannot be de-correlated by PlanNodeDecorrelator
  * It is similar to TransformCorrelatedGlobalAggregationWithProjection rule, but does not support projection over aggregation in the subquery
  * <p>
  * In the case of single aggregation, it transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin LEFT or INNER (correlation: [c], filter: true, output: a, count, agg)
  *      - Input (a, c)
  *      - Aggregation global
  *        count <- count(*)
  *        agg <- agg(b)
  *           - Source (b) with correlated filter (b > c)
- * </pre>
+ * }</pre>
  * Into:
- * <pre>
+ * <pre>{@code
  * - Project (a <- a, count <- count, agg <- agg)
  *      - Aggregation (group by [a, c, unique])
  *        count <- count(*) mask(non_null)
@@ -85,10 +88,10 @@ import static java.util.Objects.requireNonNull;
  *                     - Input (a, c)
  *                - Project (non_null <- TRUE)
  *                     - Source (b) decorrelated
- * </pre>
+ * }</pre>
  * <p>
  * In the case of global aggregation over distinct operator, it transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin LEFT or INNER (correlation: [c], filter: true, output: a, count, agg)
  *      - Input (a, c)
  *      - Aggregation global
@@ -96,9 +99,9 @@ import static java.util.Objects.requireNonNull;
  *        agg <- agg(b)
  *           - Aggregation "distinct operator" group by [b]
  *                - Source (b) with correlated filter (b > c)
- * </pre>
+ * }</pre>
  * Into:
- * <pre>
+ * <pre>{@code
  * - Project (a <- a, count <- count, agg <- agg)
  *      - Aggregation (group by [a, c, unique])
  *        count <- count(*) mask(non_null)
@@ -109,7 +112,7 @@ import static java.util.Objects.requireNonNull;
  *                          - Input (a, c)
  *                     - Project (non_null <- TRUE)
  *                          - Source (b) decorrelated
- * </pre>
+ * }</pre>
  */
 public class TransformCorrelatedGlobalAggregationWithoutProjection
         implements Rule<CorrelatedJoinNode>
@@ -119,17 +122,17 @@ public class TransformCorrelatedGlobalAggregationWithoutProjection
 
     private static final Pattern<CorrelatedJoinNode> PATTERN = correlatedJoin()
             .with(nonEmpty(Patterns.CorrelatedJoin.correlation()))
-            .with(filter().equalTo(TRUE_LITERAL)) // todo non-trivial join filter: adding filter/project on top of aggregation
+            .with(filter().equalTo(TRUE)) // todo non-trivial join filter: adding filter/project on top of aggregation
             .with(subquery().matching(aggregation()
                     .with(empty(groupingColumns()))
                     .with(source().capturedAs(SOURCE))
                     .capturedAs(AGGREGATION)));
 
-    private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
-    public TransformCorrelatedGlobalAggregationWithoutProjection(Metadata metadata)
+    public TransformCorrelatedGlobalAggregationWithoutProjection(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     @Override
@@ -141,21 +144,26 @@ public class TransformCorrelatedGlobalAggregationWithoutProjection
     @Override
     public Result apply(CorrelatedJoinNode correlatedJoinNode, Captures captures, Context context)
     {
-        checkArgument(correlatedJoinNode.getType() == INNER || correlatedJoinNode.getType() == LEFT, "unexpected correlated join type: " + correlatedJoinNode.getType());
+        checkArgument(correlatedJoinNode.getType() == INNER || correlatedJoinNode.getType() == LEFT, "unexpected correlated join type: %s", correlatedJoinNode.getType());
 
-        // if there is another aggregation below the AggregationNode, handle both
         PlanNode source = captures.get(SOURCE);
+
+        // if we fail to decorrelate the nested plan, and it contains a distinct operator, we can extract and special-handle the distinct operator
         AggregationNode distinct = null;
-        if (isDistinctOperator(source)) {
-            distinct = (AggregationNode) source;
-            source = distinct.getSource();
-        }
 
         // decorrelate nested plan
-        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(metadata, context.getSymbolAllocator(), context.getLookup());
+        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(plannerContext, context.getSymbolAllocator(), context.getLookup());
         Optional<PlanNodeDecorrelator.DecorrelatedNode> decorrelatedSource = decorrelator.decorrelateFilters(source, correlatedJoinNode.getCorrelation());
         if (decorrelatedSource.isEmpty()) {
-            return Result.empty();
+            // we failed to decorrelate the nested plan, so check if we can extract a distinct operator from the nested plan
+            if (isDistinctOperator(source)) {
+                distinct = (AggregationNode) source;
+                source = distinct.getSource();
+                decorrelatedSource = decorrelator.decorrelateFilters(source, correlatedJoinNode.getCorrelation());
+            }
+            if (decorrelatedSource.isEmpty()) {
+                return Result.empty();
+            }
         }
 
         source = decorrelatedSource.get().getNode();
@@ -167,7 +175,7 @@ public class TransformCorrelatedGlobalAggregationWithoutProjection
                 source,
                 Assignments.builder()
                         .putIdentities(source.getOutputSymbols())
-                        .put(nonNull, TRUE_LITERAL)
+                        .put(nonNull, TRUE)
                         .build());
 
         // assign unique id on correlated join's input. It will be used to distinguish between original input rows after join
@@ -178,7 +186,7 @@ public class TransformCorrelatedGlobalAggregationWithoutProjection
 
         JoinNode join = new JoinNode(
                 context.getIdAllocator().getNextId(),
-                JoinNode.Type.LEFT,
+                JoinType.LEFT,
                 inputWithUniqueId,
                 source,
                 ImmutableList.of(),
@@ -197,19 +205,14 @@ public class TransformCorrelatedGlobalAggregationWithoutProjection
 
         // restore distinct aggregation
         if (distinct != null) {
-            root = new AggregationNode(
-                    distinct.getId(),
+            root = restoreDistinctAggregation(
+                    distinct,
                     join,
-                    distinct.getAggregations(),
-                    singleGroupingSet(ImmutableList.<Symbol>builder()
+                    ImmutableList.<Symbol>builder()
                             .addAll(join.getLeftOutputSymbols())
                             .add(nonNull)
                             .addAll(distinct.getGroupingKeys())
-                            .build()),
-                    ImmutableList.of(),
-                    distinct.getStep(),
-                    Optional.empty(),
-                    Optional.empty());
+                            .build());
         }
 
         // prepare mask symbols for aggregations
@@ -250,7 +253,7 @@ public class TransformCorrelatedGlobalAggregationWithoutProjection
         globalAggregation = new AggregationNode(
                 globalAggregation.getId(),
                 root,
-                rewriteWithMasks(globalAggregation.getAggregations(), masks.build()),
+                rewriteWithMasks(globalAggregation.getAggregations(), masks.buildOrThrow()),
                 singleGroupingSet(ImmutableList.<Symbol>builder()
                         .addAll(join.getLeftOutputSymbols())
                         .addAll(globalAggregation.getGroupingKeys())

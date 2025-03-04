@@ -16,10 +16,10 @@ package io.trino.sql.planner.plan;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.Immutable;
+import io.trino.operator.RetryPolicy;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
-
-import javax.annotation.concurrent.Immutable;
 
 import java.util.List;
 import java.util.Optional;
@@ -35,6 +35,7 @@ public class RemoteSourceNode
     private final List<Symbol> outputs;
     private final Optional<OrderingScheme> orderingScheme;
     private final ExchangeNode.Type exchangeType; // This is needed to "unfragment" to compute stats correctly.
+    private final RetryPolicy retryPolicy;
 
     @JsonCreator
     public RemoteSourceNode(
@@ -42,7 +43,8 @@ public class RemoteSourceNode
             @JsonProperty("sourceFragmentIds") List<PlanFragmentId> sourceFragmentIds,
             @JsonProperty("outputs") List<Symbol> outputs,
             @JsonProperty("orderingScheme") Optional<OrderingScheme> orderingScheme,
-            @JsonProperty("exchangeType") ExchangeNode.Type exchangeType)
+            @JsonProperty("exchangeType") ExchangeNode.Type exchangeType,
+            @JsonProperty("retryPolicy") RetryPolicy retryPolicy)
     {
         super(id);
 
@@ -52,11 +54,18 @@ public class RemoteSourceNode
         this.outputs = ImmutableList.copyOf(outputs);
         this.orderingScheme = requireNonNull(orderingScheme, "orderingScheme is null");
         this.exchangeType = requireNonNull(exchangeType, "exchangeType is null");
+        this.retryPolicy = requireNonNull(retryPolicy, "retryPolicy is null");
     }
 
-    public RemoteSourceNode(PlanNodeId id, PlanFragmentId sourceFragmentId, List<Symbol> outputs, Optional<OrderingScheme> orderingScheme, ExchangeNode.Type exchangeType)
+    public RemoteSourceNode(
+            PlanNodeId id,
+            PlanFragmentId sourceFragmentId,
+            List<Symbol> outputs,
+            Optional<OrderingScheme> orderingScheme,
+            ExchangeNode.Type exchangeType,
+            RetryPolicy retryPolicy)
     {
-        this(id, ImmutableList.of(sourceFragmentId), outputs, orderingScheme, exchangeType);
+        this(id, ImmutableList.of(sourceFragmentId), outputs, orderingScheme, exchangeType, retryPolicy);
     }
 
     @Override
@@ -90,6 +99,12 @@ public class RemoteSourceNode
         return exchangeType;
     }
 
+    @JsonProperty("retryPolicy")
+    public RetryPolicy getRetryPolicy()
+    {
+        return retryPolicy;
+    }
+
     @Override
     public <R, C> R accept(PlanVisitor<R, C> visitor, C context)
     {
@@ -101,5 +116,16 @@ public class RemoteSourceNode
     {
         checkArgument(newChildren.isEmpty(), "newChildren is not empty");
         return this;
+    }
+
+    public RemoteSourceNode withSourceFragmentIds(List<PlanFragmentId> sourceFragmentIds)
+    {
+        return new RemoteSourceNode(
+                this.getId(),
+                sourceFragmentIds,
+                this.getOutputSymbols(),
+                this.getOrderingScheme(),
+                this.getExchangeType(),
+                this.getRetryPolicy());
     }
 }

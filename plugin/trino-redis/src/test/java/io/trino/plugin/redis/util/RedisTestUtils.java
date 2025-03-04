@@ -15,7 +15,6 @@ package io.trino.plugin.redis.util;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.io.ByteStreams;
 import io.airlift.json.JsonCodec;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.plugin.redis.RedisTableDescription;
@@ -27,6 +26,7 @@ import io.trino.testing.TestingTrinoClient;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.AbstractMap;
+import java.util.HashMap;
 import java.util.Map;
 
 import static java.lang.String.format;
@@ -35,17 +35,19 @@ public final class RedisTestUtils
 {
     private RedisTestUtils() {}
 
-    public static void installRedisPlugin(RedisServer redisServer, QueryRunner queryRunner, Map<SchemaTableName, RedisTableDescription> tableDescriptions)
+    public static void installRedisPlugin(RedisServer redisServer, QueryRunner queryRunner, Map<SchemaTableName, RedisTableDescription> tableDescriptions, Map<String, String> connectorProperties)
     {
         queryRunner.installPlugin(new TestingRedisPlugin(tableDescriptions));
 
-        Map<String, String> redisConfig = ImmutableMap.of(
-                "redis.nodes", redisServer.getHostAndPort().toString(),
-                "redis.table-names", Joiner.on(",").join(tableDescriptions.keySet()),
-                "redis.default-schema", "default",
-                "redis.hide-internal-columns", "true",
-                "redis.key-prefix-schema-table", "true");
-        queryRunner.createCatalog("redis", "redis", redisConfig);
+        // note: additional copy via ImmutableList so that if fails on nulls
+        connectorProperties = new HashMap<>(ImmutableMap.copyOf(connectorProperties));
+        connectorProperties.putIfAbsent("redis.nodes", redisServer.getHostAndPort().toString());
+        connectorProperties.putIfAbsent("redis.table-names", Joiner.on(",").join(tableDescriptions.keySet()));
+        connectorProperties.putIfAbsent("redis.default-schema", "default");
+        connectorProperties.putIfAbsent("redis.hide-internal-columns", "true");
+        connectorProperties.putIfAbsent("redis.key-prefix-schema-table", "true");
+
+        queryRunner.createCatalog("redis", "redis", connectorProperties);
     }
 
     public static void loadTpchTable(RedisServer redisServer, TestingTrinoClient trinoClient, String tableName, QualifiedObjectName tpchTableName, String dataFormat)
@@ -62,26 +64,33 @@ public final class RedisTestUtils
     {
         RedisTableDescription tpchTemplate;
         try (InputStream data = RedisTestUtils.class.getResourceAsStream(format("/tpch/%s/%s.json", dataFormat, schemaTableName.getTableName()))) {
-            tpchTemplate = tableDescriptionJsonCodec.fromJson(ByteStreams.toByteArray(data));
+            tpchTemplate = tableDescriptionJsonCodec.fromJson(data);
         }
 
         RedisTableDescription tableDescription = new RedisTableDescription(
                 schemaTableName.getTableName(),
                 schemaTableName.getSchemaName(),
-                tpchTemplate.getKey(),
-                tpchTemplate.getValue());
+                tpchTemplate.key(),
+                tpchTemplate.value());
 
         return new AbstractMap.SimpleImmutableEntry<>(schemaTableName, tableDescription);
     }
 
-    public static Map.Entry<SchemaTableName, RedisTableDescription> createEmptyTableDescription(SchemaTableName schemaTableName)
+    public static Map.Entry<SchemaTableName, RedisTableDescription> createTableDescription(RedisTableDescription tableDescription)
     {
-        RedisTableDescription tableDescription = new RedisTableDescription(
-                schemaTableName.getTableName(),
-                schemaTableName.getSchemaName(),
-                null,
-                null);
+        SchemaTableName schemaTableName = new SchemaTableName(
+                tableDescription.schemaName(),
+                tableDescription.tableName());
 
         return new AbstractMap.SimpleImmutableEntry<>(schemaTableName, tableDescription);
+    }
+
+    public static RedisTableDescription loadSimpleTableDescription(QueryRunner queryRunner, String valueDataFormat)
+            throws Exception
+    {
+        JsonCodec<RedisTableDescription> tableDescriptionJsonCodec = new CodecSupplier<>(RedisTableDescription.class, queryRunner.getPlannerContext().getTypeManager()).get();
+        try (InputStream data = RedisTestUtils.class.getResourceAsStream(format("/simple/%s_value_table.json", valueDataFormat))) {
+            return tableDescriptionJsonCodec.fromJson(data);
+        }
     }
 }

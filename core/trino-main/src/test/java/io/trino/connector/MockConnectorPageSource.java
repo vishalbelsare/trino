@@ -13,31 +13,26 @@
  */
 package io.trino.connector;
 
-import io.airlift.slice.Slice;
 import io.trino.spi.Page;
-import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorPageSource;
-import io.trino.spi.connector.UpdatablePageSource;
 import io.trino.spi.metrics.Metrics;
 
 import java.io.IOException;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.CompletableFuture.completedFuture;
 
 public class MockConnectorPageSource
-        implements UpdatablePageSource
+        implements ConnectorPageSource
 {
     private final ConnectorPageSource delegate;
+    private final Metrics metrics;
 
-    public MockConnectorPageSource(ConnectorPageSource delegate)
+    public MockConnectorPageSource(ConnectorPageSource delegate, Metrics metrics)
     {
         this.delegate = requireNonNull(delegate, "delegate is null");
+        this.metrics = requireNonNull(metrics, "metrics is null");
     }
 
     @Override
@@ -71,9 +66,9 @@ public class MockConnectorPageSource
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
-        return delegate.getSystemMemoryUsage();
+        return delegate.getMemoryUsage();
     }
 
     @Override
@@ -92,24 +87,6 @@ public class MockConnectorPageSource
     @Override
     public Metrics getMetrics()
     {
-        return delegate.getMetrics();
-    }
-
-    @Override
-    public void deleteRows(Block rowIds) {}
-
-    @Override
-    public void updateRows(Page page, List<Integer> columnValueAndRowIdChannels) {}
-
-    @Override
-    public CompletableFuture<Collection<Slice>> finish()
-    {
-        return completedFuture(Collections.emptyList());
-    }
-
-    @Override
-    public void abort()
-    {
-        UpdatablePageSource.super.abort();
+        return delegate.getMetrics().mergeWith(metrics);
     }
 }

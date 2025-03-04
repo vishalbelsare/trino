@@ -27,19 +27,13 @@ public class BasicRelationStatistics
 
     public BasicRelationStatistics(long rowCount, long dataSize)
     {
-        if (Double.isNaN(rowCount)) {
-            throw new IllegalArgumentException("NaN not allowed as rowCount");
-        }
-        if (Double.isNaN(dataSize)) {
-            throw new IllegalArgumentException("NaN not allowed as dataSize");
-        }
         this.rowCount = rowCount;
         this.dataSize = dataSize;
     }
 
     /**
      * Returns estimated row count.
-     * It is guaranteed that retured value will not be NaN.
+     * It is guaranteed that returned value will not be NaN.
      */
     public double getRowCount()
     {
@@ -48,7 +42,7 @@ public class BasicRelationStatistics
 
     /**
      * Returns estimated data size.
-     * It is guaranteed that retured value will not be NaN.
+     * It is guaranteed that returned value will not be NaN.
      */
     public double getDataSize()
     {

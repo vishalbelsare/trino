@@ -13,10 +13,15 @@
  */
 package io.trino.type;
 
-import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
+import io.trino.spi.type.Type.Range;
+import org.junit.jupiter.api.Test;
+
+import java.util.Optional;
 
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestIntegerType
         extends AbstractTestType
@@ -26,9 +31,9 @@ public class TestIntegerType
         super(INTEGER, Integer.class, createTestBlock());
     }
 
-    public static Block createTestBlock()
+    public static ValueBlock createTestBlock()
     {
-        BlockBuilder blockBuilder = INTEGER.createBlockBuilder(null, 15);
+        BlockBuilder blockBuilder = INTEGER.createFixedSizeBlockBuilder(15);
         INTEGER.writeLong(blockBuilder, 1111);
         INTEGER.writeLong(blockBuilder, 1111);
         INTEGER.writeLong(blockBuilder, 1111);
@@ -40,12 +45,60 @@ public class TestIntegerType
         INTEGER.writeLong(blockBuilder, 3333);
         INTEGER.writeLong(blockBuilder, 3333);
         INTEGER.writeLong(blockBuilder, 4444);
-        return blockBuilder.build();
+        return blockBuilder.buildValueBlock();
     }
 
     @Override
     protected Object getGreaterValue(Object value)
     {
         return ((Long) value) + 1;
+    }
+
+    @Test
+    public void testRange()
+    {
+        Range range = type.getRange().orElseThrow();
+        assertThat(range.getMin()).isEqualTo((long) Integer.MIN_VALUE);
+        assertThat(range.getMax()).isEqualTo((long) Integer.MAX_VALUE);
+    }
+
+    @Test
+    public void testPreviousValue()
+    {
+        long minValue = Integer.MIN_VALUE;
+        long maxValue = Integer.MAX_VALUE;
+
+        assertThat(type.getPreviousValue(minValue))
+                .isEqualTo(Optional.empty());
+        assertThat(type.getPreviousValue(minValue + 1))
+                .isEqualTo(Optional.of(minValue));
+
+        assertThat(type.getPreviousValue(getSampleValue()))
+                .isEqualTo(Optional.of(1110L));
+
+        assertThat(type.getPreviousValue(maxValue - 1))
+                .isEqualTo(Optional.of(maxValue - 2));
+        assertThat(type.getPreviousValue(maxValue))
+                .isEqualTo(Optional.of(maxValue - 1));
+    }
+
+    @Test
+    public void testNextValue()
+    {
+        long minValue = Integer.MIN_VALUE;
+        long maxValue = Integer.MAX_VALUE;
+
+        assertThat(type.getNextValue(minValue))
+                .isEqualTo(Optional.of(minValue + 1));
+        assertThat(type.getNextValue(minValue + 1))
+                .isEqualTo(Optional.of(minValue + 2));
+
+        assertThat(type.getNextValue(getSampleValue()))
+                .isEqualTo(Optional.of(1112L));
+
+        assertThat(type.getNextValue(maxValue - 1))
+                .isEqualTo(Optional.of(maxValue));
+        assertThat(type.getNextValue(maxValue))
+                .isEqualTo(Optional.empty());
     }
 }

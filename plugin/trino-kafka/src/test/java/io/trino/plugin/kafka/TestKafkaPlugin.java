@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.FileWriter;
 import java.io.IOException;
@@ -26,28 +26,32 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.airlift.testing.Assertions.assertInstanceOf;
+import static org.apache.kafka.common.security.auth.SecurityProtocol.SSL;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertNotNull;
 
 public class TestKafkaPlugin
 {
     @Test
     public void testSpinup()
+            throws IOException
     {
         KafkaPlugin plugin = new KafkaPlugin();
 
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        assertInstanceOf(factory, KafkaConnectorFactory.class);
+        assertThat(factory).isInstanceOf(KafkaConnectorFactory.class);
+        Path resource = Files.createTempFile("kafka", ".properties");
 
         Connector connector = factory.create(
                 "test-connector",
                 ImmutableMap.<String, String>builder()
                         .put("kafka.table-names", "test")
                         .put("kafka.nodes", "localhost:9092")
-                        .build(),
+                        .put("kafka.config.resources", resource.toString())
+                        .put("bootstrap.quiet", "true")
+                        .buildOrThrow(),
                 new TestingConnectorContext());
-        assertNotNull(connector);
+        assertThat(connector).isNotNull();
         connector.shutdown();
     }
 
@@ -58,7 +62,7 @@ public class TestKafkaPlugin
         KafkaPlugin plugin = new KafkaPlugin();
 
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        assertInstanceOf(factory, KafkaConnectorFactory.class);
+        assertThat(factory).isInstanceOf(KafkaConnectorFactory.class);
 
         String secret = "confluent";
         Path keystorePath = Files.createTempFile("keystore", ".jks");
@@ -81,9 +85,10 @@ public class TestKafkaPlugin
                         .put("kafka.ssl.truststore.location", truststorePath.toString())
                         .put("kafka.ssl.truststore.password", "truststore-password")
                         .put("kafka.ssl.endpoint-identification-algorithm", "https")
-                        .build(),
+                        .put("bootstrap.quiet", "true")
+                        .buildOrThrow(),
                 new TestingConnectorContext());
-        assertNotNull(connector);
+        assertThat(connector).isNotNull();
         connector.shutdown();
     }
 
@@ -94,7 +99,7 @@ public class TestKafkaPlugin
         KafkaPlugin plugin = new KafkaPlugin();
 
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        assertInstanceOf(factory, KafkaConnectorFactory.class);
+        assertThat(factory).isInstanceOf(KafkaConnectorFactory.class);
 
         Path truststorePath = Files.createTempFile("test", ".jks");
 
@@ -112,7 +117,8 @@ public class TestKafkaPlugin
                         .put("kafka.ssl.truststore.location", truststorePath.toString())
                         .put("kafka.ssl.truststore.password", "truststore-password")
                         .put("kafka.ssl.endpoint-identification-algorithm", "https")
-                        .build(),
+                        .put("bootstrap.quiet", "true")
+                        .buildOrThrow(),
                 new TestingConnectorContext()))
                 .hasMessageContaining("Error: Invalid configuration property kafka.ssl.keystore.location: file does not exist: /not/a/real/path");
     }
@@ -124,7 +130,7 @@ public class TestKafkaPlugin
         KafkaPlugin plugin = new KafkaPlugin();
 
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
-        assertInstanceOf(factory, KafkaConnectorFactory.class);
+        assertThat(factory).isInstanceOf(KafkaConnectorFactory.class);
 
         Path keystorePath = Files.createTempFile("test", ".jks");
 
@@ -142,9 +148,57 @@ public class TestKafkaPlugin
                         .put("kafka.ssl.truststore.location", "/not/a/real/path")
                         .put("kafka.ssl.truststore.password", "truststore-password")
                         .put("kafka.ssl.endpoint-identification-algorithm", "https")
-                        .build(),
+                        .put("bootstrap.quiet", "true")
+                        .buildOrThrow(),
                 new TestingConnectorContext()))
                 .hasMessageContaining("Error: Invalid configuration property kafka.ssl.truststore.location: file does not exist: /not/a/real/path");
+    }
+
+    @Test
+    public void testResourceConfigMissingFileSpindown()
+    {
+        KafkaPlugin plugin = new KafkaPlugin();
+
+        ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
+        assertThat(factory).isInstanceOf(KafkaConnectorFactory.class);
+
+        assertThatThrownBy(() -> factory.create(
+                "test-connector",
+                ImmutableMap.<String, String>builder()
+                        .put("kafka.table-names", "test")
+                        .put("kafka.nodes", "localhost:9092")
+                        .put("kafka.security-protocol", "PLAINTEXT")
+                        .put("kafka.config.resources", "/not/a/real/path/1,/not/a/real/path/2")
+                        .put("bootstrap.quiet", "true")
+                        .buildOrThrow(),
+                new TestingConnectorContext()))
+                .hasMessageContainingAll("Error: Invalid configuration property", ": file does not exist: /not/a/real/path/1", ": file does not exist: /not/a/real/path/2");
+    }
+
+    @Test
+    public void testConfigResourceSpinup()
+            throws IOException
+    {
+        KafkaPlugin plugin = new KafkaPlugin();
+
+        ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
+        assertThat(factory).isInstanceOf(KafkaConnectorFactory.class);
+
+        String nativeContent = "security.protocol=" + SSL;
+        Path nativeKafkaResourcePath = Files.createTempFile("native_kafka", ".properties");
+        writeToFile(nativeKafkaResourcePath, nativeContent);
+
+        Connector connector = factory.create(
+                "test-connector",
+                ImmutableMap.<String, String>builder()
+                        .put("kafka.table-names", "test")
+                        .put("kafka.nodes", "localhost:9092")
+                        .put("kafka.config.resources", nativeKafkaResourcePath.toString())
+                        .put("bootstrap.quiet", "true")
+                        .buildOrThrow(),
+                new TestingConnectorContext());
+        assertThat(connector).isNotNull();
+        connector.shutdown();
     }
 
     private void writeToFile(Path filepath, String content)

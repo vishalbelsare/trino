@@ -37,12 +37,36 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.plugin.tpch.TpchMetadata.getTrinoType;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.tpch.TpchColumnTypes.IDENTIFIER;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class TpchRecordSet<E extends TpchEntity>
         implements RecordSet
 {
+    public static <E extends TpchEntity> RecordSet getRecordSet(
+            TpchTable<E> table,
+            List<? extends ColumnHandle> columns,
+            double scaleFactor,
+            int partNumber,
+            int totalParts,
+            TupleDomain<ColumnHandle> predicate,
+            DecimalTypeMapping decimalTypeMapping)
+    {
+        ImmutableList.Builder<TpchColumn<E>> builder = ImmutableList.builder();
+        for (ColumnHandle column : columns) {
+            String columnName = ((TpchColumnHandle) column).columnName();
+            if (columnName.equalsIgnoreCase(TpchMetadata.ROW_NUMBER_COLUMN_NAME)) {
+                builder.add(new RowNumberTpchColumn<>());
+            }
+            else {
+                builder.add(table.getColumn(columnName));
+            }
+        }
+
+        return createTpchRecordSet(table, builder.build(), decimalTypeMapping, scaleFactor, partNumber + 1, totalParts, predicate);
+    }
+
     public static <E extends TpchEntity> TpchRecordSet<E> createTpchRecordSet(TpchTable<E> table, double scaleFactor)
     {
         return createTpchRecordSet(table, table.getColumns(), DecimalTypeMapping.DOUBLE, scaleFactor, 1, 1, TupleDomain.all());
@@ -238,8 +262,8 @@ public class TpchRecordSet<E extends TpchEntity>
                             column -> column,
                             column -> {
                                 TpchColumnHandle tpchColumnHandle = (TpchColumnHandle) column;
-                                Type type = tpchColumnHandle.getType();
-                                TpchColumn<E> tpchColumn = table.getColumn(tpchColumnHandle.getColumnName());
+                                Type type = tpchColumnHandle.type();
+                                TpchColumn<E> tpchColumn = table.getColumn(tpchColumnHandle.columnName());
                                 return NullableValue.of(type, getTrinoObject(tpchColumn, type));
                             }));
 
@@ -253,20 +277,64 @@ public class TpchRecordSet<E extends TpchEntity>
             if (type.getJavaType() == long.class) {
                 return getLong(column);
             }
-            else if (type.getJavaType() == double.class) {
+            if (type.getJavaType() == double.class) {
                 return getDouble(column);
             }
-            else if (type.getJavaType() == Slice.class) {
+            if (type.getJavaType() == Slice.class) {
                 return getSlice(column);
             }
-            else {
-                throw new TrinoException(NOT_SUPPORTED, format("Unsupported column type %s", type.getDisplayName()));
-            }
+            throw new TrinoException(NOT_SUPPORTED, format("Unsupported column type %s", type.getDisplayName()));
         }
 
         private TpchColumn<E> getTpchColumn(int field)
         {
             return columns.get(field);
+        }
+    }
+
+    private static class RowNumberTpchColumn<E extends TpchEntity>
+            implements TpchColumn<E>
+    {
+        @Override
+        public String getColumnName()
+        {
+            return TpchMetadata.ROW_NUMBER_COLUMN_NAME;
+        }
+
+        @Override
+        public TpchColumnType getType()
+        {
+            return IDENTIFIER;
+        }
+
+        @Override
+        public double getDouble(E entity)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public long getIdentifier(E entity)
+        {
+            return entity.rowNumber();
+        }
+
+        @Override
+        public int getInteger(E entity)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public String getString(E entity)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int getDate(E entity)
+        {
+            throw new UnsupportedOperationException();
         }
     }
 }

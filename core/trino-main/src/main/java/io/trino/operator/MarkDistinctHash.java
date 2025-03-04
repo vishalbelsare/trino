@@ -20,11 +20,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.Type;
-import io.trino.sql.gen.JoinCompiler;
-import io.trino.type.BlockTypeOperators;
 
 import java.util.List;
-import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
 import static io.trino.operator.GroupByHash.createGroupByHash;
@@ -34,14 +31,15 @@ public class MarkDistinctHash
     private final GroupByHash groupByHash;
     private long nextDistinctId;
 
-    public MarkDistinctHash(Session session, List<Type> types, int[] channels, Optional<Integer> hashChannel, JoinCompiler joinCompiler, BlockTypeOperators blockTypeOperators, UpdateMemory updateMemory)
+    public MarkDistinctHash(Session session, List<Type> types, boolean hasPrecomputedHash, FlatHashStrategyCompiler hashStrategyCompiler, UpdateMemory updateMemory)
     {
-        this(session, types, channels, hashChannel, 10_000, joinCompiler, blockTypeOperators, updateMemory);
+        this.groupByHash = createGroupByHash(session, types, hasPrecomputedHash, 10_000, hashStrategyCompiler, updateMemory);
     }
 
-    public MarkDistinctHash(Session session, List<Type> types, int[] channels, Optional<Integer> hashChannel, int expectedDistinctValues, JoinCompiler joinCompiler, BlockTypeOperators blockTypeOperators, UpdateMemory updateMemory)
+    private MarkDistinctHash(MarkDistinctHash other)
     {
-        this.groupByHash = createGroupByHash(session, types, channels, hashChannel, expectedDistinctValues, joinCompiler, blockTypeOperators, updateMemory);
+        groupByHash = other.groupByHash.copy();
+        nextDistinctId = other.nextDistinctId;
     }
 
     public long getEstimatedSize()
@@ -51,7 +49,7 @@ public class MarkDistinctHash
 
     public Work<Block> markDistinctRows(Page page)
     {
-        return new TransformWork<>(groupByHash.getGroupIds(page), this::processNextGroupIds);
+        return new TransformWork<>(groupByHash.getGroupIds(page), groupIds -> processNextGroupIds(groupByHash.getGroupCount(), groupIds, page.getPositionCount()));
     }
 
     @VisibleForTesting
@@ -60,24 +58,23 @@ public class MarkDistinctHash
         return groupByHash.getCapacity();
     }
 
-    private Block processNextGroupIds(GroupByIdBlock ids)
+    private Block processNextGroupIds(int groupCount, int[] ids, int positions)
     {
-        int positions = ids.getPositionCount();
         if (positions > 1) {
             // must have > 1 positions to benefit from using a RunLengthEncoded block
-            if (nextDistinctId == ids.getGroupCount()) {
+            if (nextDistinctId == groupCount) {
                 // no new distinct positions
-                return new RunLengthEncodedBlock(BooleanType.createBlockForSingleNonNullValue(false), positions);
+                return RunLengthEncodedBlock.create(BooleanType.createBlockForSingleNonNullValue(false), positions);
             }
-            if (nextDistinctId + positions == ids.getGroupCount()) {
+            if (nextDistinctId + positions == groupCount) {
                 // all positions are distinct
-                nextDistinctId = ids.getGroupCount();
-                return new RunLengthEncodedBlock(BooleanType.createBlockForSingleNonNullValue(true), positions);
+                nextDistinctId = groupCount;
+                return RunLengthEncodedBlock.create(BooleanType.createBlockForSingleNonNullValue(true), positions);
             }
         }
         byte[] distinctMask = new byte[positions];
         for (int position = 0; position < distinctMask.length; position++) {
-            if (ids.getGroupId(position) == nextDistinctId) {
+            if (ids[position] == nextDistinctId) {
                 distinctMask[position] = 1;
                 nextDistinctId++;
             }
@@ -85,7 +82,12 @@ public class MarkDistinctHash
                 distinctMask[position] = 0;
             }
         }
-        checkState(nextDistinctId == ids.getGroupCount());
+        checkState(nextDistinctId == groupCount);
         return BooleanType.wrapByteArrayAsBooleanBlockWithoutNulls(distinctMask);
+    }
+
+    public MarkDistinctHash copy()
+    {
+        return new MarkDistinctHash(this);
     }
 }

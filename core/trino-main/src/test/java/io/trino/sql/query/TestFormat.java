@@ -13,28 +13,25 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestFormat
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -51,7 +48,7 @@ public class TestFormat
         assertThat(assertions.query("SELECT format('%s', sum(k)) FROM (VALUES 1, 2, 3) t(k)")).matches("VALUES VARCHAR '6'");
         assertThat(assertions.query("SELECT format(arbitrary(s), sum(k)) FROM (VALUES ('%s', 1), ('%s', 2), ('%s', 3)) t(s, k)")).matches("VALUES VARCHAR '6'");
 
-        assertThatThrownBy(() -> assertions.query("SELECT format(s, 1) FROM (VALUES ('%s', 1)) t(s, k) GROUP BY k"))
-                .hasMessageMatching("\\Qline 1:8: 'format(s, 1)' must be an aggregate expression or appear in GROUP BY clause\\E");
+        assertThat(assertions.query("SELECT format(s, 1) FROM (VALUES ('%s', 1)) t(s, k) GROUP BY k"))
+                .failure().hasMessageMatching("\\Qline 1:8: 'format(s, 1)' must be an aggregate expression or appear in GROUP BY clause\\E");
     }
 }

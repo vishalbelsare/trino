@@ -14,7 +14,7 @@
 package io.trino.cli;
 
 import com.google.common.collect.ImmutableList;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.StringWriter;
@@ -25,12 +25,11 @@ import static io.trino.cli.CsvPrinter.CsvOutputFormat.NO_HEADER_AND_QUOTES;
 import static io.trino.cli.CsvPrinter.CsvOutputFormat.NO_QUOTES;
 import static io.trino.cli.CsvPrinter.CsvOutputFormat.STANDARD;
 import static io.trino.cli.TestAlignedTablePrinter.item;
-import static io.trino.cli.TestAlignedTablePrinter.list;
 import static io.trino.cli.TestAlignedTablePrinter.map;
 import static io.trino.cli.TestAlignedTablePrinter.row;
 import static io.trino.cli.TestAlignedTablePrinter.rows;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestCsvPrinter
 {
@@ -62,7 +61,7 @@ public class TestCsvPrinter
                 "text\",\"4567\"\n" +
                 "\"bye\",\"done\",\"-15\"\n";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     @Test
@@ -75,7 +74,7 @@ public class TestCsvPrinter
 
         printer.finish();
 
-        assertEquals(writer.getBuffer().toString(), "\"first\",\"last\"\n");
+        assertThat(writer.getBuffer().toString()).isEqualTo("\"first\",\"last\"\n");
     }
 
     @Test
@@ -96,7 +95,7 @@ public class TestCsvPrinter
                 "\"hello\",\"world\",\"123\"\n" +
                 "\"a\",\"\",\"4.5\"\n";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     @Test
@@ -110,15 +109,17 @@ public class TestCsvPrinter
         printRows(
                 printer,
                 row("hello", "world", 123),
-                row("a", null, 4.5));
+                row("a", null, 4.5),
+                row("\"quote\"", null, 2137));
         printer.finish();
 
         String expected = "" +
                 "first,last,quantity\n" +
                 "hello,world,123\n" +
-                "a,,4.5\n";
+                "a,,4.5\n" + "" +
+                "\"quote\",,2137\n";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     @Test
@@ -131,7 +132,7 @@ public class TestCsvPrinter
 
         printer.finish();
 
-        assertEquals(writer.getBuffer().toString(), "first,last\n");
+        assertThat(writer.getBuffer().toString()).isEqualTo("first,last\n");
     }
 
     @Test
@@ -152,7 +153,7 @@ public class TestCsvPrinter
                 "hello,world,123\n" +
                 "a,,4.5\n";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     @Test
@@ -167,7 +168,7 @@ public class TestCsvPrinter
 
         String expected = "";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     @Test
@@ -183,7 +184,7 @@ public class TestCsvPrinter
 
         String expected = "\"68 65 6c 6c 6f\",\"\",\"123\"\n";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     @Test
@@ -199,7 +200,7 @@ public class TestCsvPrinter
         String expected = "\"map\",\"value\"\n" +
                 "\"{key=76 61 6c 75 65}\",\"value\"\n";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     @Test
@@ -209,13 +210,13 @@ public class TestCsvPrinter
         StringWriter writer = new StringWriter();
         List<String> fieldNames = ImmutableList.of("list", "value");
         OutputPrinter printer = new CsvPrinter(fieldNames, writer, STANDARD);
-        printRows(printer, row(list("value".getBytes(UTF_8)), "value"));
+        printRows(printer, row(ImmutableList.of("value".getBytes(UTF_8)), "value"));
         printer.finish();
 
         String expected = "\"list\",\"value\"\n" +
                 "\"[76 61 6c 75 65]\",\"value\"\n";
 
-        assertEquals(writer.getBuffer().toString(), expected);
+        assertThat(writer.getBuffer().toString()).isEqualTo(expected);
     }
 
     private static void printRows(OutputPrinter printer, List<?>... rows)

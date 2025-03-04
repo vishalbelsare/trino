@@ -19,7 +19,7 @@ import com.google.common.collect.ImmutableSet;
 import io.trino.matching.Capture;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
-import io.trino.metadata.Metadata;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.optimizations.PlanNodeDecorrelator;
@@ -27,6 +27,7 @@ import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
 import io.trino.sql.planner.plan.JoinNode;
+import io.trino.sql.planner.plan.JoinType;
 import io.trino.sql.planner.plan.Patterns;
 import io.trino.sql.planner.plan.PlanNode;
 
@@ -35,10 +36,12 @@ import java.util.Optional;
 import static io.trino.matching.Capture.newCapture;
 import static io.trino.matching.Pattern.nonEmpty;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.isDistinctOperator;
+import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.restoreDistinctAggregation;
 import static io.trino.sql.planner.iterative.rule.Util.restrictOutputs;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
-import static io.trino.sql.planner.plan.CorrelatedJoinNode.Type.INNER;
+import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.sql.planner.plan.Patterns.Aggregation.groupingColumns;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.filter;
 import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.subquery;
@@ -46,26 +49,26 @@ import static io.trino.sql.planner.plan.Patterns.CorrelatedJoin.type;
 import static io.trino.sql.planner.plan.Patterns.aggregation;
 import static io.trino.sql.planner.plan.Patterns.correlatedJoin;
 import static io.trino.sql.planner.plan.Patterns.source;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static java.util.Objects.requireNonNull;
 
 /**
  * This rule decorrelates a correlated subquery of INNER correlated join with:
  * - single grouped aggregation, or
- * - grouped aggregation over distinct operator (grouped aggregation with no aggregation assignments)
+ * - grouped aggregation over distinct operator (grouped aggregation with no aggregation assignments),
+ * in case when the distinct operator cannot be de-correlated by PlanNodeDecorrelator
  * It is similar to TransformCorrelatedGroupedAggregationWithProjection rule, but does not support projection over aggregation in the subquery
  * <p>
  * In the case of single aggregation, it transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin INNER (correlation: [c], filter: true, output: a, count, agg)
  *      - Input (a, c)
  *      - Aggregation (group by b)
  *        count <- count(*)
  *        agg <- agg(d)
  *           - Source (b, d) with correlated filter (b > c)
- * </pre>
+ * }</pre>
  * Into:
- * <pre>
+ * <pre>{@code
  * - Project (a <- a, count <- count, agg <- agg)
  *      - Aggregation (group by [a, c, unique, b])
  *        count <- count(*)
@@ -74,10 +77,10 @@ import static java.util.Objects.requireNonNull;
  *                - UniqueId (unique)
  *                     - Input (a, c)
  *                - Source (b, d) decorrelated
- * </pre>
+ * }</pre>
  * <p>
  * In the case of grouped aggregation over distinct operator, it transforms:
- * <pre>
+ * <pre>{@code
  * - CorrelatedJoin INNER (correlation: [c], filter: true, output: a, count, agg)
  *      - Input (a, c)
  *      - Aggregation (group by b)
@@ -85,9 +88,9 @@ import static java.util.Objects.requireNonNull;
  *        agg <- agg(b)
  *           - Aggregation "distinct operator" group by [b]
  *                - Source (b) with correlated filter (b > c)
- * </pre>
+ * }</pre>
  * Into:
- * <pre>
+ * <pre>{@code
  * - Project (a <- a, count <- count, agg <- agg)
  *      - Aggregation (group by [a, c, unique, b])
  *        count <- count(*)
@@ -97,7 +100,7 @@ import static java.util.Objects.requireNonNull;
  *                     - UniqueId (unique)
  *                          - Input (a, c)
  *                     - Source (b) decorrelated
- * </pre>
+ * }</pre>
  */
 public class TransformCorrelatedGroupedAggregationWithoutProjection
         implements Rule<CorrelatedJoinNode>
@@ -108,18 +111,18 @@ public class TransformCorrelatedGroupedAggregationWithoutProjection
     private static final Pattern<CorrelatedJoinNode> PATTERN = correlatedJoin()
             .with(type().equalTo(INNER))
             .with(nonEmpty(Patterns.CorrelatedJoin.correlation()))
-            .with(filter().equalTo(TRUE_LITERAL))
+            .with(filter().equalTo(TRUE))
             .with(subquery().matching(aggregation()
                     .with(nonEmpty(groupingColumns()))
                     .matching(aggregation -> aggregation.getGroupingSetCount() == 1)
                     .with(source().capturedAs(SOURCE))
                     .capturedAs(AGGREGATION)));
 
-    private final Metadata metadata;
+    private final PlannerContext plannerContext;
 
-    public TransformCorrelatedGroupedAggregationWithoutProjection(Metadata metadata)
+    public TransformCorrelatedGroupedAggregationWithoutProjection(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     @Override
@@ -131,19 +134,24 @@ public class TransformCorrelatedGroupedAggregationWithoutProjection
     @Override
     public Result apply(CorrelatedJoinNode correlatedJoinNode, Captures captures, Context context)
     {
-        // if there is another aggregation below the AggregationNode, handle both
         PlanNode source = captures.get(SOURCE);
+
+        // if we fail to decorrelate the nested plan, and it contains a distinct operator, we can extract and special-handle the distinct operator
         AggregationNode distinct = null;
-        if (isDistinctOperator(source)) {
-            distinct = (AggregationNode) source;
-            source = distinct.getSource();
-        }
 
         // decorrelate nested plan
-        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(metadata, context.getSymbolAllocator(), context.getLookup());
+        PlanNodeDecorrelator decorrelator = new PlanNodeDecorrelator(plannerContext, context.getSymbolAllocator(), context.getLookup());
         Optional<PlanNodeDecorrelator.DecorrelatedNode> decorrelatedSource = decorrelator.decorrelateFilters(source, correlatedJoinNode.getCorrelation());
         if (decorrelatedSource.isEmpty()) {
-            return Result.empty();
+            // we failed to decorrelate the nested plan, so check if we can extract a distinct operator from the nested plan
+            if (isDistinctOperator(source)) {
+                distinct = (AggregationNode) source;
+                source = distinct.getSource();
+                decorrelatedSource = decorrelator.decorrelateFilters(source, correlatedJoinNode.getCorrelation());
+            }
+            if (decorrelatedSource.isEmpty()) {
+                return Result.empty();
+            }
         }
 
         source = decorrelatedSource.get().getNode();
@@ -156,7 +164,7 @@ public class TransformCorrelatedGroupedAggregationWithoutProjection
 
         JoinNode join = new JoinNode(
                 context.getIdAllocator().getNextId(),
-                JoinNode.Type.INNER,
+                JoinType.INNER,
                 inputWithUniqueId,
                 source,
                 ImmutableList.of(),
@@ -173,34 +181,29 @@ public class TransformCorrelatedGroupedAggregationWithoutProjection
 
         // restore distinct aggregation
         if (distinct != null) {
-            distinct = new AggregationNode(
-                    distinct.getId(),
+            distinct = restoreDistinctAggregation(
+                    distinct,
                     join,
-                    distinct.getAggregations(),
-                    singleGroupingSet(ImmutableList.<Symbol>builder()
+                    ImmutableList.<Symbol>builder()
                             .addAll(join.getLeftOutputSymbols())
                             .addAll(distinct.getGroupingKeys())
-                            .build()),
-                    ImmutableList.of(),
-                    distinct.getStep(),
-                    Optional.empty(),
-                    Optional.empty());
+                            .build());
         }
 
         // restore grouped aggregation
         AggregationNode groupedAggregation = captures.get(AGGREGATION);
-        groupedAggregation = new AggregationNode(
-                groupedAggregation.getId(),
-                distinct != null ? distinct : join,
-                groupedAggregation.getAggregations(),
-                singleGroupingSet(ImmutableList.<Symbol>builder()
-                        .addAll(join.getLeftOutputSymbols())
-                        .addAll(groupedAggregation.getGroupingKeys())
-                        .build()),
-                ImmutableList.of(),
-                groupedAggregation.getStep(),
-                Optional.empty(),
-                Optional.empty());
+        groupedAggregation = AggregationNode.builderFrom(groupedAggregation)
+                .setSource(distinct != null ? distinct : join)
+                .setAggregations(groupedAggregation.getAggregations())
+                .setGroupingSets(
+                        singleGroupingSet(ImmutableList.<Symbol>builder()
+                                .addAll(join.getLeftOutputSymbols())
+                                .addAll(groupedAggregation.getGroupingKeys())
+                                .build()))
+                .setPreGroupedSymbols(ImmutableList.of())
+                .setHashSymbol(Optional.empty())
+                .setGroupIdSymbol(Optional.empty())
+                .build();
 
         // restrict outputs
         Optional<PlanNode> project = restrictOutputs(context.getIdAllocator(), groupedAggregation, ImmutableSet.copyOf(correlatedJoinNode.getOutputSymbols()));

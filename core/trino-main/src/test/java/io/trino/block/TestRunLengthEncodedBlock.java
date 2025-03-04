@@ -19,13 +19,13 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.ByteArrayBlockBuilder;
 import io.trino.spi.block.IntArrayBlockBuilder;
 import io.trino.spi.block.LongArrayBlockBuilder;
-import io.trino.spi.block.RunLengthBlockEncoding;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.block.ShortArrayBlockBuilder;
+import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRunLengthEncodedBlock
         extends AbstractTestBlock
@@ -41,18 +41,18 @@ public class TestRunLengthEncodedBlock
     private void assertRleBlock(int positionCount)
     {
         Slice expectedValue = createExpectedValue(0);
-        Block block = new RunLengthEncodedBlock(createSingleValueBlock(expectedValue), positionCount);
+        Block block = RunLengthEncodedBlock.create(createSingleValueBlock(expectedValue), positionCount);
         Slice[] expectedValues = new Slice[positionCount];
         for (int position = 0; position < positionCount; position++) {
             expectedValues[position] = expectedValue;
         }
-        assertBlock(block, TestRunLengthEncodedBlock::createBlockBuilder, expectedValues);
+        assertBlock(block, expectedValues);
     }
 
     private static Block createSingleValueBlock(Slice expectedValue)
     {
-        BlockBuilder blockBuilder = new VariableWidthBlockBuilder(null, 1, expectedValue.length());
-        blockBuilder.writeBytes(expectedValue, 0, expectedValue.length()).closeEntry();
+        VariableWidthBlockBuilder blockBuilder = new VariableWidthBlockBuilder(null, 1, expectedValue.length());
+        blockBuilder.writeEntry(expectedValue);
         return blockBuilder.build();
     }
 
@@ -62,11 +62,30 @@ public class TestRunLengthEncodedBlock
     }
 
     @Test
+    public void testPositionsSizeInBytes()
+    {
+        Block valueBlock = createSingleValueBlock(createExpectedValue(10));
+        Block rleBlock = RunLengthEncodedBlock.create(valueBlock, 10);
+        // Size in bytes is not fixed per position
+        assertThat(rleBlock.fixedSizeInBytesPerPosition()).isEmpty();
+        // Accepts specific position selection
+        boolean[] positions = new boolean[rleBlock.getPositionCount()];
+        positions[0] = true;
+        positions[1] = true;
+        assertThat(rleBlock.getPositionsSizeInBytes(positions, 2)).isEqualTo(valueBlock.getSizeInBytes());
+        // Accepts null positions array with count only
+        assertThat(rleBlock.getPositionsSizeInBytes(null, 2)).isEqualTo(valueBlock.getSizeInBytes());
+        // Always reports the same size in bytes regardless of positions
+        for (int positionCount = 0; positionCount < rleBlock.getPositionCount(); positionCount++) {
+            assertThat(rleBlock.getPositionsSizeInBytes(null, positionCount)).isEqualTo(valueBlock.getSizeInBytes());
+        }
+    }
+
+    @Test
     public void testBuildingFromLongArrayBlockBuilder()
     {
         LongArrayBlockBuilder blockBuilder = new LongArrayBlockBuilder(null, 100);
         populateNullValues(blockBuilder, 100);
-        assertEquals(blockBuilder.build().getEncodingName(), RunLengthBlockEncoding.NAME);
     }
 
     @Test
@@ -74,7 +93,6 @@ public class TestRunLengthEncodedBlock
     {
         IntArrayBlockBuilder blockBuilder = new IntArrayBlockBuilder(null, 100);
         populateNullValues(blockBuilder, 100);
-        assertEquals(blockBuilder.build().getEncodingName(), RunLengthBlockEncoding.NAME);
     }
 
     @Test
@@ -82,7 +100,6 @@ public class TestRunLengthEncodedBlock
     {
         ShortArrayBlockBuilder blockBuilder = new ShortArrayBlockBuilder(null, 100);
         populateNullValues(blockBuilder, 100);
-        assertEquals(blockBuilder.build().getEncodingName(), RunLengthBlockEncoding.NAME);
     }
 
     @Test
@@ -90,7 +107,6 @@ public class TestRunLengthEncodedBlock
     {
         ByteArrayBlockBuilder blockBuilder = new ByteArrayBlockBuilder(null, 100);
         populateNullValues(blockBuilder, 100);
-        assertEquals(blockBuilder.build().getEncodingName(), RunLengthBlockEncoding.NAME);
     }
 
     @Test
@@ -98,9 +114,9 @@ public class TestRunLengthEncodedBlock
     {
         int positionCount = 10;
         Slice expectedValue = createExpectedValue(5);
-        Block block = new RunLengthEncodedBlock(createSingleValueBlock(expectedValue), positionCount);
+        Block block = RunLengthEncodedBlock.create(createSingleValueBlock(expectedValue), positionCount);
         for (int postition = 0; postition < positionCount; postition++) {
-            assertEquals(block.getEstimatedDataSizeForStats(postition), expectedValue.length());
+            assertThat(block.getEstimatedDataSizeForStats(postition)).isEqualTo(expectedValue.length());
         }
     }
 
@@ -109,5 +125,18 @@ public class TestRunLengthEncodedBlock
         for (int i = 0; i < positionCount; i++) {
             blockBuilder.appendNull();
         }
+    }
+
+    @Override
+    protected <T> void assertPositionValue(Block block, int position, T expectedValue)
+    {
+        if (expectedValue == null) {
+            assertThat(block.isNull(position)).isTrue();
+            return;
+        }
+
+        assertThat(block.isNull(position)).isFalse();
+        VariableWidthBlock variableWidthBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        assertThat(variableWidthBlock.getSlice(block.getUnderlyingValuePosition(position))).isEqualTo(expectedValue);
     }
 }

@@ -13,28 +13,25 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestUnnest
 {
-    private QueryAssertions assertions;
+    private final QueryAssertions assertions = new QueryAssertions();
 
-    @BeforeClass
-    public void init()
-    {
-        assertions = new QueryAssertions();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
-        assertions = null;
     }
 
     @Test
@@ -43,6 +40,16 @@ public class TestUnnest
         assertThat(assertions.query(
                 "SELECT * FROM UNNEST(ARRAY[ROW(1, 1.1), ROW(3, 3.3)], ARRAY[ROW('a', true), ROW('b', false)])"))
                 .matches("VALUES (1, 1.1, 'a', true), (3, 3.3, 'b', false)");
+        assertThat(assertions.query(
+                "SELECT * FROM UNNEST(ARRAY[ROW(1, 1.1), ROW(3, 3.3)], ARRAY[ROW('a', true), null])"))
+                .matches("VALUES (1, 1.1, 'a', true), (3, 3.3, null, null)");
+        assertThat(assertions.query(
+                "SELECT * FROM UNNEST(ARRAY[ROW(1, 1.1), ROW(3, 3.3)], ARRAY[null, ROW('a', true), null])"))
+                .matches("VALUES (1, 1.1, null, null), (3, 3.3,  'a', true), (null, null, null, null)");
+        assertThat(assertions.query(
+                "SELECT * FROM UNNEST(ARRAY[ROW(1, 1.1), ROW(3, 3.3)], ARRAY[null, ROW(null, true), null])"))
+                .matches("VALUES (1, 1.1, null, null), (3, 3.3,  null, true), (null, null, null, null)");
+
         assertThat(assertions.query(
                 "SELECT x, y FROM (VALUES (ARRAY[ROW(1.0, 2), ROW(3, 4.123)])) AS t(a) CROSS JOIN UNNEST(a) t(x, y)"))
                 .matches("VALUES (1.0, 2), (3, 4.123)");
@@ -58,11 +65,11 @@ public class TestUnnest
                 "SELECT x FROM UNNEST(CAST(ARRAY[ROW(1, 'a'), ROW(2, 'b')] as ARRAY(ROW(x int, y varchar))))"))
                 .matches("VALUES (1), (2)");
 
-        assertThatThrownBy(() -> assertions.query(
+        assertThat(assertions.query(
                 "SELECT x FROM" +
                         "(VALUES (3)) AS t(x)" +
                         "CROSS JOIN UNNEST(CAST(ARRAY[ROW(1, 'a'), ROW(2, 'b')] as ARRAY(ROW(x int, y varchar))))"))
-                .hasMessageMatching(".*Column 'x' is ambiguous.*");
+                .failure().hasMessageMatching(".*Column 'x' is ambiguous.*");
 
         assertThat(assertions.query(
                 "SELECT t.x FROM" +
@@ -80,12 +87,12 @@ public class TestUnnest
     @Test
     public void testUnnestMultiExpr()
     {
-        assertThatThrownBy(() -> assertions.query(
+        assertThat(assertions.query(
                 "SELECT x " +
                         "FROM UNNEST(" +
                         "   CAST(ARRAY[ROW(1, 'a'), ROW(2, 'b')] as ARRAY(ROW(x int, y varchar)))," +
                         "   CAST(ARRAY[ROW(1, 'a'), ROW(2, 'b')] as ARRAY(ROW(x int, y varchar))))"))
-                .hasMessageMatching(".*Column 'x' is ambiguous.*");
+                .failure().hasMessageMatching(".*Column 'x' is ambiguous.*");
 
         assertThat(assertions.query(
                 "SELECT t3 " +
@@ -117,9 +124,9 @@ public class TestUnnest
         assertThat(assertions.query(
                 "SELECT * FROM (VALUES ARRAY[]) a(x) LEFT OUTER JOIN UNNEST(x) WITH ORDINALITY ON true"))
                 .matches("VALUES (ARRAY[], null, CAST(NULL AS bigint))");
-        assertThatThrownBy(() -> assertions.query(
+        assertThat(assertions.query(
                 "SELECT * FROM (VALUES ARRAY[1, null]) a(x) LEFT OUTER JOIN UNNEST(x) b(y) ON b.y = 1"))
-                .hasMessageMatching("line .*: LEFT JOIN involving UNNEST is only supported with condition ON TRUE");
+                .failure().hasMessageMatching("line .*: LEFT JOIN involving UNNEST is only supported with condition ON TRUE");
         assertThat(assertions.query(
                 "SELECT * FROM (VALUES 'a', 'b') LEFT JOIN UNNEST(ARRAY[]) ON TRUE"))
                 .matches("VALUES ('a', null), ('b', null)");
@@ -148,9 +155,9 @@ public class TestUnnest
         assertThat(assertions.query(
                 "SELECT * FROM (VALUES ARRAY[1, null]) a(x) RIGHT OUTER JOIN UNNEST(ARRAY[2, null]) WITH ORDINALITY ON true"))
                 .matches("VALUES (ARRAY[1, null], 2, BIGINT '1'), (ARRAY[1, null], null, BIGINT '2')");
-        assertThatThrownBy(() -> assertions.query(
+        assertThat(assertions.query(
                 "SELECT * FROM (VALUES ARRAY[1, null]) a(x) RIGHT OUTER JOIN UNNEST(ARRAY[2, null]) b(y) ON b.y = 1"))
-                .hasMessageMatching("line .*: RIGHT JOIN involving UNNEST is only supported with condition ON TRUE");
+                .failure().hasMessageMatching("line .*: RIGHT JOIN involving UNNEST is only supported with condition ON TRUE");
     }
 
     @Test
@@ -169,9 +176,9 @@ public class TestUnnest
         assertThat(assertions.query(
                 "SELECT * FROM (VALUES ARRAY[]) a(x) FULL OUTER JOIN UNNEST(ARRAY[2, null]) WITH ORDINALITY ON true"))
                 .matches("VALUES (ARRAY[], 2, BIGINT '1'), (ARRAY[], null, BIGINT '2')");
-        assertThatThrownBy(() -> assertions.query(
+        assertThat(assertions.query(
                 "SELECT * FROM (VALUES ARRAY[1, null]) a(x) FULL OUTER JOIN UNNEST(ARRAY[2, null]) b(y) ON b.y = 1"))
-                .hasMessageMatching("line .*: FULL JOIN involving UNNEST is only supported with condition ON TRUE");
+                .failure().hasMessageMatching("line .*: FULL JOIN involving UNNEST is only supported with condition ON TRUE");
     }
 
     @Test
@@ -187,9 +194,9 @@ public class TestUnnest
                 "SELECT * FROM (VALUES ARRAY[]) a(x) INNER JOIN UNNEST(x) ON true");
         assertions.assertQueryReturnsEmptyResult(
                 "SELECT * FROM (VALUES ARRAY[]) a(x) INNER JOIN UNNEST(x) WITH ORDINALITY ON true");
-        assertThatThrownBy(() -> assertions.query(
+        assertThat(assertions.query(
                 "SELECT * FROM (VALUES ARRAY[1, null]) a(x) INNER JOIN UNNEST(x) b(y) ON b.y = 1"))
-                .hasMessageMatching("line .*: INNER JOIN involving UNNEST is only supported with condition ON TRUE");
+                .failure().hasMessageMatching("line .*: INNER JOIN involving UNNEST is only supported with condition ON TRUE");
     }
 
     @Test
@@ -198,5 +205,59 @@ public class TestUnnest
         assertThat(assertions.query(
                 "SELECT * FROM (VALUES 1) t, UNNEST(ARRAY['a', 'b'], ARRAY['a', 'b']) u (x, y)"))
                 .matches("VALUES (1, 'a', 'a'), (1, 'b', 'b')");
+    }
+
+    @Test
+    public void testUnnestArrays()
+    {
+        assertThat(assertions.query("SELECT * FROM UNNEST(ARRAY[2, 5])"))
+                .matches("VALUES (2), (5)");
+
+        assertThat(assertions.query(
+                "SELECT * FROM UNNEST(ARRAY[2, 5], ARRAY['dog', 'cat', 'bird'])"))
+                .matches("VALUES (2, 'dog'), (5, 'cat'), (null, 'bird')");
+
+        assertThat(assertions.query(
+                "SELECT * FROM UNNEST(ARRAY[2, 5, null], ARRAY['dog', 'cat', 'bird'])"))
+                .matches("VALUES (2, 'dog'), (5, 'cat'), (null, 'bird')");
+    }
+
+    @Test
+    public void testNullRows()
+    {
+        // This query tries to simulate testArrayOfRowsUnnesterWithNulls e2e
+        assertions.execute("SELECT "
+                + "     x, y "
+                + "FROM "
+                + "     (VALUES "
+                + "         (transform(sequence(1, 600), x -> CAST(ROW(x, 'a') as ROW(x1 integer, x2 varchar)))), "
+                + "         (transform(sequence(1, 400), x -> CAST(NULL as ROW(x1 integer, x2 varchar))))) "
+                + "     AS t(a) "
+                + "     CROSS JOIN UNNEST(a) t(x, y)");
+    }
+
+    @Test
+    void testSubqueries()
+    {
+        assertThat(assertions.query(
+                """
+                WITH
+                    a(x) AS (SELECT ARRAY[1, 2, 3]),
+                    b AS (SELECT * FROM (VALUES 4), UNNEST ((SELECT x FROM a)))
+                SELECT * FROM b
+                """))
+                .matches("VALUES (4, 1), (4, 2), (4, 3)");
+
+        assertThat(assertions.query("SELECT * FROM UNNEST ((SELECT ARRAY[1, 2, 3]))"))
+                .matches("VALUES 1, 2, 3");
+
+        assertThat(assertions.query("SELECT * FROM (VALUES ARRAY[1, 2, 3]) t(a), UNNEST ((SELECT a))"))
+                .matches(
+                        """
+                        VALUES
+                            (ARRAY[1, 2, 3], 1),
+                            (ARRAY[1, 2, 3], 2),
+                            (ARRAY[1, 2, 3], 3)
+                        """);
     }
 }

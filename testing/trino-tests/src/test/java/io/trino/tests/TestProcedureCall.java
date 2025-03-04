@@ -14,35 +14,38 @@
 package io.trino.tests;
 
 import io.trino.Session;
-import io.trino.connector.CatalogName;
-import io.trino.metadata.ProcedureRegistry;
-import io.trino.server.testing.TestingTrinoServer;
+import io.trino.connector.MockConnectorFactory;
+import io.trino.connector.MockConnectorPlugin;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.ProcedureTester;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingProcedures;
-import io.trino.tests.tpch.TpchQueryRunnerBuilder;
+import io.trino.tests.tpch.TpchQueryRunner;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.List;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
-import static io.trino.tests.AbstractTestEngineOnlyQueries.TESTING_CATALOG;
-import static io.trino.tests.TestDistributedEngineOnlyQueries.addTestingCatalog;
 import static java.lang.String.format;
 import static java.util.Arrays.asList;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(SAME_THREAD) // ProcedureTester is shared mutable state
 public class TestProcedureCall
         extends AbstractTestQueryFramework
 {
+    private static final String TESTING_CATALOG = "testing_catalog";
     private static final String PROCEDURE_SCHEMA = "procedure_schema";
+
     private ProcedureTester tester;
     private Session session;
 
@@ -50,30 +53,26 @@ public class TestProcedureCall
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return TpchQueryRunnerBuilder.builder().build();
+        return TpchQueryRunner.builder().build();
     }
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
-        TestingTrinoServer coordinator = getDistributedQueryRunner().getCoordinator();
-        tester = coordinator.getProcedureTester();
-
-        // register procedures in the bogus testing catalog
-        addTestingCatalog(getDistributedQueryRunner());
-        ProcedureRegistry procedureRegistry = coordinator.getMetadata().getProcedureRegistry();
-        TestingProcedures procedures = new TestingProcedures(coordinator.getProcedureTester());
-        procedureRegistry.addProcedures(
-                new CatalogName(TESTING_CATALOG),
-                procedures.getProcedures(PROCEDURE_SCHEMA));
-
+        QueryRunner queryRunner = getDistributedQueryRunner();
+        tester = queryRunner.getCoordinator().getProcedureTester();
         session = testSessionBuilder()
                 .setCatalog(TESTING_CATALOG)
                 .setSchema(PROCEDURE_SCHEMA)
                 .build();
+
+        queryRunner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                .withProcedures(new TestingProcedures(tester).getProcedures(PROCEDURE_SCHEMA))
+                .build()));
+        queryRunner.createCatalog(TESTING_CATALOG, "mock");
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         tester = null;
@@ -115,16 +114,16 @@ public class TestProcedureCall
         assertCallThrows("CALL test_exception()", "exception", "test exception from procedure");
         assertCallThrows("CALL test_error()", "error", "test error from procedure");
 
-        assertCallFails("CALL test_args(null, 4.5, 'hello', true)", "Procedure argument cannot be null: x");
-        assertCallFails("CALL test_args(123, null, 'hello', true)", "Procedure argument cannot be null: y");
-        assertCallFails("CALL test_args(123, 4.5, 'hello', null)", "Procedure argument cannot be null: q");
+        assertCallFails("CALL test_args(null, 4.5, 'hello', true)", "Procedure argument cannot be null: X");
+        assertCallFails("CALL test_args(123, null, 'hello', true)", "Procedure argument cannot be null: Y");
+        assertCallFails("CALL test_args(123, 4.5, 'hello', null)", "Procedure argument cannot be null: Q");
 
         assertCallFails("CALL test_simple(123)", "line 1:1: Too many arguments for procedure");
-        assertCallFails("CALL test_args(123, 4.5, 'hello')", "line 1:1: Required procedure argument 'q' is missing");
-        assertCallFails("CALL test_args(x => 123, y => 4.5, q => true)", "line 1:1: Required procedure argument 'z' is missing");
+        assertCallFails("CALL test_args(123, 4.5, 'hello')", "line 1:1: Required procedure argument 'Q' is missing");
+        assertCallFails("CALL test_args(x => 123, y => 4.5, q => true)", "line 1:1: Required procedure argument 'Z' is missing");
         assertCallFails("CALL test_args(123, 4.5, 'hello', q => true)", "line 1:1: Named and positional arguments cannot be mixed");
-        assertCallFails("CALL test_args(x => 3, x => 4)", "line 1:24: Duplicate procedure argument: x");
-        assertCallFails("CALL test_args(t => 404)", "line 1:16: Unknown argument name: t");
+        assertCallFails("CALL test_args(x => 3, x => 4)", "line 1:24: Duplicate procedure argument: X");
+        assertCallFails("CALL test_args(t => 404)", "line 1:16: Unknown argument name: T");
         assertCallFails("CALL test_nulls('hello', null)", "line 1:17: Cannot cast type varchar(5) to bigint");
         assertCallFails("CALL test_nulls(null, 123)", "line 1:23: Cannot cast type integer to varchar");
     }
@@ -154,18 +153,59 @@ public class TestProcedureCall
         assertCall("CALL test_optionals4(z => 'z val', v => 'v val', x => 'x val', y => 'y val')", "optionals4", "x val", "y val", "z val", "v val");
         assertCall("CALL test_optionals4(v => 'v val', x => 'x val', y => 'y val', z => 'z val')", "optionals4", "x val", "y val", "z val", "v val");
 
-        assertCallFails("CALL test_optionals2()", "line 1:1: Required procedure argument 'x' is missing");
-        assertCallFails("CALL test_optionals4(z => 'cd')", "line 1:1: Required procedure argument 'x' is missing");
-        assertCallFails("CALL test_optionals4(z => 'cd', v => 'value')", "line 1:1: Required procedure argument 'x' is missing");
-        assertCallFails("CALL test_optionals4(y => 'cd', v => 'value')", "line 1:1: Required procedure argument 'x' is missing");
+        assertCallFails("CALL test_optionals2()", "line 1:1: Required procedure argument 'X' is missing");
+        assertCallFails("CALL test_optionals4(z => 'cd')", "line 1:1: Required procedure argument 'X' is missing");
+        assertCallFails("CALL test_optionals4(z => 'cd', v => 'value')", "line 1:1: Required procedure argument 'X' is missing");
+        assertCallFails("CALL test_optionals4(y => 'cd', v => 'value')", "line 1:1: Required procedure argument 'X' is missing");
+    }
+
+    @Test
+    public void testProcedureName()
+    {
+        assertCall("CALL test_lowercase_name()", "simple");
+        assertCall("CALL TEST_LOWERCASE_NAME()", "simple");
+        assertCall("CALL Test_Lowercase_NAME()", "simple");
+        assertCall("CALL \"test_lowercase_name\"()", "simple");
+        assertCall("CALL \"TEST_LOWERCASE_NAME\"()", "simple");
+        assertCall("CALL \"Test_Lowercase_Name\"()", "simple");
+
+        assertCall("CALL test_uppercase_name()", "simple");
+        assertCall("CALL TEST_UPPERCASE_NAME()", "simple");
+        assertCall("CALL Test_Uppercase_NAME()", "simple");
+        assertCall("CALL \"test_uppercase_name\"()", "simple");
+        assertCall("CALL \"TEST_UPPERCASE_NAME\"()", "simple");
+        assertCall("CALL \"Test_Uppercase_NAME\"()", "simple");
+    }
+
+    @Test
+    public void testNamedArguments()
+    {
+        assertCallFails("CALL test_argument_names(lower => 'a')", "line 1:26: Unknown argument name: LOWER");
+        assertCallFails("CALL test_argument_names(LOWER => 'a')", "line 1:26: Unknown argument name: LOWER");
+        assertCall("CALL test_argument_names(\"lower\" => 'a')", "names", "a", "b", "c", "d");
+        assertCallFails("CALL test_argument_names(\"LOWER\" => 'a')", "line 1:26: Unknown argument name: LOWER");
+
+        assertCall("CALL test_argument_names(upper => 'b')", "names", "a", "b", "c", "d");
+        assertCall("CALL test_argument_names(UPPER => 'b')", "names", "a", "b", "c", "d");
+        assertCallFails("CALL test_argument_names(\"upper\" => 'b')", "line 1:26: Unknown argument name: upper");
+        assertCall("CALL test_argument_names(\"UPPER\" => 'b')", "names", "a", "b", "c", "d");
+
+        assertCallFails("CALL test_argument_names(mixed => 'c')", "line 1:26: Unknown argument name: MIXED");
+        assertCallFails("CALL test_argument_names(MixeD => 'c')", "line 1:26: Unknown argument name: MIXED");
+        assertCallFails("CALL test_argument_names(MIXED => 'c')", "line 1:26: Unknown argument name: MIXED");
+        assertCallFails("CALL test_argument_names(\"mixed\" => 'c')", "line 1:26: Unknown argument name: mixed");
+        assertCall("CALL test_argument_names(\"MixeD\" => 'c')", "names", "a", "b", "c", "d");
+        assertCallFails("CALL test_argument_names(\"MIXED\" => 'c')", "line 1:26: Unknown argument name: MIXED");
+
+        assertCall("CALL test_argument_names(\"with space\" => 'd')", "names", "a", "b", "c", "d");
     }
 
     private void assertCall(@Language("SQL") String sql, String name, Object... arguments)
     {
         tester.reset();
         assertUpdate(sql);
-        assertEquals(tester.getCalledName(), name);
-        assertEquals(tester.getCalledArguments(), list(arguments));
+        assertThat(tester.getCalledName()).isEqualTo(name);
+        assertThat(tester.getCalledArguments()).isEqualTo(list(arguments));
     }
 
     private void assertCallThrows(@Language("SQL") String sql, String name, String message)
@@ -173,8 +213,8 @@ public class TestProcedureCall
         tester.reset();
         assertThatThrownBy(() -> assertUpdate(sql))
                 .isInstanceOfSatisfying(RuntimeException.class, e -> {
-                    assertEquals(tester.getCalledName(), name);
-                    assertEquals(tester.getCalledArguments(), list());
+                    assertThat(tester.getCalledName()).isEqualTo(name);
+                    assertThat(tester.getCalledArguments()).isEqualTo(list());
                 })
                 .hasMessage(message);
     }
@@ -183,7 +223,7 @@ public class TestProcedureCall
     {
         tester.reset();
         assertThatThrownBy(() -> assertUpdate(sql))
-                .isInstanceOfSatisfying(RuntimeException.class, e -> assertFalse(tester.wasCalled()))
+                .isInstanceOfSatisfying(RuntimeException.class, e -> assertThat(tester.wasCalled()).isFalse())
                 .hasMessage(message);
     }
 

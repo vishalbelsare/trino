@@ -14,7 +14,7 @@
 package io.trino.server.ui;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -28,18 +28,20 @@ public class TestWebUiConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(WebUiConfig.class)
-                .setEnabled(true));
+                .setEnabled(true)
+                .setPreviewEnabled(false));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
-                .put("web-ui.enabled", "false")
-                .build();
+        Map<String, String> properties = ImmutableMap.of(
+                "web-ui.enabled", "false",
+                "web-ui.preview.enabled", "true");
 
         WebUiConfig expected = new WebUiConfig()
-                .setEnabled(false);
+                .setEnabled(false)
+                .setPreviewEnabled(true);
 
         assertFullMapping(properties, expected);
     }

@@ -24,6 +24,7 @@ import org.elasticsearch.search.SearchHit;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.Objects;
 import java.util.function.Supplier;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -49,7 +50,7 @@ public class TimestampDecoder
     public void decode(SearchHit hit, Supplier<Object> getter, BlockBuilder output)
     {
         DocumentField documentField = hit.getFields().get(path);
-        Object value = null;
+        Object value;
 
         if (documentField != null) {
             if (documentField.getValues().size() > 1) {
@@ -66,8 +67,7 @@ public class TimestampDecoder
         }
         else {
             LocalDateTime timestamp;
-            if (value instanceof String) {
-                String valueString = (String) value;
+            if (value instanceof String valueString) {
                 Long epochMillis = Longs.tryParse(valueString);
                 if (epochMillis != null) {
                     timestamp = LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), UTC);
@@ -114,6 +114,25 @@ public class TimestampDecoder
         public Decoder createDecoder()
         {
             return new TimestampDecoder(path);
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            Descriptor that = (Descriptor) o;
+            return Objects.equals(this.path, that.path);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return path.hashCode();
         }
     }
 }

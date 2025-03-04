@@ -17,10 +17,9 @@ import io.trino.tempto.ProductTest;
 import org.testng.annotations.Test;
 
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
-import static io.trino.tempto.query.QueryExecutor.query;
 import static io.trino.tests.product.utils.QueryExecutors.onHive;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestCsvFileHiveTable
@@ -38,7 +37,7 @@ public class TestCsvFileHiveTable
                         ") " +
                         "AS SELECT CAST(1 AS VARCHAR)  AS col_name1, CAST(2 AS VARCHAR) AS col_name2;");
         onTrino().executeQuery("INSERT INTO test_create_csv_skip_header VALUES ('3', '4')");
-        assertThat(query("SELECT * FROM test_create_csv_skip_header")).containsOnly(row("1", "2"), row("3", "4"));
+        assertThat(onTrino().executeQuery("SELECT * FROM test_create_csv_skip_header")).containsOnly(row("1", "2"), row("3", "4"));
         assertThat(onHive().executeQuery("SELECT * FROM test_create_csv_skip_header")).containsOnly(row("1", "2"), row("3", "4"));
         onHive().executeQuery("DROP TABLE test_create_csv_skip_header");
 

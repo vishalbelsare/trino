@@ -22,11 +22,18 @@ import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.block.ValueBlock;
+import io.trino.spi.block.VariableWidthBlock;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Int128;
+import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.SqlTimestamp;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 
 import java.math.BigDecimal;
@@ -48,12 +55,10 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.block.ArrayBlock.fromElementBlock;
-import static io.trino.spi.block.DictionaryId.randomDictionaryId;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.Decimals.MAX_SHORT_PRECISION;
-import static io.trino.spi.type.Decimals.encodeUnscaledValue;
 import static io.trino.spi.type.Decimals.writeBigDecimal;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -68,13 +73,14 @@ import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.ColorType.COLOR;
+import static io.trino.type.IpAddressType.IPADDRESS;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Math.multiplyExact;
 import static java.lang.String.format;
 import static java.util.Collections.unmodifiableList;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public final class BlockAssertions
 {
@@ -82,13 +88,13 @@ public final class BlockAssertions
     private static final int MAX_STRING_SIZE = 50;
     private static final int RANDOM_SEED = 633969769;
 
-    private static final Random RANDOM = new Random(RANDOM_SEED);
-
     private BlockAssertions() {}
 
     public static Object getOnlyValue(Type type, Block block)
     {
-        assertEquals(block.getPositionCount(), 1, "Block positions");
+        assertThat(block.getPositionCount())
+                .describedAs("Block positions")
+                .isEqualTo(1);
         return type.getObjectValue(SESSION, block, 0);
     }
 
@@ -114,29 +120,32 @@ public final class BlockAssertions
 
     public static void assertBlockEquals(Type type, Block actual, Block expected)
     {
-        assertEquals(actual.getPositionCount(), expected.getPositionCount());
+        assertThat(actual.getPositionCount()).isEqualTo(expected.getPositionCount());
         for (int position = 0; position < actual.getPositionCount(); position++) {
-            assertEquals(type.getObjectValue(SESSION, actual, position), type.getObjectValue(SESSION, expected, position));
+            assertThat(type.getObjectValue(SESSION, actual, position))
+                    .describedAs("position " + position)
+                    .isEqualTo(type.getObjectValue(SESSION, expected, position));
         }
     }
 
-    public static DictionaryBlock createRandomDictionaryBlock(Block dictionary, int positionCount)
+    public static Block createRandomDictionaryBlock(Block dictionary, int positionCount)
     {
         checkArgument(dictionary.getPositionCount() > 0, "dictionary position count %s is less than or equal to 0", dictionary.getPositionCount());
 
+        Random random = random();
         int[] ids = IntStream.range(0, positionCount)
-                .map(i -> RANDOM.nextInt(dictionary.getPositionCount()))
+                .map(i -> random.nextInt(dictionary.getPositionCount()))
                 .toArray();
-        return new DictionaryBlock(0, positionCount, dictionary, ids, false, randomDictionaryId());
+        return DictionaryBlock.create(positionCount, dictionary, ids);
     }
 
     public static RunLengthEncodedBlock createRandomRleBlock(Block block, int positionCount)
     {
-        checkArgument(block.getPositionCount() > 0, format("block positions %d is less than or equal to 0", block.getPositionCount()));
-        return new RunLengthEncodedBlock(block.getSingleValueBlock(RANDOM.nextInt(block.getPositionCount())), positionCount);
+        checkArgument(block.getPositionCount() >= 2, "block positions %s is less than 2", block.getPositionCount());
+        return (RunLengthEncodedBlock) RunLengthEncodedBlock.create(block.getSingleValueBlock(random().nextInt(block.getPositionCount())), positionCount);
     }
 
-    public static Block createRandomBlockForType(Type type, int positionCount, float nullRate)
+    public static ValueBlock createRandomBlockForType(Type type, int positionCount, float nullRate)
     {
         verifyNullRate(nullRate);
 
@@ -152,8 +161,7 @@ public final class BlockAssertions
         if (type == SMALLINT) {
             return createRandomSmallintsBlock(positionCount, nullRate);
         }
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
+        if (type instanceof DecimalType decimalType) {
             if (decimalType.isShort()) {
                 return createRandomLongsBlock(positionCount, nullRate);
             }
@@ -174,14 +182,28 @@ public final class BlockAssertions
         if (type == UUID) {
             return createRandomUUIDsBlock(positionCount, nullRate);
         }
+        if (type == IPADDRESS) {
+            return createRandomIpAddressesBlock(positionCount, nullRate);
+        }
         if (type == VARBINARY) {
             return createRandomVarbinariesBlock(positionCount, nullRate);
+        }
+        if (type instanceof TimestampType timestampType) {
+            if (timestampType.isShort()) {
+                return createRandomShortTimestampBlock(timestampType, positionCount, nullRate);
+            }
+            return createRandomLongTimestampBlock(timestampType, positionCount, nullRate);
         }
 
         return createRandomBlockForNestedType(type, positionCount, nullRate);
     }
 
-    private static Block createRandomBlockForNestedType(Type type, int positionCount, float nullRate)
+    public static ValueBlock createRandomBlockForNestedType(Type type, int positionCount, float nullRate)
+    {
+        return createRandomBlockForNestedType(type, positionCount, nullRate, ENTRY_SIZE);
+    }
+
+    public static ValueBlock createRandomBlockForNestedType(Type type, int positionCount, float nullRate, int maxCardinality)
     {
         // Builds isNull and offsets of size positionCount
         boolean[] isNull = null;
@@ -192,6 +214,7 @@ public final class BlockAssertions
         }
         int[] offsets = new int[positionCount + 1];
 
+        Random random = random();
         for (int position = 0; position < positionCount; position++) {
             if (nullRate > 0 && nullPositions.contains(position)) {
                 isNull[position] = true;
@@ -200,19 +223,18 @@ public final class BlockAssertions
             else {
                 // RowType doesn't need offsets, so we just use 1,
                 // for ArrayType and MapType we choose randomly either array length or map size at the current position
-                offsets[position + 1] = offsets[position] + (type instanceof RowType ? 1 : RANDOM.nextInt(ENTRY_SIZE) + 1);
+                offsets[position + 1] = offsets[position] + (type instanceof RowType ? 1 : random.nextInt(maxCardinality) + 1);
             }
         }
 
         // Builds the nested block of size offsets[positionCount].
         if (type instanceof ArrayType) {
-            Block valuesBlock = createRandomBlockForType(((ArrayType) type).getElementType(), offsets[positionCount], nullRate);
+            ValueBlock valuesBlock = createRandomBlockForType(((ArrayType) type).getElementType(), offsets[positionCount], nullRate);
             return fromElementBlock(positionCount, Optional.ofNullable(isNull), offsets, valuesBlock);
         }
-        if (type instanceof MapType) {
-            MapType mapType = (MapType) type;
-            Block keyBlock = createRandomBlockForType(mapType.getKeyType(), offsets[positionCount], 0.0f);
-            Block valueBlock = createRandomBlockForType(mapType.getValueType(), offsets[positionCount], nullRate);
+        if (type instanceof MapType mapType) {
+            ValueBlock keyBlock = createRandomBlockForType(mapType.getKeyType(), offsets[positionCount], 0.0f);
+            ValueBlock valueBlock = createRandomBlockForType(mapType.getValueType(), offsets[positionCount], nullRate);
 
             return mapType.createBlockFromKeyValue(Optional.ofNullable(isNull), offsets, keyBlock, valueBlock);
         }
@@ -224,81 +246,121 @@ public final class BlockAssertions
                 fieldBlocks[i] = createRandomBlockForType(fieldTypes.get(i), positionCount, nullRate);
             }
 
-            return RowBlock.fromFieldBlocks(positionCount, Optional.ofNullable(isNull), fieldBlocks);
+            return RowBlock.fromNotNullSuppressedFieldBlocks(positionCount, Optional.ofNullable(isNull), fieldBlocks);
         }
 
         throw new IllegalArgumentException(format("type %s is not supported.", type));
     }
 
-    public static Block createRandomBooleansBlock(int positionCount, float nullRate)
+    public static ValueBlock createRandomBooleansBlock(int positionCount, float nullRate)
     {
-        return createBooleansBlock(generateListWithNulls(positionCount, nullRate, RANDOM::nextBoolean));
+        Random random = random();
+        return createBooleansBlock(generateListWithNulls(positionCount, nullRate, random::nextBoolean));
     }
 
-    public static Block createRandomIntsBlock(int positionCount, float nullRate)
+    public static ValueBlock createRandomIntsBlock(int positionCount, float nullRate)
     {
-        return createIntsBlock(generateListWithNulls(positionCount, nullRate, RANDOM::nextInt));
+        Random random = random();
+        return createIntsBlock(generateListWithNulls(positionCount, nullRate, random::nextInt));
     }
 
-    public static Block createRandomLongDecimalsBlock(int positionCount, float nullRate)
+    public static ValueBlock createRandomLongDecimalsBlock(int positionCount, float nullRate)
     {
+        Random random = random();
         return createLongDecimalsBlock(generateListWithNulls(
                 positionCount,
                 nullRate,
-                () -> String.valueOf(RANDOM.nextLong())));
+                () -> String.valueOf(random.nextLong())));
     }
 
-    public static Block createRandomLongsBlock(int positionCount, int numberOfUniqueValues)
+    public static ValueBlock createRandomShortTimestampBlock(TimestampType type, int positionCount, float nullRate)
+    {
+        Random random = random();
+        return createLongsBlock(
+                generateListWithNulls(
+                        positionCount,
+                        nullRate,
+                        () -> SqlTimestamp.fromMillis(type.getPrecision(), random.nextLong()).getEpochMicros()));
+    }
+
+    public static ValueBlock createRandomLongTimestampBlock(TimestampType type, int positionCount, float nullRate)
+    {
+        Random random = random();
+        return createLongTimestampBlock(
+                type,
+                generateListWithNulls(
+                        positionCount,
+                        nullRate,
+                        () -> {
+                            SqlTimestamp sqlTimestamp = SqlTimestamp.fromMillis(type.getPrecision(), random.nextLong());
+                            return new LongTimestamp(sqlTimestamp.getEpochMicros(), sqlTimestamp.getPicosOfMicros());
+                        }));
+    }
+
+    public static ValueBlock createRandomLongsBlock(int positionCount, int numberOfUniqueValues)
     {
         checkArgument(positionCount >= numberOfUniqueValues, "numberOfUniqueValues must be between 1 and positionCount: %s but was %s", positionCount, numberOfUniqueValues);
         int[] uniqueValues = chooseRandomUnique(positionCount, numberOfUniqueValues).stream()
                 .mapToInt(Integer::intValue)
                 .toArray();
+        Random random = random();
         return createLongsBlock(IntStream.range(0, positionCount)
-                .mapToLong(position -> uniqueValues[RANDOM.nextInt(numberOfUniqueValues)])
+                .mapToLong(position -> uniqueValues[random.nextInt(numberOfUniqueValues)])
                 .boxed()
                 .collect(toImmutableList()));
     }
 
-    public static Block createRandomLongsBlock(int positionCount, float nullRate)
+    public static ValueBlock createRandomLongsBlock(int positionCount, float nullRate)
     {
-        return createLongsBlock(generateListWithNulls(positionCount, nullRate, RANDOM::nextLong));
+        Random random = random();
+        return createLongsBlock(generateListWithNulls(positionCount, nullRate, random::nextLong));
     }
 
-    public static Block createRandomSmallintsBlock(int positionCount, float nullRate)
+    public static ValueBlock createRandomSmallintsBlock(int positionCount, float nullRate)
     {
+        Random random = random();
         return createTypedLongsBlock(
                 SMALLINT,
-                generateListWithNulls(positionCount, nullRate, () -> (long) (short) RANDOM.nextLong()));
+                generateListWithNulls(positionCount, nullRate, () -> (long) (short) random.nextLong()));
     }
 
-    public static Block createRandomStringBlock(int positionCount, float nullRate, int maxStringLength)
+    public static ValueBlock createRandomStringBlock(int positionCount, float nullRate, int maxStringLength)
     {
         return createStringsBlock(
                 generateListWithNulls(positionCount, nullRate, () -> generateRandomStringWithLength(maxStringLength)));
     }
 
-    private static Block createRandomVarbinariesBlock(int positionCount, float nullRate)
+    private static ValueBlock createRandomVarbinariesBlock(int positionCount, float nullRate)
     {
-        return createSlicesBlock(VARBINARY, generateListWithNulls(positionCount, nullRate, () -> Slices.wrappedLongArray(RANDOM.nextLong(), RANDOM.nextLong())));
+        Random random = random();
+        return createSlicesBlock(VARBINARY, generateListWithNulls(positionCount, nullRate, () -> Slices.random(16, random)));
     }
 
-    private static Block createRandomUUIDsBlock(int positionCount, float nullRate)
+    private static ValueBlock createRandomUUIDsBlock(int positionCount, float nullRate)
     {
-        return createSlicesBlock(UUID, generateListWithNulls(positionCount, nullRate, () -> Slices.wrappedLongArray(RANDOM.nextLong(), RANDOM.nextLong())));
+        Random random = random();
+        return createSlicesBlock(UUID, generateListWithNulls(positionCount, nullRate, () -> Slices.random(16, random)));
     }
 
-    private static Block createRandomTinyintsBlock(int positionCount, float nullRate)
+    private static ValueBlock createRandomIpAddressesBlock(int positionCount, float nullRate)
     {
-        return createTypedLongsBlock(TINYINT, generateListWithNulls(positionCount, nullRate, () -> (long) (byte) RANDOM.nextLong()));
+        Random random = random();
+        return createSlicesBlock(IPADDRESS, generateListWithNulls(positionCount, nullRate, () -> Slices.random(16, random)));
     }
 
-    public static Block createRandomDoublesBlock(int positionCount, float nullRate)
+    private static ValueBlock createRandomTinyintsBlock(int positionCount, float nullRate)
     {
-        return createDoublesBlock(generateListWithNulls(positionCount, nullRate, RANDOM::nextDouble));
+        Random random = random();
+        return createTypedLongsBlock(TINYINT, generateListWithNulls(positionCount, nullRate, () -> (long) (byte) random.nextLong()));
     }
 
-    public static Block createRandomCharsBlock(CharType charType, int positionCount, float nullRate)
+    public static ValueBlock createRandomDoublesBlock(int positionCount, float nullRate)
+    {
+        Random random = random();
+        return createDoublesBlock(generateListWithNulls(positionCount, nullRate, random::nextDouble));
+    }
+
+    public static ValueBlock createRandomCharsBlock(CharType charType, int positionCount, float nullRate)
     {
         return createCharsBlock(charType, generateListWithNulls(positionCount, nullRate, () -> generateRandomStringWithLength(charType.getLength())));
     }
@@ -314,16 +376,26 @@ public final class BlockAssertions
         return unmodifiableList(result);
     }
 
-    public static Block createStringsBlock(String... values)
+    public static Set<Integer> chooseNullPositions(int positionCount, float nullRate)
+    {
+        int nullCount = (int) (positionCount * nullRate);
+        if (nullCount == 0) {
+            verify(nullRate == 0 || positionCount == 0, "position count %s too small to have at least one null with rate %s", (Object) positionCount, nullRate);
+            return ImmutableSet.of();
+        }
+        return chooseRandomUnique(positionCount, nullCount);
+    }
+
+    public static VariableWidthBlock createStringsBlock(String... values)
     {
         requireNonNull(values, "values is null");
 
         return createStringsBlock(Arrays.asList(values));
     }
 
-    public static Block createStringsBlock(Iterable<String> values)
+    public static VariableWidthBlock createStringsBlock(Iterable<String> values)
     {
-        BlockBuilder builder = VARCHAR.createBlockBuilder(null, 100);
+        VariableWidthBlockBuilder builder = VARCHAR.createBlockBuilder(null, 100);
 
         for (String value : values) {
             if (value == null) {
@@ -334,26 +406,26 @@ public final class BlockAssertions
             }
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createSlicesBlock(Slice... values)
+    public static ValueBlock createSlicesBlock(Slice... values)
     {
         requireNonNull(values, "values is null");
         return createSlicesBlock(Arrays.asList(values));
     }
 
-    public static Block createSlicesBlock(Iterable<Slice> values)
+    public static ValueBlock createSlicesBlock(Iterable<Slice> values)
     {
         return createSlicesBlock(VARBINARY, values);
     }
 
-    public static Block createSlicesBlock(Type type, Iterable<Slice> values)
+    public static ValueBlock createSlicesBlock(Type type, Iterable<Slice> values)
     {
         return createBlock(type, type::writeSlice, values);
     }
 
-    public static Block createStringSequenceBlock(int start, int end)
+    public static ValueBlock createStringSequenceBlock(int start, int end)
     {
         BlockBuilder builder = VARCHAR.createBlockBuilder(null, 100);
 
@@ -361,7 +433,7 @@ public final class BlockAssertions
             VARCHAR.writeString(builder, String.valueOf(i));
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
     public static Block createStringDictionaryBlock(int start, int length)
@@ -377,10 +449,10 @@ public final class BlockAssertions
         for (int i = 0; i < length; i++) {
             ids[i] = i % dictionarySize;
         }
-        return new DictionaryBlock(builder.build(), ids);
+        return DictionaryBlock.create(ids.length, builder.build(), ids);
     }
 
-    public static Block createStringArraysBlock(Iterable<? extends Iterable<String>> values)
+    public static ValueBlock createStringArraysBlock(Iterable<? extends Iterable<String>> values)
     {
         ArrayType arrayType = new ArrayType(VARCHAR);
         BlockBuilder builder = arrayType.createBlockBuilder(null, 100);
@@ -394,24 +466,24 @@ public final class BlockAssertions
             }
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createBooleansBlock(Boolean... values)
+    public static ValueBlock createBooleansBlock(Boolean... values)
     {
         requireNonNull(values, "values is null");
 
         return createBooleansBlock(Arrays.asList(values));
     }
 
-    public static Block createBooleansBlock(Boolean value, int count)
+    public static ValueBlock createBooleansBlock(Boolean value, int count)
     {
         return createBooleansBlock(Collections.nCopies(count, value));
     }
 
-    public static Block createBooleansBlock(Iterable<Boolean> values)
+    public static ValueBlock createBooleansBlock(Iterable<Boolean> values)
     {
-        BlockBuilder builder = BOOLEAN.createBlockBuilder(null, 100);
+        BlockBuilder builder = BOOLEAN.createFixedSizeBlockBuilder(100);
 
         for (Boolean value : values) {
             if (value == null) {
@@ -422,20 +494,20 @@ public final class BlockAssertions
             }
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createShortDecimalsBlock(String... values)
+    public static ValueBlock createShortDecimalsBlock(String... values)
     {
         requireNonNull(values, "values is null");
 
         return createShortDecimalsBlock(Arrays.asList(values));
     }
 
-    public static Block createShortDecimalsBlock(Iterable<String> values)
+    public static ValueBlock createShortDecimalsBlock(Iterable<String> values)
     {
         DecimalType shortDecimalType = DecimalType.createDecimalType(1);
-        BlockBuilder builder = shortDecimalType.createBlockBuilder(null, 100);
+        BlockBuilder builder = shortDecimalType.createFixedSizeBlockBuilder(100);
 
         for (String value : values) {
             if (value == null) {
@@ -446,20 +518,20 @@ public final class BlockAssertions
             }
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createLongDecimalsBlock(String... values)
+    public static ValueBlock createLongDecimalsBlock(String... values)
     {
         requireNonNull(values, "values is null");
 
         return createLongDecimalsBlock(Arrays.asList(values));
     }
 
-    public static Block createLongDecimalsBlock(Iterable<String> values)
+    public static ValueBlock createLongDecimalsBlock(Iterable<String> values)
     {
         DecimalType longDecimalType = DecimalType.createDecimalType(MAX_SHORT_PRECISION + 1);
-        BlockBuilder builder = longDecimalType.createBlockBuilder(null, 100);
+        BlockBuilder builder = longDecimalType.createFixedSizeBlockBuilder(100);
 
         for (String value : values) {
             if (value == null) {
@@ -470,107 +542,143 @@ public final class BlockAssertions
             }
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createCharsBlock(CharType charType, List<String> values)
+    public static ValueBlock createLongTimestampBlock(TimestampType type, LongTimestamp... values)
+    {
+        requireNonNull(values, "values is null");
+        return createLongTimestampBlock(type, Arrays.asList(values));
+    }
+
+    public static ValueBlock createLongTimestampBlock(TimestampType type, Iterable<LongTimestamp> values)
+    {
+        BlockBuilder builder = type.createFixedSizeBlockBuilder(100);
+
+        for (LongTimestamp value : values) {
+            if (value == null) {
+                builder.appendNull();
+            }
+            else {
+                type.writeObject(builder, value);
+            }
+        }
+
+        return builder.buildValueBlock();
+    }
+
+    public static ValueBlock createCharsBlock(CharType charType, List<String> values)
     {
         return createBlock(charType, charType::writeString, values);
     }
 
-    public static Block createIntsBlock(Integer... values)
+    public static ValueBlock createTinyintsBlock(Integer... values)
+    {
+        requireNonNull(values, "values is null");
+
+        return createTinyintsBlock(Arrays.asList(values));
+    }
+
+    public static ValueBlock createTinyintsBlock(Iterable<Integer> values)
+    {
+        return createBlock(TINYINT, (ValueWriter<Integer>) TINYINT::writeLong, values);
+    }
+
+    public static ValueBlock createSmallintsBlock(Integer... values)
+    {
+        requireNonNull(values, "values is null");
+
+        return createSmallintsBlock(Arrays.asList(values));
+    }
+
+    public static ValueBlock createSmallintsBlock(Iterable<Integer> values)
+    {
+        return createBlock(SMALLINT, (ValueWriter<Integer>) SMALLINT::writeLong, values);
+    }
+
+    public static ValueBlock createIntsBlock(Integer... values)
     {
         requireNonNull(values, "values is null");
 
         return createIntsBlock(Arrays.asList(values));
     }
 
-    public static Block createIntsBlock(Iterable<Integer> values)
+    public static ValueBlock createIntsBlock(Iterable<Integer> values)
     {
         return createBlock(INTEGER, (ValueWriter<Integer>) INTEGER::writeLong, values);
     }
 
-    public static Block createRowBlock(List<Type> fieldTypes, Object[]... rows)
+    public static RowBlock createRowBlock(List<Type> fieldTypes, Object[]... rows)
     {
-        BlockBuilder rowBlockBuilder = new RowBlockBuilder(fieldTypes, null, 1);
+        RowBlockBuilder rowBlockBuilder = new RowBlockBuilder(fieldTypes, null, 1);
         for (Object[] row : rows) {
             if (row == null) {
                 rowBlockBuilder.appendNull();
                 continue;
             }
-            BlockBuilder singleRowBlockWriter = rowBlockBuilder.beginBlockEntry();
-            for (Object fieldValue : row) {
-                if (fieldValue == null) {
-                    singleRowBlockWriter.appendNull();
-                    continue;
+            verify(row.length == fieldTypes.size());
+            rowBlockBuilder.buildEntry(fieldBuilders -> {
+                for (int fieldIndex = 0; fieldIndex < fieldTypes.size(); fieldIndex++) {
+                    Type fieldType = fieldTypes.get(fieldIndex);
+                    Object fieldValue = row[fieldIndex];
+                    switch (fieldValue) {
+                        case null -> fieldBuilders.get(fieldIndex).appendNull();
+                        case String s -> fieldType.writeSlice(fieldBuilders.get(fieldIndex), utf8Slice(s));
+                        case Slice slice -> fieldType.writeSlice(fieldBuilders.get(fieldIndex), slice);
+                        case Double v -> fieldType.writeDouble(fieldBuilders.get(fieldIndex), v);
+                        case Long l -> fieldType.writeLong(fieldBuilders.get(fieldIndex), l);
+                        case Boolean b -> fieldType.writeBoolean(fieldBuilders.get(fieldIndex), b);
+                        case Block _ -> fieldType.writeObject(fieldBuilders.get(fieldIndex), fieldValue);
+                        case Integer i -> fieldType.writeLong(fieldBuilders.get(fieldIndex), i);
+                        default -> throw new IllegalArgumentException();
+                    }
                 }
-
-                if (fieldValue instanceof String) {
-                    VARCHAR.writeSlice(singleRowBlockWriter, utf8Slice((String) fieldValue));
-                }
-                else if (fieldValue instanceof Slice) {
-                    VARBINARY.writeSlice(singleRowBlockWriter, (Slice) fieldValue);
-                }
-                else if (fieldValue instanceof Double) {
-                    DOUBLE.writeDouble(singleRowBlockWriter, (Double) fieldValue);
-                }
-                else if (fieldValue instanceof Long) {
-                    BIGINT.writeLong(singleRowBlockWriter, (Long) fieldValue);
-                }
-                else if (fieldValue instanceof Boolean) {
-                    BOOLEAN.writeBoolean(singleRowBlockWriter, (Boolean) fieldValue);
-                }
-                else if (fieldValue instanceof Block) {
-                    singleRowBlockWriter.appendStructure((Block) fieldValue);
-                }
-                else if (fieldValue instanceof Integer) {
-                    INTEGER.writeLong(singleRowBlockWriter, (Integer) fieldValue);
-                }
-                else {
-                    throw new IllegalArgumentException();
-                }
-            }
-            rowBlockBuilder.closeEntry();
+            });
         }
 
-        return rowBlockBuilder.build();
+        return rowBlockBuilder.buildValueBlock();
     }
 
-    public static Block createEmptyLongsBlock()
+    public static ValueBlock createEmptyLongsBlock()
     {
-        return BIGINT.createFixedSizeBlockBuilder(0).build();
+        return BIGINT.createFixedSizeBlockBuilder(0).buildValueBlock();
     }
 
     // This method makes it easy to create blocks without having to add an L to every value
-    public static Block createLongsBlock(int... values)
+    public static ValueBlock createLongsBlock(int... values)
     {
-        BlockBuilder builder = BIGINT.createBlockBuilder(null, 100);
+        BlockBuilder builder = BIGINT.createFixedSizeBlockBuilder(100);
 
         for (int value : values) {
             BIGINT.writeLong(builder, value);
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createLongsBlock(Long... values)
+    public static ValueBlock createLongsBlock(Long... values)
     {
         requireNonNull(values, "values is null");
 
         return createLongsBlock(Arrays.asList(values));
     }
 
-    public static Block createLongsBlock(Iterable<Long> values)
+    public static ValueBlock createLongsBlock(Iterable<Long> values)
     {
         return createTypedLongsBlock(BIGINT, values);
     }
 
-    public static Block createTypedLongsBlock(Type type, Iterable<Long> values)
+    public static ValueBlock createTypedLongsBlock(Type type, Iterable<Long> values)
     {
         return createBlock(type, type::writeLong, values);
     }
 
-    public static Block createLongSequenceBlock(int start, int end)
+    public static ValueBlock createTypedLongsBlock(Type type, Long... values)
+    {
+        return createBlock(type, type::writeLong, Arrays.asList(values));
+    }
+
+    public static ValueBlock createLongSequenceBlock(int start, int end)
     {
         BlockBuilder builder = BIGINT.createFixedSizeBlockBuilder(end - start);
 
@@ -578,7 +686,7 @@ public final class BlockAssertions
             BIGINT.writeLong(builder, i);
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
     public static Block createLongDictionaryBlock(int start, int length)
@@ -591,7 +699,7 @@ public final class BlockAssertions
     {
         checkArgument(dictionarySize > 0, "dictionarySize must be greater than 0");
 
-        BlockBuilder builder = BIGINT.createBlockBuilder(null, dictionarySize);
+        BlockBuilder builder = BIGINT.createFixedSizeBlockBuilder(dictionarySize);
         for (int i = start; i < start + dictionarySize; i++) {
             BIGINT.writeLong(builder, i);
         }
@@ -599,37 +707,37 @@ public final class BlockAssertions
         for (int i = 0; i < length; i++) {
             ids[i] = i % dictionarySize;
         }
-        return new DictionaryBlock(builder.build(), ids);
+        return DictionaryBlock.create(ids.length, builder.build(), ids);
     }
 
-    public static Block createLongRepeatBlock(int value, int length)
+    public static ValueBlock createLongRepeatBlock(int value, int length)
     {
         BlockBuilder builder = BIGINT.createFixedSizeBlockBuilder(length);
         for (int i = 0; i < length; i++) {
             BIGINT.writeLong(builder, value);
         }
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createDoubleRepeatBlock(double value, int length)
+    public static ValueBlock createDoubleRepeatBlock(double value, int length)
     {
         BlockBuilder builder = DOUBLE.createFixedSizeBlockBuilder(length);
         for (int i = 0; i < length; i++) {
             DOUBLE.writeDouble(builder, value);
         }
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createTimestampsWithTimeZoneMillisBlock(Long... values)
+    public static ValueBlock createTimestampsWithTimeZoneMillisBlock(Long... values)
     {
         BlockBuilder builder = TIMESTAMP_TZ_MILLIS.createFixedSizeBlockBuilder(values.length);
         for (long value : values) {
             TIMESTAMP_TZ_MILLIS.writeLong(builder, value);
         }
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createBooleanSequenceBlock(int start, int end)
+    public static ValueBlock createBooleanSequenceBlock(int start, int end)
     {
         BlockBuilder builder = BOOLEAN.createFixedSizeBlockBuilder(end - start);
 
@@ -637,19 +745,19 @@ public final class BlockAssertions
             BOOLEAN.writeBoolean(builder, i % 2 == 0);
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createBlockOfReals(Float... values)
+    public static ValueBlock createBlockOfReals(Float... values)
     {
         requireNonNull(values, "values is null");
 
         return createBlockOfReals(Arrays.asList(values));
     }
 
-    public static Block createBlockOfReals(Iterable<Float> values)
+    public static ValueBlock createBlockOfReals(Iterable<Float> values)
     {
-        BlockBuilder builder = REAL.createBlockBuilder(null, 100);
+        BlockBuilder builder = REAL.createFixedSizeBlockBuilder(100);
         for (Float value : values) {
             if (value == null) {
                 builder.appendNull();
@@ -658,10 +766,10 @@ public final class BlockAssertions
                 REAL.writeLong(builder, floatToRawIntBits(value));
             }
         }
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createSequenceBlockOfReal(int start, int end)
+    public static ValueBlock createSequenceBlockOfReal(int start, int end)
     {
         BlockBuilder builder = REAL.createFixedSizeBlockBuilder(end - start);
 
@@ -669,22 +777,22 @@ public final class BlockAssertions
             REAL.writeLong(builder, floatToRawIntBits(i));
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createDoublesBlock(Double... values)
+    public static ValueBlock createDoublesBlock(Double... values)
     {
         requireNonNull(values, "values is null");
 
         return createDoublesBlock(Arrays.asList(values));
     }
 
-    public static Block createDoublesBlock(Iterable<Double> values)
+    public static ValueBlock createDoublesBlock(Iterable<Double> values)
     {
         return createBlock(DOUBLE, DOUBLE::writeDouble, values);
     }
 
-    public static Block createDoubleSequenceBlock(int start, int end)
+    public static ValueBlock createDoubleSequenceBlock(int start, int end)
     {
         BlockBuilder builder = DOUBLE.createFixedSizeBlockBuilder(end - start);
 
@@ -692,10 +800,10 @@ public final class BlockAssertions
             DOUBLE.writeDouble(builder, i);
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createArrayBigintBlock(Iterable<? extends Iterable<Long>> values)
+    public static ValueBlock createArrayBigintBlock(Iterable<? extends Iterable<Long>> values)
     {
         ArrayType arrayType = new ArrayType(BIGINT);
         BlockBuilder builder = arrayType.createBlockBuilder(null, 100);
@@ -709,10 +817,10 @@ public final class BlockAssertions
             }
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createDateSequenceBlock(int start, int end)
+    public static ValueBlock createDateSequenceBlock(int start, int end)
     {
         BlockBuilder builder = DATE.createFixedSizeBlockBuilder(end - start);
 
@@ -720,10 +828,10 @@ public final class BlockAssertions
             DATE.writeLong(builder, i);
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createTimestampSequenceBlock(int start, int end)
+    public static ValueBlock createTimestampSequenceBlock(int start, int end)
     {
         BlockBuilder builder = TIMESTAMP_MILLIS.createFixedSizeBlockBuilder(end - start);
 
@@ -731,10 +839,10 @@ public final class BlockAssertions
             TIMESTAMP_MILLIS.writeLong(builder, multiplyExact(i, MICROSECONDS_PER_MILLISECOND));
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createShortDecimalSequenceBlock(int start, int end, DecimalType type)
+    public static ValueBlock createShortDecimalSequenceBlock(int start, int end, DecimalType type)
     {
         BlockBuilder builder = type.createFixedSizeBlockBuilder(end - start);
         long base = BigInteger.TEN.pow(type.getScale()).longValue();
@@ -743,54 +851,54 @@ public final class BlockAssertions
             type.writeLong(builder, base * i);
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createLongDecimalSequenceBlock(int start, int end, DecimalType type)
+    public static ValueBlock createLongDecimalSequenceBlock(int start, int end, DecimalType type)
     {
         BlockBuilder builder = type.createFixedSizeBlockBuilder(end - start);
         BigInteger base = BigInteger.TEN.pow(type.getScale());
 
         for (int i = start; i < end; ++i) {
-            type.writeSlice(builder, encodeUnscaledValue(BigInteger.valueOf(i).multiply(base)));
+            type.writeObject(builder, Int128.valueOf(BigInteger.valueOf(i).multiply(base)));
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createColorRepeatBlock(int value, int length)
+    public static ValueBlock createColorRepeatBlock(int value, int length)
     {
         BlockBuilder builder = COLOR.createFixedSizeBlockBuilder(length);
         for (int i = 0; i < length; i++) {
             COLOR.writeLong(builder, value);
         }
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static Block createColorSequenceBlock(int start, int end)
+    public static ValueBlock createColorSequenceBlock(int start, int end)
     {
-        BlockBuilder builder = COLOR.createBlockBuilder(null, end - start);
+        BlockBuilder builder = COLOR.createFixedSizeBlockBuilder(end - start);
         for (int i = start; i < end; ++i) {
             COLOR.writeLong(builder, i);
         }
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
-    public static RunLengthEncodedBlock createRLEBlock(double value, int positionCount)
+    public static Block createRepeatedValuesBlock(double value, int positionCount)
     {
-        BlockBuilder blockBuilder = DOUBLE.createBlockBuilder(null, 1);
+        BlockBuilder blockBuilder = DOUBLE.createFixedSizeBlockBuilder(1);
         DOUBLE.writeDouble(blockBuilder, value);
-        return new RunLengthEncodedBlock(blockBuilder.build(), positionCount);
+        return RunLengthEncodedBlock.create(blockBuilder.build(), positionCount);
     }
 
-    public static RunLengthEncodedBlock createRLEBlock(long value, int positionCount)
+    public static Block createRepeatedValuesBlock(long value, int positionCount)
     {
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, 1);
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(1);
         BIGINT.writeLong(blockBuilder, value);
-        return new RunLengthEncodedBlock(blockBuilder.build(), positionCount);
+        return RunLengthEncodedBlock.create(blockBuilder.build(), positionCount);
     }
 
-    private static <T> Block createBlock(Type type, ValueWriter<T> valueWriter, Iterable<T> values)
+    private static <T> ValueBlock createBlock(Type type, ValueWriter<T> valueWriter, Iterable<T> values)
     {
         BlockBuilder builder = type.createBlockBuilder(null, 100);
 
@@ -803,7 +911,7 @@ public final class BlockAssertions
             }
         }
 
-        return builder.build();
+        return builder.buildValueBlock();
     }
 
     private interface ValueWriter<T>
@@ -811,38 +919,30 @@ public final class BlockAssertions
         void write(BlockBuilder builder, T value);
     }
 
-    private static Set<Integer> chooseNullPositions(int positionCount, float nullRate)
-    {
-        int nullCount = (int) (positionCount * nullRate);
-        if (nullCount == 0) {
-            verify(nullRate == 0, "position count %s too small to have at least one null with rate %s", (Object) positionCount, nullRate);
-            return ImmutableSet.of();
-        }
-        return chooseRandomUnique(positionCount, nullCount);
-    }
-
     private static Set<Integer> chooseRandomUnique(int bound, int count)
     {
+        Random random = random();
         if (count < bound / 10) {
             // it's an order of bound/count faster to use this method for small enough count/bound ratio
             Set<Integer> values = new HashSet<>(count);
             while (values.size() < count) {
-                values.add(RANDOM.nextInt(bound));
+                values.add(random.nextInt(bound));
             }
             return ImmutableSet.copyOf(values);
         }
 
         List<Integer> allNumbers = IntStream.range(0, bound).boxed().collect(toList());
-        Collections.shuffle(allNumbers, RANDOM);
+        Collections.shuffle(allNumbers, random);
         return allNumbers.stream().limit(count).collect(toImmutableSet());
     }
 
     private static String generateRandomStringWithLength(int length)
     {
         String symbols = "abcdefghijklmnopqrstuvwxyz";
+        Random random = random();
         char[] chars = new char[length];
         for (int i = 0; i < length; i++) {
-            chars[i] = symbols.charAt(RANDOM.nextInt(symbols.length()));
+            chars[i] = symbols.charAt(random.nextInt(symbols.length()));
         }
         return new String(chars);
     }
@@ -850,5 +950,10 @@ public final class BlockAssertions
     private static void verifyNullRate(float nullRate)
     {
         verify(nullRate >= 0 && nullRate <= 1, "nullRate %s is not valid", nullRate);
+    }
+
+    private static Random random()
+    {
+        return new Random(RANDOM_SEED);
     }
 }

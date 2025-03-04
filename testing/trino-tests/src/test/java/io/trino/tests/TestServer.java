@@ -25,8 +25,12 @@ import io.airlift.http.client.Request;
 import io.airlift.http.client.StatusResponseHandler.StatusResponse;
 import io.airlift.http.client.jetty.JettyHttpClient;
 import io.airlift.json.JsonCodec;
+import io.airlift.json.JsonCodecFactory;
+import io.airlift.json.ObjectMapperProvider;
+import io.trino.client.QueryDataClientJacksonModule;
 import io.trino.client.QueryError;
 import io.trino.client.QueryResults;
+import io.trino.client.ResultRowsDecoder;
 import io.trino.plugin.memory.MemoryPlugin;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.testing.TestingTrinoServer;
@@ -34,14 +38,17 @@ import io.trino.spi.QueryId;
 import io.trino.spi.type.TimeZoneNotSupportedException;
 import io.trino.testing.TestingTrinoClient;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.net.URI;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collector;
 import java.util.stream.Collectors;
@@ -51,6 +58,7 @@ import java.util.stream.Stream;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Throwables.getStackTraceAsString;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
 import static com.google.common.net.HttpHeaders.X_FORWARDED_HOST;
 import static com.google.common.net.HttpHeaders.X_FORWARDED_PORT;
@@ -61,40 +69,44 @@ import static io.airlift.http.client.Request.Builder.prepareHead;
 import static io.airlift.http.client.Request.Builder.preparePost;
 import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerator;
 import static io.airlift.http.client.StatusResponseHandler.createStatusResponseHandler;
-import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.airlift.testing.Closeables.closeAll;
-import static io.trino.SystemSessionProperties.HASH_PARTITION_COUNT;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
+import static io.trino.SystemSessionProperties.MAX_HASH_PARTITION_COUNT;
 import static io.trino.SystemSessionProperties.QUERY_MAX_MEMORY;
+import static io.trino.client.ClientCapabilities.PATH;
+import static io.trino.client.ClientCapabilities.SESSION_AUTHORIZATION;
 import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.spi.StandardErrorCode.INCOMPATIBLE_CLIENT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON;
+import static jakarta.ws.rs.core.Response.Status.OK;
+import static jakarta.ws.rs.core.Response.Status.SEE_OTHER;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
-import static javax.ws.rs.core.MediaType.APPLICATION_JSON;
-import static javax.ws.rs.core.Response.Status.OK;
-import static javax.ws.rs.core.Response.Status.SEE_OTHER;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNotNull;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Fail.fail;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestServer
 {
-    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
+    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = new JsonCodecFactory(new ObjectMapperProvider()
+            .withModules(Set.of(new QueryDataClientJacksonModule())))
+            .jsonCodec(QueryResults.class);
+
     private TestingTrinoServer server;
     private HttpClient client;
 
-    @BeforeClass
+    @BeforeAll
     public void setup()
     {
         server = TestingTrinoServer.builder()
-                .setProperties(ImmutableMap.<String, String>builder()
-                        .put("http-server.process-forwarded", "true")
-                        .build())
+                .setProperties(ImmutableMap.of("http-server.process-forwarded", "true"))
                 .build();
 
         server.installPlugin(new MemoryPlugin());
@@ -103,11 +115,13 @@ public class TestServer
         client = new JettyHttpClient();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
             throws Exception
     {
         closeAll(server, client);
+        server = null;
+        client = null;
     }
 
     @Test
@@ -125,16 +139,17 @@ public class TestServer
                 .collect(last());
 
         QueryError queryError = queryResults.getError();
-        assertNotNull(queryError);
+        assertThat(queryError).isNotNull();
         TimeZoneNotSupportedException expected = new TimeZoneNotSupportedException(invalidTimeZone);
-        assertEquals(queryError.getErrorCode(), expected.getErrorCode().getCode());
-        assertEquals(queryError.getErrorName(), expected.getErrorCode().getName());
-        assertEquals(queryError.getErrorType(), expected.getErrorCode().getType().name());
-        assertEquals(queryError.getMessage(), expected.getMessage());
+        assertThat(queryError.getErrorCode()).isEqualTo(expected.getErrorCode().getCode());
+        assertThat(queryError.getErrorName()).isEqualTo(expected.getErrorCode().getName());
+        assertThat(queryError.getErrorType()).isEqualTo(expected.getErrorCode().getType().name());
+        assertThat(queryError.getMessage()).isEqualTo(expected.getMessage());
     }
 
     @Test
     public void testFirstResponseColumns()
+            throws Exception
     {
         List<QueryResults> queryResults = postQuery(request -> request
                 .setBodyGenerator(createStaticBodyGenerator("show catalogs", UTF_8))
@@ -144,24 +159,27 @@ public class TestServer
                 .map(JsonResponse::getValue)
                 .collect(toImmutableList());
 
-        QueryResults first = queryResults.get(0);
-        QueryResults last = queryResults.get(queryResults.size() - 1);
+        QueryResults first = queryResults.getFirst();
+        QueryResults last = queryResults.getLast();
 
         Optional<QueryResults> data = queryResults.stream().filter(results -> results.getData() != null).findFirst();
 
-        assertNull(first.getColumns());
-        assertEquals(first.getStats().getState(), "QUEUED");
-        assertNull(first.getData());
+        assertThat(first.getColumns()).isNull();
+        assertThat(first.getStats().getState()).isEqualTo("QUEUED");
+        assertThat(first.getData()).isNull();
 
         assertThat(last.getColumns()).hasSize(1);
-        assertThat(last.getColumns().get(0).getName()).isEqualTo("Catalog");
-        assertThat(last.getColumns().get(0).getType()).isEqualTo("varchar(6)");
-        assertEquals(last.getStats().getState(), "FINISHED");
+        assertThat(getOnlyElement(last.getColumns()).getName()).isEqualTo("Catalog");
+        assertThat(getOnlyElement(last.getColumns()).getType()).isEqualTo("varchar(6)");
+        assertThat(last.getStats().getState()).isEqualTo("FINISHED");
 
         assertThat(data).isPresent();
 
         QueryResults results = data.orElseThrow();
-        assertThat(results.getData()).containsOnly(ImmutableList.of("memory"), ImmutableList.of("system"));
+
+        try (ResultRowsDecoder decoder = new ResultRowsDecoder()) {
+            assertThat(decoder.toRows(results)).containsOnly(ImmutableList.of("memory"), ImmutableList.of("system"));
+        }
     }
 
     @Test
@@ -171,7 +189,7 @@ public class TestServer
                 prepareGet().setUri(server.resolve("/v1/info")).build(),
                 createStatusResponseHandler());
 
-        assertEquals(response.getStatusCode(), OK.getStatusCode());
+        assertThat(response.getStatusCode()).isEqualTo(OK.getStatusCode());
     }
 
     @Test
@@ -185,13 +203,18 @@ public class TestServer
                 .setHeader(TRINO_HEADERS.requestPath(), "path")
                 .setHeader(TRINO_HEADERS.requestClientInfo(), "{\"clientVersion\":\"testVersion\"}")
                 .addHeader(TRINO_HEADERS.requestSession(), QUERY_MAX_MEMORY + "=1GB")
-                .addHeader(TRINO_HEADERS.requestSession(), JOIN_DISTRIBUTION_TYPE + "=partitioned," + HASH_PARTITION_COUNT + " = 43")
+                .addHeader(TRINO_HEADERS.requestSession(), JOIN_DISTRIBUTION_TYPE + "=partitioned," + MAX_HASH_PARTITION_COUNT + " = 43")
                 .addHeader(TRINO_HEADERS.requestPreparedStatement(), "foo=select * from bar"))
                 .map(JsonResponse::getValue)
-                .peek(result -> assertNull(result.getError()))
+                .peek(result -> assertThat(result.getError()).isNull())
                 .peek(results -> {
                     if (results.getData() != null) {
-                        data.addAll(results.getData());
+                        try (ResultRowsDecoder decoder = new ResultRowsDecoder()) {
+                            data.addAll(decoder.toRows(results));
+                        }
+                        catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
                     }
                 })
                 .collect(last());
@@ -200,22 +223,20 @@ public class TestServer
         BasicQueryInfo queryInfo = server.getQueryManager().getQueryInfo(new QueryId(queryResults.getId()));
 
         // verify session properties
-        assertEquals(queryInfo.getSession().getSystemProperties(), ImmutableMap.builder()
+        assertThat(queryInfo.getSession().getSystemProperties()).isEqualTo(ImmutableMap.builder()
                 .put(QUERY_MAX_MEMORY, "1GB")
                 .put(JOIN_DISTRIBUTION_TYPE, "partitioned")
-                .put(HASH_PARTITION_COUNT, "43")
-                .build());
+                .put(MAX_HASH_PARTITION_COUNT, "43")
+                .buildOrThrow());
 
         // verify client info in session
-        assertEquals(queryInfo.getSession().getClientInfo().get(), "{\"clientVersion\":\"testVersion\"}");
+        assertThat(queryInfo.getSession().getClientInfo().get()).isEqualTo("{\"clientVersion\":\"testVersion\"}");
 
         // verify prepared statements
-        assertEquals(queryInfo.getSession().getPreparedStatements(), ImmutableMap.builder()
-                .put("foo", "select * from bar")
-                .build());
+        assertThat(queryInfo.getSession().getPreparedStatements()).isEqualTo(ImmutableMap.of("foo", "select * from bar"));
 
         List<List<Object>> rows = data.build();
-        assertEquals(rows, ImmutableList.of(ImmutableList.of("memory"), ImmutableList.of("system")));
+        assertThat(rows).isEqualTo(ImmutableList.of(ImmutableList.of("memory"), ImmutableList.of("system")));
     }
 
     @Test
@@ -224,9 +245,9 @@ public class TestServer
         JsonResponse<QueryResults> queryResults = postQuery(request -> request
                 .setBodyGenerator(createStaticBodyGenerator("start transaction", UTF_8))
                 .setHeader(TRINO_HEADERS.requestTransactionId(), "none"))
-                .peek(result -> assertNull(result.getValue().getError()))
+                .peek(result -> assertThat(result.getValue().getError()).isNull())
                 .collect(last());
-        assertNotNull(queryResults.getHeader(TRINO_HEADERS.responseStartedTransactionId()));
+        assertThat(queryResults.getHeader(TRINO_HEADERS.responseStartedTransactionId())).isNotNull();
     }
 
     @Test
@@ -238,8 +259,8 @@ public class TestServer
                 .findFirst()
                 .orElseThrow(() -> new RuntimeException("Error expected"));
 
-        assertNull(queryResults.getNextUri());
-        assertEquals(queryResults.getError().getErrorCode(), INCOMPATIBLE_CLIENT.toErrorCode().getCode());
+        assertThat(queryResults.getNextUri()).isNull();
+        assertThat(queryResults.getError().getErrorCode()).isEqualTo(INCOMPATIBLE_CLIENT.toErrorCode().getCode());
     }
 
     @Test
@@ -248,7 +269,7 @@ public class TestServer
         // fails during parsing
         checkVersionOnError("SELECT query that fails parsing", "ParsingException: line 1:19: mismatched input 'fails'. Expecting");
         // fails during analysis
-        checkVersionOnError("SELECT foo FROM some_catalog.some_schema.no_such_table", "TrinoException: line 1:17: Catalog 'some_catalog' does not exist");
+        checkVersionOnError("SELECT foo FROM some_catalog.some_schema.no_such_table", "TrinoException: line 1:17: Catalog 'some_catalog' not found");
         // fails during Values evaluation in LocalExecutionPlanner
         checkVersionOnError("SELECT 1 / 0", "TrinoException: Division by zero(?s:.*)at io.trino.sql.planner.LocalExecutionPlanner.plan");
         checkVersionOnError("select 1 / a from (values 0) t(a)", "TrinoException: Division by zero(?s:.*)at io.trino.sql.planner.LocalExecutionPlanner.plan");
@@ -273,7 +294,48 @@ public class TestServer
                     String.join(" || ", Collections.nCopies(10, array)) +
                     "FROM " + tableName;
 
-            checkVersionOnError(query, "TrinoException: Compiler failed(?s:.*)at io.trino.sql.gen.ExpressionCompiler.compile");
+            checkVersionOnError(query, "TrinoException: Query exceeded maximum columns(?s:.*)at io.trino.sql.gen.PageFunctionCompiler.compileProjectionInternal");
+        }
+    }
+
+    @Test
+    public void testSetPathSupportByClient()
+    {
+        try (TestingTrinoClient testingClient = new TestingTrinoClient(server, testSessionBuilder().setClientCapabilities(Set.of()).build())) {
+            assertThatThrownBy(() -> testingClient.execute("SET PATH foo"))
+                    .hasMessage("SET PATH not supported by client");
+        }
+
+        try (TestingTrinoClient testingClient = new TestingTrinoClient(server, testSessionBuilder().setClientCapabilities(Set.of(PATH.name())).build())) {
+            testingClient.execute("SET PATH foo");
+        }
+    }
+
+    @Test
+    public void testSetSessionSupportByClient()
+    {
+        try (TestingTrinoClient testingClient = new TestingTrinoClient(server, testSessionBuilder().setClientCapabilities(Set.of()).build())) {
+            assertThatThrownBy(() -> testingClient.execute("SET SESSION AUTHORIZATION userA"))
+                    .hasMessage("SET SESSION AUTHORIZATION not supported by client");
+        }
+
+        try (TestingTrinoClient testingClient = new TestingTrinoClient(server, testSessionBuilder().setClientCapabilities(Set.of(
+                SESSION_AUTHORIZATION.name())).build())) {
+            testingClient.execute("SET SESSION AUTHORIZATION userA");
+        }
+    }
+
+    @Test
+    public void testResetSessionSupportByClient()
+    {
+        try (TestingTrinoClient testingClient = new TestingTrinoClient(server, testSessionBuilder().setClientCapabilities(Set.of()).build())) {
+            assertThatThrownBy(() -> testingClient.execute("RESET SESSION AUTHORIZATION"))
+                    .hasMessage("RESET SESSION AUTHORIZATION not supported by client");
+        }
+
+        try (TestingTrinoClient testingClient = new TestingTrinoClient(server, testSessionBuilder().setClientCapabilities(Set.of(
+                SESSION_AUTHORIZATION.name())).build())) {
+            testingClient.execute("RESET SESSION AUTHORIZATION");
         }
     }
 
@@ -286,7 +348,7 @@ public class TestServer
                 .findFirst()
                 .orElseThrow(() -> new RuntimeException("Error expected"));
 
-        assertNull(queryResults.getNextUri());
+        assertThat(queryResults.getNextUri()).isNull();
         QueryError queryError = queryResults.getError();
         String stackTrace = getStackTraceAsString(queryError.getFailureInfo().toException());
         assertThat(stackTrace).containsPattern(proofOfOrigin);
@@ -307,8 +369,12 @@ public class TestServer
                 .setFollowRedirects(false)
                 .build();
         StatusResponse response = client.execute(request, createStatusResponseHandler());
-        assertEquals(response.getStatusCode(), OK.getStatusCode(), "Status code");
-        assertEquals(response.getHeader(CONTENT_TYPE), APPLICATION_JSON, "Content Type");
+        assertThat(response.getStatusCode())
+                .describedAs("Status code")
+                .isEqualTo(OK.getStatusCode());
+        assertThat(response.getHeader(CONTENT_TYPE))
+                .describedAs("Content Type")
+                .isEqualTo(APPLICATION_JSON);
     }
 
     @Test
@@ -319,8 +385,12 @@ public class TestServer
                 .setFollowRedirects(false)
                 .build();
         StatusResponse response = client.execute(request, createStatusResponseHandler());
-        assertEquals(response.getStatusCode(), SEE_OTHER.getStatusCode(), "Status code");
-        assertEquals(response.getHeader("Location"), server.getBaseUrl() + "/ui/", "Location");
+        assertThat(response.getStatusCode())
+                .describedAs("Status code")
+                .isEqualTo(SEE_OTHER.getStatusCode());
+        assertThat(response.getHeader("Location"))
+                .describedAs("Location")
+                .isEqualTo(server.getBaseUrl() + "/ui/");
 
         // behind a proxy
         request = prepareGet()
@@ -331,8 +401,12 @@ public class TestServer
                 .setFollowRedirects(false)
                 .build();
         response = client.execute(request, createStatusResponseHandler());
-        assertEquals(response.getStatusCode(), SEE_OTHER.getStatusCode(), "Status code");
-        assertEquals(response.getHeader("Location"), "https://my-load-balancer.local/ui/", "Location");
+        assertThat(response.getStatusCode())
+                .describedAs("Status code")
+                .isEqualTo(SEE_OTHER.getStatusCode());
+        assertThat(response.getHeader("Location"))
+                .describedAs("Location")
+                .isEqualTo("https://my-load-balancer.local/ui/");
     }
 
     private Stream<JsonResponse<QueryResults>> postQuery(Function<Request.Builder, Request.Builder> requestConfigurer)

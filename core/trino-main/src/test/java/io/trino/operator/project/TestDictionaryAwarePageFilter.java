@@ -24,16 +24,16 @@ import io.trino.spi.connector.ConnectorSession;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntArraySet;
 import it.unimi.dsi.fastutil.ints.IntSet;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.stream.IntStream;
 
 import static io.trino.block.BlockAssertions.createLongSequenceBlock;
 import static io.trino.block.BlockAssertions.createLongsBlock;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
 
 public class TestDictionaryAwarePageFilter
 {
@@ -41,8 +41,8 @@ public class TestDictionaryAwarePageFilter
     public void testDelegateMethods()
     {
         DictionaryAwarePageFilter filter = new DictionaryAwarePageFilter(new TestDictionaryFilter(true));
-        assertEquals(filter.isDeterministic(), true);
-        assertEquals(filter.getInputChannels().getInputChannels(), ImmutableList.of(3));
+        assertThat(filter.isDeterministic()).isEqualTo(true);
+        assertThat(filter.getInputChannels().getInputChannels()).isEqualTo(ImmutableList.of(3));
     }
 
     @Test
@@ -62,9 +62,9 @@ public class TestDictionaryAwarePageFilter
     private static void testRleBlock(boolean filterRange)
     {
         DictionaryAwarePageFilter filter = createDictionaryAwarePageFilter(filterRange, LongArrayBlock.class);
-        RunLengthEncodedBlock match = new RunLengthEncodedBlock(createLongSequenceBlock(4, 5), 100);
+        RunLengthEncodedBlock match = (RunLengthEncodedBlock) RunLengthEncodedBlock.create(createLongSequenceBlock(4, 5), 100);
         testFilter(filter, match, filterRange);
-        RunLengthEncodedBlock noMatch = new RunLengthEncodedBlock(createLongSequenceBlock(0, 1), 100);
+        RunLengthEncodedBlock noMatch = (RunLengthEncodedBlock) RunLengthEncodedBlock.create(createLongSequenceBlock(0, 1), 100);
         testFilter(filter, noMatch, filterRange);
     }
 
@@ -72,7 +72,7 @@ public class TestDictionaryAwarePageFilter
     public void testRleBlockWithFailure()
     {
         DictionaryAwarePageFilter filter = createDictionaryAwarePageFilter(true, LongArrayBlock.class);
-        RunLengthEncodedBlock fail = new RunLengthEncodedBlock(createLongSequenceBlock(-10, -9), 100);
+        RunLengthEncodedBlock fail = (RunLengthEncodedBlock) RunLengthEncodedBlock.create(createLongSequenceBlock(-10, -9), 100);
         assertThatThrownBy(() -> testFilter(filter, fail, true))
                 .isInstanceOf(NegativeValueException.class)
                 .hasMessage("value is negative: -10");
@@ -88,7 +88,7 @@ public class TestDictionaryAwarePageFilter
         testFilter(createDictionaryBlock(20, 0), LongArrayBlock.class);
 
         // match all
-        testFilter(new DictionaryBlock(createLongSequenceBlock(4, 5), new int[100]), LongArrayBlock.class);
+        testFilter(DictionaryBlock.create(100, createLongSequenceBlock(4, 5), new int[100]), LongArrayBlock.class);
     }
 
     @Test
@@ -105,11 +105,11 @@ public class TestDictionaryAwarePageFilter
         // match some
         testFilter(createDictionaryBlockWithUnusedEntries(20, 100), DictionaryBlock.class);
 
-        // match none
-        testFilter(createDictionaryBlockWithUnusedEntries(20, 0), DictionaryBlock.class);
+        // match none, blockSize must be > 1 to actually create a DictionaryBlock
+        testFilter(createDictionaryBlockWithUnusedEntries(20, 2), DictionaryBlock.class);
 
         // match all
-        testFilter(new DictionaryBlock(createLongsBlock(4, 5, -1), new int[100]), DictionaryBlock.class);
+        testFilter(DictionaryBlock.create(100, createLongsBlock(4, 5, -1), new int[100]), DictionaryBlock.class);
     }
 
     @Test
@@ -118,48 +118,53 @@ public class TestDictionaryAwarePageFilter
         TestDictionaryFilter nestedFilter = new TestDictionaryFilter(true);
         DictionaryAwarePageFilter filter = new DictionaryAwarePageFilter(nestedFilter);
 
-        DictionaryBlock ineffectiveBlock = createDictionaryBlock(100, 20);
-        DictionaryBlock effectiveBlock = createDictionaryBlock(10, 100);
+        Block ineffectiveBlock = createDictionaryBlock(100, 20);
+        Block effectiveBlock = createDictionaryBlock(10, 100);
+        Block anotherIneffectiveBlock = createDictionaryBlock(100, 25);
 
-        // function will always processes the first dictionary
+        // function will always process the first dictionary
         nestedFilter.setExpectedType(LongArrayBlock.class);
         testFilter(filter, ineffectiveBlock, true);
 
-        // last dictionary not effective, so dictionary processing is disabled
+        // last dictionary not effective and incoming dictionary is also ineffective, so dictionary processing is disabled
         nestedFilter.setExpectedType(DictionaryBlock.class);
-        testFilter(filter, effectiveBlock, true);
+        testFilter(filter, anotherIneffectiveBlock, true);
 
-        // last dictionary not effective, so dictionary processing is enabled again
+        for (int i = 0; i < 5; i++) {
+            // Increase usage count of large ineffective dictionary with multiple pages of small positions count
+            testFilter(filter, anotherIneffectiveBlock, true);
+        }
+        // last dictionary effective, so dictionary processing is enabled
         nestedFilter.setExpectedType(LongArrayBlock.class);
         testFilter(filter, ineffectiveBlock, true);
 
-        // last dictionary not effective, so dictionary processing is disabled again
-        nestedFilter.setExpectedType(DictionaryBlock.class);
+        // last dictionary not effective, but incoming dictionary is effective, so dictionary processing stays enabled
+        nestedFilter.setExpectedType(LongArrayBlock.class);
         testFilter(filter, effectiveBlock, true);
     }
 
-    private static DictionaryBlock createDictionaryBlock(int dictionarySize, int blockSize)
+    private static Block createDictionaryBlock(int dictionarySize, int blockSize)
     {
         Block dictionary = createLongSequenceBlock(0, dictionarySize);
         int[] ids = new int[blockSize];
         Arrays.setAll(ids, index -> index % dictionarySize);
-        return new DictionaryBlock(dictionary, ids);
+        return DictionaryBlock.create(ids.length, dictionary, ids);
     }
 
-    private static DictionaryBlock createDictionaryBlockWithFailure(int dictionarySize, int blockSize)
+    private static Block createDictionaryBlockWithFailure(int dictionarySize, int blockSize)
     {
         Block dictionary = createLongSequenceBlock(-10, dictionarySize - 10);
         int[] ids = new int[blockSize];
         Arrays.setAll(ids, index -> index % dictionarySize);
-        return new DictionaryBlock(dictionary, ids);
+        return DictionaryBlock.create(ids.length, dictionary, ids);
     }
 
-    private static DictionaryBlock createDictionaryBlockWithUnusedEntries(int dictionarySize, int blockSize)
+    private static Block createDictionaryBlockWithUnusedEntries(int dictionarySize, int blockSize)
     {
         Block dictionary = createLongSequenceBlock(-10, dictionarySize);
         int[] ids = new int[blockSize];
         Arrays.setAll(ids, index -> (index % dictionarySize) + 10);
-        return new DictionaryBlock(dictionary, ids);
+        return DictionaryBlock.create(ids.length, dictionary, ids);
     }
 
     private static void testFilter(Block block, Class<? extends Block> expectedType)
@@ -191,11 +196,11 @@ public class TestDictionaryAwarePageFilter
 
         IntSet expectedSelectedPositions = new IntArraySet(block.getPositionCount());
         for (int position = 0; position < block.getPositionCount(); position++) {
-            if (isSelected(filterRange, block.getLong(position, 0))) {
+            if (isSelected(filterRange, BIGINT.getLong(block, position))) {
                 expectedSelectedPositions.add(position);
             }
         }
-        assertEquals(actualSelectedPositions, expectedSelectedPositions);
+        assertThat(actualSelectedPositions).isEqualTo(expectedSelectedPositions);
     }
 
     private static IntSet toSet(SelectedPositions selectedPositions)
@@ -269,13 +274,13 @@ public class TestDictionaryAwarePageFilter
         @Override
         public SelectedPositions filter(ConnectorSession session, Page page)
         {
-            assertEquals(page.getChannelCount(), 1);
+            assertThat(page.getChannelCount()).isEqualTo(1);
             Block block = page.getBlock(0);
 
             boolean sequential = true;
             IntArrayList selectedPositions = new IntArrayList();
             for (int position = 0; position < block.getPositionCount(); position++) {
-                long value = block.getLong(position, 0);
+                long value = BIGINT.getLong(block, position);
                 verifyPositive(value);
 
                 boolean selected = isSelected(filterRange, value);
@@ -286,6 +291,13 @@ public class TestDictionaryAwarePageFilter
                     selectedPositions.add(position);
                 }
             }
+
+            // verify the input block is the expected type (this is to assure that
+            // dictionary processing enabled and disabled as expected)
+            // this check is performed last so that dictionary processing that fails
+            // is not checked (only the fall back processing is checked)
+            assertThat(block).isInstanceOf(expectedType);
+
             if (selectedPositions.isEmpty()) {
                 return SelectedPositions.positionsRange(0, 0);
             }
@@ -297,12 +309,6 @@ public class TestDictionaryAwarePageFilter
                 selectedPositions.add(0, -1);
                 selectedPositions.add(-1);
             }
-
-            // verify the input block is the expected type (this is to assure that
-            // dictionary processing enabled and disabled as expected)
-            // this check is performed last so that dictionary processing that fails
-            // is not checked (only the fall back processing is checked)
-            assertTrue(expectedType.isInstance(block));
 
             return SelectedPositions.positionsList(selectedPositions.elements(), 3, selectedPositions.size() - 6);
         }

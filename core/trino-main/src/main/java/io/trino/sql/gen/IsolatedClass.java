@@ -14,7 +14,6 @@
 package io.trino.sql.gen;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.io.ByteStreams;
 import io.airlift.bytecode.DynamicClassLoader;
 
 import java.io.IOException;
@@ -42,7 +41,7 @@ public final class IsolatedClass
         }
 
         // load classes into a private class loader
-        Map<String, Class<?>> isolatedClasses = dynamicClassLoader.defineClasses(builder.build());
+        Map<String, Class<?>> isolatedClasses = dynamicClassLoader.defineClasses(builder.buildOrThrow());
         Class<?> isolatedClass = isolatedClasses.get(implementationClass.getName());
 
         // verify the isolated class
@@ -60,7 +59,7 @@ public final class IsolatedClass
     {
         try (InputStream stream = clazz.getClassLoader().getResourceAsStream(clazz.getName().replace('.', '/') + ".class")) {
             checkArgument(stream != null, "Could not obtain byte code for class %s", clazz.getName());
-            return ByteStreams.toByteArray(stream);
+            return stream.readAllBytes();
         }
         catch (IOException e) {
             throw new RuntimeException(format("Could not obtain byte code for class %s", clazz.getName()), e);

@@ -13,42 +13,88 @@
  */
 package io.trino.execution.buffer;
 
-import io.airlift.compress.lz4.Lz4Compressor;
-import io.airlift.compress.lz4.Lz4Decompressor;
+import com.google.common.annotations.VisibleForTesting;
+import io.airlift.compress.v3.Compressor;
+import io.airlift.compress.v3.Decompressor;
+import io.airlift.compress.v3.lz4.Lz4Compressor;
+import io.airlift.compress.v3.lz4.Lz4Decompressor;
+import io.airlift.compress.v3.zstd.ZstdCompressor;
+import io.airlift.compress.v3.zstd.ZstdDecompressor;
 import io.trino.spi.block.BlockEncodingSerde;
-import io.trino.spiller.SpillCipher;
+
+import javax.crypto.SecretKey;
 
 import java.util.Optional;
+import java.util.OptionalInt;
 
+import static io.trino.execution.buffer.CompressionCodec.LZ4;
+import static io.trino.execution.buffer.CompressionCodec.ZSTD;
 import static java.util.Objects.requireNonNull;
 
 public class PagesSerdeFactory
 {
+    private static final int SERIALIZED_PAGE_DEFAULT_BLOCK_SIZE_IN_BYTES = 64 * 1024;
     private final BlockEncodingSerde blockEncodingSerde;
-    private final boolean compressionEnabled;
+    private final CompressionCodec compressionCodec;
+    private final int blockSizeInBytes;
 
-    public PagesSerdeFactory(BlockEncodingSerde blockEncodingSerde, boolean compressionEnabled)
+    public PagesSerdeFactory(BlockEncodingSerde blockEncodingSerde, CompressionCodec compressionCodec)
+    {
+        this(blockEncodingSerde, compressionCodec, SERIALIZED_PAGE_DEFAULT_BLOCK_SIZE_IN_BYTES);
+    }
+
+    @VisibleForTesting
+    PagesSerdeFactory(BlockEncodingSerde blockEncodingSerde, CompressionCodec compressionCodec, int blockSizeInBytes)
     {
         this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
-        this.compressionEnabled = compressionEnabled;
+        this.compressionCodec = requireNonNull(compressionCodec, "compressionCodec is null");
+        this.blockSizeInBytes = blockSizeInBytes;
     }
 
-    public PagesSerde createPagesSerde()
+    public PageSerializer createSerializer(Optional<SecretKey> encryptionKey)
     {
-        return createPagesSerdeInternal(Optional.empty());
+        return new CompressingEncryptingPageSerializer(
+                blockEncodingSerde,
+                createCompressor(compressionCodec),
+                encryptionKey,
+                blockSizeInBytes,
+                maxCompressedSize(blockSizeInBytes, compressionCodec));
     }
 
-    public PagesSerde createPagesSerdeForSpill(Optional<SpillCipher> spillCipher)
+    public PageDeserializer createDeserializer(Optional<SecretKey> encryptionKey)
     {
-        return createPagesSerdeInternal(spillCipher);
+        return new CompressingDecryptingPageDeserializer(
+                blockEncodingSerde,
+                createDecompressor(compressionCodec),
+                encryptionKey,
+                blockSizeInBytes,
+                maxCompressedSize(blockSizeInBytes, compressionCodec));
     }
 
-    private PagesSerde createPagesSerdeInternal(Optional<SpillCipher> spillCipher)
+    public static Optional<Compressor> createCompressor(CompressionCodec compressionCodec)
     {
-        if (compressionEnabled) {
-            return new PagesSerde(blockEncodingSerde, Optional.of(new Lz4Compressor()), Optional.of(new Lz4Decompressor()), spillCipher);
-        }
+        return switch (compressionCodec) {
+            case NONE -> Optional.empty();
+            case LZ4 -> Optional.of(Lz4Compressor.create());
+            case ZSTD -> Optional.of(ZstdCompressor.create());
+        };
+    }
 
-        return new PagesSerde(blockEncodingSerde, Optional.empty(), Optional.empty(), spillCipher);
+    public static Optional<Decompressor> createDecompressor(CompressionCodec compressionCodec)
+    {
+        return switch (compressionCodec) {
+            case NONE -> Optional.empty();
+            case LZ4 -> Optional.of(Lz4Decompressor.create());
+            case ZSTD -> Optional.of(ZstdDecompressor.create());
+        };
+    }
+
+    private static OptionalInt maxCompressedSize(int uncompressedSize, CompressionCodec compressionCodec)
+    {
+        return switch (compressionCodec) {
+            case NONE -> OptionalInt.of(uncompressedSize);
+            case LZ4 -> LZ4.maxCompressedLength(uncompressedSize);
+            case ZSTD -> ZSTD.maxCompressedLength(uncompressedSize);
+        };
     }
 }

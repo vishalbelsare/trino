@@ -13,41 +13,44 @@
  */
 package io.trino.spi.type;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 import io.airlift.slice.XxHash64;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.Int128ArrayBlock;
 import io.trino.spi.block.Int128ArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.BlockIndex;
 import io.trino.spi.function.BlockPosition;
+import io.trino.spi.function.FlatFixed;
+import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.math.BigInteger;
+import java.nio.ByteOrder;
 
 import static io.airlift.slice.SizeOf.SIZE_OF_LONG;
 import static io.trino.spi.block.Int128ArrayBlock.INT128_BYTES;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
 import static io.trino.spi.function.OperatorType.EQUAL;
+import static io.trino.spi.function.OperatorType.READ_VALUE;
 import static io.trino.spi.function.OperatorType.XX_HASH_64;
-import static io.trino.spi.type.Decimals.decodeUnscaledValue;
 import static io.trino.spi.type.TypeOperatorDeclaration.extractOperatorDeclaration;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.UNSCALED_DECIMAL_128_SLICE_LENGTH;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.compare;
-import static io.trino.spi.type.UnscaledDecimal128Arithmetic.isNegative;
 import static java.lang.invoke.MethodHandles.lookup;
 
 final class LongDecimalType
         extends DecimalType
 {
-    private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION = extractOperatorDeclaration(LongDecimalType.class, lookup(), Slice.class);
+    private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION = extractOperatorDeclaration(LongDecimalType.class, lookup(), Int128.class);
+    private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
     LongDecimalType(int precision, int scale)
     {
-        super(precision, scale, Slice.class);
+        super(precision, scale, Int128.class, Int128ArrayBlock.class);
         checkArgument(Decimals.MAX_SHORT_PRECISION < precision && precision <= Decimals.MAX_PRECISION, "Invalid precision: %s", precision);
         checkArgument(0 <= scale && scale <= precision, "Invalid scale for precision %s: %s", precision, scale);
     }
@@ -61,11 +64,11 @@ final class LongDecimalType
     @Override
     public int getFixedSize()
     {
-        return UNSCALED_DECIMAL_128_SLICE_LENGTH;
+        return Int128.SIZE;
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -80,12 +83,6 @@ final class LongDecimalType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, getFixedSize());
-    }
-
-    @Override
     public BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
         return new Int128ArrayBlockBuilder(null, positionCount);
@@ -97,10 +94,8 @@ final class LongDecimalType
         if (block.isNull(position)) {
             return null;
         }
-        Slice slice = getSlice(block, position);
-        BigInteger unscaledValue = decodeUnscaledValue(slice);
-        // sanity check: disallow "negative zero" in case we get a corrupted result from somewhere
-        checkArgument(unscaledValue.signum() != 0 || !isNegative(slice), "The encoded long decimal is invalid: negative zero");
+        Int128 value = getObject(block, position);
+        BigInteger unscaledValue = value.toBigInteger();
         return new SqlDecimal(unscaledValue, getPrecision(), getScale());
     }
 
@@ -111,92 +106,128 @@ final class LongDecimalType
             blockBuilder.appendNull();
         }
         else {
-            blockBuilder.writeLong(block.getLong(position, 0));
-            blockBuilder.writeLong(block.getLong(position, SIZE_OF_LONG));
-            blockBuilder.closeEntry();
+            Int128ArrayBlock valueBlock = (Int128ArrayBlock) block.getUnderlyingValueBlock();
+            int valuePosition = block.getUnderlyingValuePosition(position);
+            ((Int128ArrayBlockBuilder) blockBuilder).writeInt128(valueBlock.getInt128High(valuePosition), valueBlock.getInt128Low(valuePosition));
         }
     }
 
     @Override
-    public void writeSlice(BlockBuilder blockBuilder, Slice value)
+    public void writeObject(BlockBuilder blockBuilder, Object value)
     {
-        writeSlice(blockBuilder, value, 0, value.length());
+        Int128 decimal = (Int128) value;
+        ((Int128ArrayBlockBuilder) blockBuilder).writeInt128(decimal.getHigh(), decimal.getLow());
     }
 
     @Override
-    public void writeSlice(BlockBuilder blockBuilder, Slice value, int offset, int length)
+    public Int128 getObject(Block block, int position)
     {
-        if (length != INT128_BYTES) {
-            throw new IllegalStateException("Expected entry size to be exactly " + INT128_BYTES + " but was " + length);
-        }
-        blockBuilder.writeLong(value.getLong(offset));
-        blockBuilder.writeLong(value.getLong(offset + SIZE_OF_LONG));
-        blockBuilder.closeEntry();
+        return read((Int128ArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
     }
 
     @Override
-    public Slice getSlice(Block block, int position)
+    public int getFlatFixedSize()
     {
-        return Slices.wrappedLongArray(
-                block.getLong(position, 0),
-                block.getLong(position, SIZE_OF_LONG));
+        return INT128_BYTES;
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static Int128 read(@BlockPosition Int128ArrayBlock block, @BlockIndex int position)
+    {
+        return block.getInt128(position);
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static Int128 readFlat(
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+    {
+        return Int128.valueOf(
+                (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset),
+                (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset + SIZE_OF_LONG));
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static void readFlatToBlock(
+            @FlatFixed byte[] fixedSizeSlice,
+            @FlatFixedOffset int fixedSizeOffset,
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            BlockBuilder blockBuilder)
+    {
+        ((Int128ArrayBlockBuilder) blockBuilder).writeInt128(
+                (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset),
+                (long) LONG_HANDLE.get(fixedSizeSlice, fixedSizeOffset + SIZE_OF_LONG));
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static void writeFlat(
+            Int128 value,
+            byte[] fixedSizeSlice,
+            int fixedSizeOffset,
+            byte[] unusedVariableSizeSlice,
+            int unusedVariableSizeOffset)
+    {
+        LONG_HANDLE.set(fixedSizeSlice, fixedSizeOffset, value.getHigh());
+        LONG_HANDLE.set(fixedSizeSlice, fixedSizeOffset + SIZE_OF_LONG, value.getLow());
+    }
+
+    @ScalarOperator(READ_VALUE)
+    private static void writeBlockToFlat(
+            @BlockPosition Int128ArrayBlock block,
+            @BlockIndex int position,
+            byte[] fixedSizeSlice,
+            int fixedSizeOffset,
+            byte[] unusedVariableSizeSlice,
+            int unusedVariableSizeOffset)
+    {
+        LONG_HANDLE.set(fixedSizeSlice, fixedSizeOffset, block.getInt128High(position));
+        LONG_HANDLE.set(fixedSizeSlice, fixedSizeOffset + SIZE_OF_LONG, block.getInt128Low(position));
     }
 
     @ScalarOperator(EQUAL)
-    private static boolean equalOperator(Slice left, Slice right)
+    private static boolean equalOperator(Int128 left, Int128 right)
     {
-        return equal(
-                left.getLong(0),
-                left.getLong(SIZE_OF_LONG),
-                right.getLong(0),
-                right.getLong(SIZE_OF_LONG));
+        return left.equals(right);
     }
 
     @ScalarOperator(EQUAL)
-    private static boolean equalOperator(@BlockPosition Block leftBlock, @BlockIndex int leftPosition, @BlockPosition Block rightBlock, @BlockIndex int rightPosition)
+    private static boolean equalOperator(@BlockPosition Int128ArrayBlock leftBlock, @BlockIndex int leftPosition, @BlockPosition Int128ArrayBlock rightBlock, @BlockIndex int rightPosition)
     {
-        return equal(
-                leftBlock.getLong(leftPosition, 0),
-                leftBlock.getLong(leftPosition, SIZE_OF_LONG),
-                rightBlock.getLong(rightPosition, 0),
-                rightBlock.getLong(rightPosition, SIZE_OF_LONG));
-    }
-
-    private static boolean equal(long leftLow, long leftHigh, long rightLow, long rightHigh)
-    {
-        return leftLow == rightLow && leftHigh == rightHigh;
+        return leftBlock.getInt128High(leftPosition) == rightBlock.getInt128High(rightPosition) &&
+                leftBlock.getInt128Low(leftPosition) == rightBlock.getInt128Low(rightPosition);
     }
 
     @ScalarOperator(XX_HASH_64)
-    private static long xxHash64Operator(Slice value)
+    private static long xxHash64Operator(Int128 value)
     {
-        return xxHash64(value.getLong(0), value.getLong(SIZE_OF_LONG));
+        return xxHash64(value.getHigh(), value.getLow());
     }
 
     @ScalarOperator(XX_HASH_64)
-    private static long xxHash64Operator(@BlockPosition Block block, @BlockIndex int position)
+    private static long xxHash64Operator(@BlockPosition Int128ArrayBlock block, @BlockIndex int position)
     {
-        return xxHash64(block.getLong(position, 0), block.getLong(position, SIZE_OF_LONG));
+        return xxHash64(block.getInt128High(position), block.getInt128Low(position));
     }
 
-    private static long xxHash64(long low, long high)
+    private static long xxHash64(long high, long low)
     {
-        return XxHash64.hash(low) ^ XxHash64.hash(high);
-    }
-
-    @ScalarOperator(COMPARISON_UNORDERED_LAST)
-    private static long comparisonOperator(Slice left, Slice right)
-    {
-        return compare(left, right);
+        return XxHash64.hash(high) ^ XxHash64.hash(low);
     }
 
     @ScalarOperator(COMPARISON_UNORDERED_LAST)
-    private static long comparisonOperator(@BlockPosition Block leftBlock, @BlockIndex int leftPosition, @BlockPosition Block rightBlock, @BlockIndex int rightPosition)
+    private static long comparisonOperator(Int128 left, Int128 right)
     {
-        long leftLow = leftBlock.getLong(leftPosition, 0);
-        long leftHigh = leftBlock.getLong(leftPosition, SIZE_OF_LONG);
-        long rightLow = rightBlock.getLong(rightPosition, 0);
-        long rightHigh = rightBlock.getLong(rightPosition, SIZE_OF_LONG);
-        return compare(leftLow, leftHigh, rightLow, rightHigh);
+        return left.compareTo(right);
+    }
+
+    @ScalarOperator(COMPARISON_UNORDERED_LAST)
+    private static long comparisonOperator(@BlockPosition Int128ArrayBlock leftBlock, @BlockIndex int leftPosition, @BlockPosition Int128ArrayBlock rightBlock, @BlockIndex int rightPosition)
+    {
+        return Int128.compare(
+                leftBlock.getInt128High(leftPosition),
+                leftBlock.getInt128Low(leftPosition),
+                rightBlock.getInt128High(rightPosition),
+                rightBlock.getInt128Low(rightPosition));
     }
 }

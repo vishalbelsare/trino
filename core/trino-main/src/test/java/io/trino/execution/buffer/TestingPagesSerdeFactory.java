@@ -13,60 +13,20 @@
  */
 package io.trino.execution.buffer;
 
-import io.airlift.compress.Compressor;
-import io.airlift.compress.Decompressor;
-import io.airlift.compress.lz4.Lz4Compressor;
-import io.airlift.compress.lz4.Lz4Decompressor;
-import io.trino.spi.Page;
-import io.trino.spi.block.BlockEncodingSerde;
-import io.trino.spiller.SpillCipher;
+import io.trino.metadata.BlockEncodingManager;
+import io.trino.metadata.InternalBlockEncodingSerde;
 
-import java.util.Optional;
-
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.execution.buffer.CompressionCodec.LZ4;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 
 public class TestingPagesSerdeFactory
         extends PagesSerdeFactory
 {
+    private static final InternalBlockEncodingSerde BLOCK_ENCODING_SERDE = new InternalBlockEncodingSerde(new BlockEncodingManager(), TESTING_TYPE_MANAGER);
+
     public TestingPagesSerdeFactory()
     {
         // compression should be enabled in as many tests as possible
-        super(createTestMetadataManager().getBlockEncodingSerde(), true);
-    }
-
-    public static PagesSerde testingPagesSerde()
-    {
-        return new SynchronizedPagesSerde(
-                createTestMetadataManager().getBlockEncodingSerde(),
-                Optional.of(new Lz4Compressor()),
-                Optional.of(new Lz4Decompressor()),
-                Optional.empty());
-    }
-
-    private static class SynchronizedPagesSerde
-            extends PagesSerde
-    {
-        public SynchronizedPagesSerde(BlockEncodingSerde blockEncodingSerde, Optional<Compressor> compressor, Optional<Decompressor> decompressor, Optional<SpillCipher> spillCipher)
-        {
-            super(blockEncodingSerde, compressor, decompressor, spillCipher);
-        }
-
-        @Override
-        public synchronized SerializedPage serialize(PagesSerdeContext context, Page page)
-        {
-            return super.serialize(context, page);
-        }
-
-        @Override
-        public synchronized Page deserialize(SerializedPage serializedPage)
-        {
-            return super.deserialize(serializedPage);
-        }
-
-        @Override
-        public synchronized Page deserialize(PagesSerdeContext context, SerializedPage page)
-        {
-            return super.deserialize(context, page);
-        }
+        super(BLOCK_ENCODING_SERDE, LZ4);
     }
 }

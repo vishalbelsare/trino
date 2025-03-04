@@ -25,16 +25,13 @@ import io.trino.spi.statistics.TableStatistics;
 import io.trino.tpcds.Table;
 import io.trino.tpcds.column.CallCenterColumn;
 import io.trino.tpcds.column.WebSiteColumn;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Stream;
 
-import static io.trino.spi.connector.Constraint.alwaysTrue;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNotNull;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTpcdsMetadataStatistics
 {
@@ -49,10 +46,10 @@ public class TestTpcdsMetadataStatistics
                 .forEach(schemaName -> Table.getBaseTables()
                         .forEach(table -> {
                             SchemaTableName schemaTableName = new SchemaTableName(schemaName, table.getName());
-                            ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName);
-                            TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle, alwaysTrue());
-                            assertTrue(tableStatistics.getRowCount().isUnknown());
-                            assertTrue(tableStatistics.getColumnStatistics().isEmpty());
+                            ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName, Optional.empty(), Optional.empty());
+                            TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle);
+                            assertThat(tableStatistics.getRowCount().isUnknown()).isTrue();
+                            assertThat(tableStatistics.getColumnStatistics()).isEmpty();
                         }));
     }
 
@@ -63,12 +60,12 @@ public class TestTpcdsMetadataStatistics
                 .forEach(schemaName -> Table.getBaseTables()
                         .forEach(table -> {
                             SchemaTableName schemaTableName = new SchemaTableName(schemaName, table.getName());
-                            ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName);
-                            TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle, alwaysTrue());
-                            assertFalse(tableStatistics.getRowCount().isUnknown());
+                            ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName, Optional.empty(), Optional.empty());
+                            TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle);
+                            assertThat(tableStatistics.getRowCount().isUnknown()).isFalse();
                             for (ColumnHandle column : metadata.getColumnHandles(session, tableHandle).values()) {
-                                assertTrue(tableStatistics.getColumnStatistics().containsKey(column));
-                                assertNotNull(tableStatistics.getColumnStatistics().get(column));
+                                assertThat(tableStatistics.getColumnStatistics()).containsKey(column);
+                                assertThat(tableStatistics.getColumnStatistics().get(column)).isNotNull();
                             }
                         }));
     }
@@ -77,16 +74,16 @@ public class TestTpcdsMetadataStatistics
     public void testTableStatsDetails()
     {
         SchemaTableName schemaTableName = new SchemaTableName("sf1", Table.CALL_CENTER.getName());
-        ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName);
-        TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle, alwaysTrue());
+        ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName, Optional.empty(), Optional.empty());
+        TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle);
 
         estimateAssertion.assertClose(tableStatistics.getRowCount(), Estimate.of(6), "Row count does not match");
 
         // all columns have stats
         Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(session, tableHandle);
         for (ColumnHandle column : columnHandles.values()) {
-            assertTrue(tableStatistics.getColumnStatistics().containsKey(column));
-            assertNotNull(tableStatistics.getColumnStatistics().get(column));
+            assertThat(tableStatistics.getColumnStatistics()).containsKey(column);
+            assertThat(tableStatistics.getColumnStatistics().get(column)).isNotNull();
         }
 
         // identifier
@@ -147,8 +144,8 @@ public class TestTpcdsMetadataStatistics
     public void testNullFraction()
     {
         SchemaTableName schemaTableName = new SchemaTableName("sf1", Table.WEB_SITE.getName());
-        ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName);
-        TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle, alwaysTrue());
+        ConnectorTableHandle tableHandle = metadata.getTableHandle(session, schemaTableName, Optional.empty(), Optional.empty());
+        TableStatistics tableStatistics = metadata.getTableStatistics(session, tableHandle);
 
         Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(session, tableHandle);
 
@@ -167,6 +164,6 @@ public class TestTpcdsMetadataStatistics
         estimateAssertion.assertClose(actual.getNullsFraction(), expected.getNullsFraction(), "Nulls fraction");
         estimateAssertion.assertClose(actual.getDataSize(), expected.getDataSize(), "Data size");
         estimateAssertion.assertClose(actual.getDistinctValuesCount(), expected.getDistinctValuesCount(), "Distinct values count");
-        assertEquals(actual.getRange(), expected.getRange());
+        assertThat(actual.getRange()).isEqualTo(expected.getRange());
     }
 }

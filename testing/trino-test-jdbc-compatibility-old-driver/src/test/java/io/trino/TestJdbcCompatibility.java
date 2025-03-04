@@ -18,10 +18,10 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.log.Logging;
 import io.trino.plugin.mongodb.MongoPlugin;
 import io.trino.server.testing.TestingTrinoServer;
-import org.testng.SkipException;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -40,7 +40,6 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.function.Consumer;
 
-import static com.google.common.base.Strings.repeat;
 import static io.trino.JdbcDriverCapabilities.correctlyReportsTimestampWithTimeZone;
 import static io.trino.JdbcDriverCapabilities.driverVersion;
 import static io.trino.JdbcDriverCapabilities.hasBrokenParametricTimestampWithTimeZoneSupport;
@@ -56,6 +55,9 @@ import static java.sql.Types.JAVA_OBJECT;
 import static java.sql.Types.TIMESTAMP;
 import static java.sql.Types.TIMESTAMP_WITH_TIMEZONE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.abort;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
 /**
  * The main purpose of this class is to test cases when current server implementation breaks older JDBC clients
@@ -66,30 +68,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * This test in turn is run using an old JDBC client against current server implementation.
  */
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestJdbcCompatibility
 {
     private static final Optional<Integer> VERSION_UNDER_TEST = testedVersion();
     private static final int TIMESTAMP_DEFAULT_PRECISION = 3;
 
-    private TestingTrinoServer server;
-    private String serverUrl;
+    private final TestingTrinoServer server;
+    private final String serverUrl;
 
-    @Test
-    public void ensureProperDriverVersionLoaded()
-    {
-        if (VERSION_UNDER_TEST.isEmpty()) {
-            throw new SkipException("Information about JDBC version under test is missing");
-        }
-
-        assertThat(driverVersion())
-                .isEqualTo(VERSION_UNDER_TEST.get());
-
-        assertThat(jdbcDriver().getClass().getPackage().getImplementationVersion())
-                .isEqualTo(VERSION_UNDER_TEST.get().toString());
-    }
-
-    @BeforeClass
-    public void setup()
+    public TestJdbcCompatibility()
     {
         Logging.initialize();
 
@@ -101,7 +90,21 @@ public class TestJdbcCompatibility
         serverUrl = format("jdbc:trino://%s", server.getAddress());
     }
 
-    @AfterClass(alwaysRun = true)
+    @Test
+    public void ensureProperDriverVersionLoaded()
+    {
+        if (VERSION_UNDER_TEST.isEmpty()) {
+            abort("Information about JDBC version under test is missing");
+        }
+
+        assertThat(driverVersion())
+                .isEqualTo(VERSION_UNDER_TEST.get());
+
+        assertThat(jdbcDriver().getClass().getPackage().getImplementationVersion())
+                .isEqualTo(VERSION_UNDER_TEST.get().toString());
+    }
+
+    @AfterAll
     public void tearDown()
             throws IOException
     {
@@ -112,9 +115,11 @@ public class TestJdbcCompatibility
     public void testLongPreparedStatement()
             throws Exception
     {
-        String sql = format("SELECT '%s' = '%s'", repeat("x", 100_000), repeat("y", 100_000));
+        String sql = format("SELECT '%s' = '%s'", "x".repeat(100_000), "y".repeat(100_000));
 
-        try (ResultSet rs = runQuery(sql)) {
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet rs = statement.executeQuery()) {
             assertThat(rs.next()).isTrue();
             assertThat(rs.getBoolean(1)).isFalse();
             assertThat(rs.next()).isFalse();
@@ -132,7 +137,7 @@ public class TestJdbcCompatibility
     public void testSelectTimestampWithTimeZone()
     {
         if (hasBrokenParametricTimestampWithTimeZoneSupport()) {
-            throw new SkipException("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
+            abort("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
         }
 
         String query = "SELECT timestamp '2012-10-31 01:00 Australia/Eucla'";
@@ -188,7 +193,7 @@ public class TestJdbcCompatibility
     public void testSelectParametricTimestampWithTimeZone()
     {
         if (hasBrokenParametricTimestampWithTimeZoneSupport()) {
-            throw new SkipException("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
+            abort("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
         }
 
         if (!supportsParametricTimestampWithTimeZone()) {
@@ -297,7 +302,7 @@ public class TestJdbcCompatibility
     public void testSelectParametricTimestampWithTimeZoneInMap()
     {
         if (hasBrokenParametricTimestampWithTimeZoneSupport()) {
-            throw new SkipException("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
+            abort("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
         }
 
         if (!supportsParametricTimestampWithTimeZone()) {
@@ -420,7 +425,7 @@ public class TestJdbcCompatibility
     public void testSelectParametricTimestampWithTimeZoneInArray()
     {
         if (hasBrokenParametricTimestampWithTimeZoneSupport()) {
-            throw new SkipException("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
+            abort("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
         }
 
         if (!supportsParametricTimestampWithTimeZone()) {
@@ -542,7 +547,7 @@ public class TestJdbcCompatibility
     public void testSelectParametricTimestampWithTimeZoneInRow()
     {
         if (hasBrokenParametricTimestampWithTimeZoneSupport()) {
-            throw new SkipException("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
+            abort("This version reports PARAMETRIC_DATETIME client capability but TIMESTAMP WITH TIME ZONE is not supported");
         }
 
         if (!supportsParametricTimestampWithTimeZone()) {
@@ -658,26 +663,30 @@ public class TestJdbcCompatibility
 
     private <T> void checkRepresentation(String query, T expectedValue, int expectedType, ResultSetMapper<T> extractValue)
     {
-        try (ResultSet rs = runQuery(query)) {
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(query);
+                ResultSet rs = statement.executeQuery()) {
             assertThat(rs.next()).isTrue();
             assertThat(extractValue.read(rs, 1)).isEqualTo(expectedValue);
             assertThat(rs.getMetaData().getColumnType(1)).isEqualTo(expectedType);
             assertThat(rs.next()).isFalse();
         }
-        catch (Exception e) {
+        catch (SQLException e) {
             throw new RuntimeException(e);
         }
     }
 
     public void checkRepresentation(String query, int expectedType, ResultSetAssertion extractValue)
     {
-        try (ResultSet rs = runQuery(query)) {
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(query);
+                ResultSet rs = statement.executeQuery()) {
             assertThat(rs.next()).isTrue();
             extractValue.check(rs, 1);
             assertThat(rs.getMetaData().getColumnType(1)).isEqualTo(expectedType);
             assertThat(rs.next()).isFalse();
         }
-        catch (Exception e) {
+        catch (SQLException e) {
             throw new RuntimeException(e);
         }
     }
@@ -782,34 +791,26 @@ public class TestJdbcCompatibility
         return map.get("timestamp");
     }
 
-    private ResultSet runQuery(String query)
+    private Connection getConnection()
+            throws SQLException
     {
-        return runQuery(query, ImmutableMap.of());
+        return getConnection(ImmutableMap.of());
     }
 
-    private ResultSet runQuery(String query, Map<String, String> params)
+    private Connection getConnection(Map<String, String> params)
+            throws SQLException
     {
         Properties properties = new Properties();
         properties.putAll(params);
         properties.put("user", "test");
         properties.put("password", "");
 
-        try (Connection connection = DriverManager.getConnection(serverUrl, properties); PreparedStatement stmt = connection.prepareStatement(query)) {
-            return stmt.executeQuery();
-        }
-        catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        return DriverManager.getConnection(serverUrl, properties);
     }
 
     private void useConnection(Map<String, String> connectionParameters, Consumer<Connection> consumer)
     {
-        Properties properties = new Properties();
-        properties.putAll(connectionParameters);
-        properties.put("user", "test");
-        properties.put("password", "");
-
-        try (Connection conn = DriverManager.getConnection(serverUrl, properties)) {
+        try (Connection conn = getConnection(connectionParameters)) {
             consumer.accept(conn);
         }
         catch (Exception e) {

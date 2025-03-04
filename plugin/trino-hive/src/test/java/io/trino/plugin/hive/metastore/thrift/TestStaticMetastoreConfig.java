@@ -15,7 +15,7 @@ package io.trino.plugin.hive.metastore.thrift;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.Map;
@@ -23,7 +23,7 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestStaticMetastoreConfig
 {
@@ -38,36 +38,36 @@ public class TestStaticMetastoreConfig
     @Test
     public void testExplicitPropertyMappingsSingleMetastore()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("hive.metastore.uri", "thrift://localhost:9083")
                 .put("hive.metastore.username", "trino")
-                .build();
+                .buildOrThrow();
 
         StaticMetastoreConfig expected = new StaticMetastoreConfig()
-                .setMetastoreUris("thrift://localhost:9083")
+                .setMetastoreUris(ImmutableList.of("thrift://localhost:9083"))
                 .setMetastoreUsername("trino");
 
         assertFullMapping(properties, expected);
-        assertEquals(expected.getMetastoreUris(), ImmutableList.of(URI.create("thrift://localhost:9083")));
-        assertEquals(expected.getMetastoreUsername(), "trino");
+        assertThat(expected.getMetastoreUris()).isEqualTo(ImmutableList.of(URI.create("thrift://localhost:9083")));
+        assertThat(expected.getMetastoreUsername()).isEqualTo("trino");
     }
 
     @Test
     public void testExplicitPropertyMappingsMultipleMetastores()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("hive.metastore.uri", "thrift://localhost:9083,thrift://192.0.2.3:8932")
                 .put("hive.metastore.username", "trino")
-                .build();
+                .buildOrThrow();
 
         StaticMetastoreConfig expected = new StaticMetastoreConfig()
-                .setMetastoreUris("thrift://localhost:9083,thrift://192.0.2.3:8932")
+                .setMetastoreUris(ImmutableList.of("thrift://localhost:9083", "thrift://192.0.2.3:8932"))
                 .setMetastoreUsername("trino");
 
         assertFullMapping(properties, expected);
-        assertEquals(expected.getMetastoreUris(), ImmutableList.of(
+        assertThat(expected.getMetastoreUris()).isEqualTo(ImmutableList.of(
                 URI.create("thrift://localhost:9083"),
                 URI.create("thrift://192.0.2.3:8932")));
-        assertEquals(expected.getMetastoreUsername(), "trino");
+        assertThat(expected.getMetastoreUsername()).isEqualTo("trino");
     }
 }

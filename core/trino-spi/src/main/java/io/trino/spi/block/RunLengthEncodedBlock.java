@@ -13,25 +13,25 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
 import io.trino.spi.predicate.Utils;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
+import jakarta.annotation.Nullable;
 
-import java.util.List;
-import java.util.function.BiConsumer;
+import java.util.OptionalInt;
+import java.util.function.ObjLongConsumer;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
+import static io.trino.spi.block.BlockUtil.checkReadablePosition;
 import static io.trino.spi.block.BlockUtil.checkValidPosition;
 import static io.trino.spi.block.BlockUtil.checkValidRegion;
 import static java.lang.String.format;
-import static java.util.Collections.singletonList;
 import static java.util.Objects.requireNonNull;
 
-public class RunLengthEncodedBlock
+public final class RunLengthEncodedBlock
         implements Block
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(RunLengthEncodedBlock.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(RunLengthEncodedBlock.class);
 
     public static Block create(Type type, Object value, int positionCount)
     {
@@ -39,44 +39,67 @@ public class RunLengthEncodedBlock
         if (block instanceof RunLengthEncodedBlock) {
             block = ((RunLengthEncodedBlock) block).getValue();
         }
-        return new RunLengthEncodedBlock(block, positionCount);
+        return create(block, positionCount);
     }
 
-    private final Block value;
-    private final int positionCount;
-
-    public RunLengthEncodedBlock(Block value, int positionCount)
+    public static Block create(Block value, int positionCount)
     {
         requireNonNull(value, "value is null");
         if (value.getPositionCount() != 1) {
             throw new IllegalArgumentException(format("Expected value to contain a single position but has %s positions", value.getPositionCount()));
         }
 
-        if (value instanceof RunLengthEncodedBlock) {
-            this.value = ((RunLengthEncodedBlock) value).getValue();
+        if (positionCount == 0) {
+            return value.copyRegion(0, 0);
         }
-        else {
-            this.value = value;
+        if (positionCount == 1) {
+            return value;
         }
 
+        if (value instanceof ValueBlock valueBlock) {
+            return new RunLengthEncodedBlock(valueBlock, positionCount);
+        }
+
+        // if the value is lazy be careful to not materialize it
+        if (value instanceof LazyBlock lazyBlock) {
+            return new LazyBlock(positionCount, () -> create(lazyBlock.getBlock(), positionCount));
+        }
+
+        // unwrap the value
+        ValueBlock valueBlock = value.getUnderlyingValueBlock();
+        int valuePosition = value.getUnderlyingValuePosition(0);
+        if (valueBlock.getPositionCount() == 1 && valuePosition == 0) {
+            return new RunLengthEncodedBlock(valueBlock, positionCount);
+        }
+
+        return new RunLengthEncodedBlock(valueBlock.getRegion(valuePosition, 1), positionCount);
+    }
+
+    private final ValueBlock value;
+    private final int positionCount;
+
+    private RunLengthEncodedBlock(ValueBlock value, int positionCount)
+    {
+        requireNonNull(value, "value is null");
         if (positionCount < 0) {
             throw new IllegalArgumentException("positionCount is negative");
         }
+        if (positionCount < 2) {
+            throw new IllegalArgumentException("positionCount must be at least 2");
+        }
 
+        this.value = value;
         this.positionCount = positionCount;
     }
 
-    @Override
-    public final List<Block> getChildren()
-    {
-        return singletonList(value);
-    }
-
-    public Block getValue()
+    public ValueBlock getValue()
     {
         return value;
     }
 
+    /**
+     * Position count will always be at least 2
+     */
     @Override
     public int getPositionCount()
     {
@@ -84,15 +107,15 @@ public class RunLengthEncodedBlock
     }
 
     @Override
-    public long getSizeInBytes()
+    public OptionalInt fixedSizeInBytesPerPosition()
     {
-        return value.getSizeInBytes();
+        return OptionalInt.empty(); // size does not vary per position selected
     }
 
     @Override
-    public long getLogicalSizeInBytes()
+    public long getSizeInBytes()
     {
-        return positionCount * value.getLogicalSizeInBytes();
+        return value.getSizeInBytes();
     }
 
     @Override
@@ -108,16 +131,10 @@ public class RunLengthEncodedBlock
     }
 
     @Override
-    public void retainedBytesForEachPart(BiConsumer<Object, Long> consumer)
+    public void retainedBytesForEachPart(ObjLongConsumer<Object> consumer)
     {
         consumer.accept(value, value.getRetainedSizeInBytes());
-        consumer.accept(this, (long) INSTANCE_SIZE);
-    }
-
-    @Override
-    public String getEncodingName()
-    {
-        return RunLengthBlockEncoding.NAME;
+        consumer.accept(this, INSTANCE_SIZE);
     }
 
     @Override
@@ -127,7 +144,7 @@ public class RunLengthEncodedBlock
         for (int i = offset; i < offset + length; i++) {
             checkValidPosition(positions[i], positionCount);
         }
-        return new RunLengthEncodedBlock(value, length);
+        return create(value, length);
     }
 
     @Override
@@ -137,14 +154,14 @@ public class RunLengthEncodedBlock
         for (int i = offset; i < offset + length; i++) {
             checkValidPosition(positions[i], positionCount);
         }
-        return new RunLengthEncodedBlock(value.copyRegion(0, 1), length);
+        return create(value.copyRegion(0, 1), length);
     }
 
     @Override
     public Block getRegion(int positionOffset, int length)
     {
         checkValidRegion(positionCount, positionOffset, length);
-        return new RunLengthEncodedBlock(value, length);
+        return create(value, length);
     }
 
     @Override
@@ -154,7 +171,7 @@ public class RunLengthEncodedBlock
     }
 
     @Override
-    public long getPositionsSizeInBytes(boolean[] positions)
+    public long getPositionsSizeInBytes(@Nullable boolean[] positions, int selectedPositionCount)
     {
         return value.getSizeInBytes();
     }
@@ -163,111 +180,13 @@ public class RunLengthEncodedBlock
     public Block copyRegion(int positionOffset, int length)
     {
         checkValidRegion(positionCount, positionOffset, length);
-        return new RunLengthEncodedBlock(value.copyRegion(0, 1), length);
+        return create(value.copyRegion(0, 1), length);
     }
 
     @Override
-    public int getSliceLength(int position)
+    public ValueBlock getSingleValueBlock(int position)
     {
-        checkReadablePosition(position);
-        return value.getSliceLength(0);
-    }
-
-    @Override
-    public byte getByte(int position, int offset)
-    {
-        checkReadablePosition(position);
-        return value.getByte(0, offset);
-    }
-
-    @Override
-    public short getShort(int position, int offset)
-    {
-        checkReadablePosition(position);
-        return value.getShort(0, offset);
-    }
-
-    @Override
-    public int getInt(int position, int offset)
-    {
-        checkReadablePosition(position);
-        return value.getInt(0, offset);
-    }
-
-    @Override
-    public long getLong(int position, int offset)
-    {
-        checkReadablePosition(position);
-        return value.getLong(0, offset);
-    }
-
-    @Override
-    public Slice getSlice(int position, int offset, int length)
-    {
-        checkReadablePosition(position);
-        return value.getSlice(0, offset, length);
-    }
-
-    @Override
-    public <T> T getObject(int position, Class<T> clazz)
-    {
-        checkReadablePosition(position);
-        return value.getObject(0, clazz);
-    }
-
-    @Override
-    public boolean bytesEqual(int position, int offset, Slice otherSlice, int otherOffset, int length)
-    {
-        checkReadablePosition(position);
-        return value.bytesEqual(0, offset, otherSlice, otherOffset, length);
-    }
-
-    @Override
-    public int bytesCompare(int position, int offset, int length, Slice otherSlice, int otherOffset, int otherLength)
-    {
-        checkReadablePosition(position);
-        return value.bytesCompare(0, offset, length, otherSlice, otherOffset, otherLength);
-    }
-
-    @Override
-    public void writeBytesTo(int position, int offset, int length, BlockBuilder blockBuilder)
-    {
-        checkReadablePosition(position);
-        value.writeBytesTo(0, offset, length, blockBuilder);
-    }
-
-    @Override
-    public void writePositionTo(int position, BlockBuilder blockBuilder)
-    {
-        checkReadablePosition(position);
-        value.writePositionTo(0, blockBuilder);
-    }
-
-    @Override
-    public boolean equals(int position, int offset, Block otherBlock, int otherPosition, int otherOffset, int length)
-    {
-        checkReadablePosition(position);
-        return value.equals(0, offset, otherBlock, otherPosition, otherOffset, length);
-    }
-
-    @Override
-    public long hash(int position, int offset, int length)
-    {
-        checkReadablePosition(position);
-        return value.hash(0, offset, length);
-    }
-
-    @Override
-    public int compareTo(int leftPosition, int leftOffset, int leftLength, Block rightBlock, int rightPosition, int rightOffset, int rightLength)
-    {
-        checkReadablePosition(leftPosition);
-        return value.compareTo(0, leftOffset, leftLength, rightBlock, rightPosition, rightOffset, rightLength);
-    }
-
-    @Override
-    public Block getSingleValueBlock(int position)
-    {
-        checkReadablePosition(position);
+        checkReadablePosition(this, position);
         return value;
     }
 
@@ -278,10 +197,29 @@ public class RunLengthEncodedBlock
     }
 
     @Override
+    public boolean hasNull()
+    {
+        return mayHaveNull();
+    }
+
+    @Override
     public boolean isNull(int position)
     {
-        checkReadablePosition(position);
+        checkReadablePosition(this, position);
         return value.isNull(0);
+    }
+
+    @Override
+    public Block copyWithAppendedNull()
+    {
+        if (value.isNull(0)) {
+            return create(value, positionCount + 1);
+        }
+
+        ValueBlock dictionary = value.copyWithAppendedNull();
+        int[] ids = new int[positionCount + 1];
+        ids[positionCount] = 1;
+        return DictionaryBlock.create(ids.length, dictionary, ids);
     }
 
     @Override
@@ -308,13 +246,18 @@ public class RunLengthEncodedBlock
         if (loadedValueBlock == value) {
             return this;
         }
-        return new RunLengthEncodedBlock(loadedValueBlock, positionCount);
+        return create(loadedValueBlock, positionCount);
     }
 
-    private void checkReadablePosition(int position)
+    @Override
+    public ValueBlock getUnderlyingValueBlock()
     {
-        if (position < 0 || position >= positionCount) {
-            throw new IllegalArgumentException("position is not valid");
-        }
+        return value;
+    }
+
+    @Override
+    public int getUnderlyingValuePosition(int position)
+    {
+        return 0;
     }
 }

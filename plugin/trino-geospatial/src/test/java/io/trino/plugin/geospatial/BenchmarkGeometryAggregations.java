@@ -14,9 +14,11 @@
 package io.trino.plugin.geospatial;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.plugin.memory.MemoryConnectorFactory;
-import io.trino.testing.LocalQueryRunner;
+import io.trino.plugin.memory.MemoryPlugin;
 import io.trino.testing.MaterializedResult;
+import io.trino.testing.QueryRunner;
+import io.trino.testing.StandaloneQueryRunner;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -26,12 +28,12 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
-import org.testng.annotations.Test;
 
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.google.common.io.Resources.getResource;
 import static io.trino.jmh.Benchmarks.benchmark;
@@ -51,9 +53,9 @@ public class BenchmarkGeometryAggregations
     @State(Thread)
     public static class Context
     {
-        private LocalQueryRunner queryRunner;
+        private QueryRunner queryRunner;
 
-        public LocalQueryRunner getQueryRunner()
+        public QueryRunner getQueryRunner()
         {
             return queryRunner;
         }
@@ -62,18 +64,22 @@ public class BenchmarkGeometryAggregations
         public void setUp()
                 throws Exception
         {
-            queryRunner = LocalQueryRunner.create(testSessionBuilder()
+            queryRunner = new StandaloneQueryRunner(testSessionBuilder()
                     .setCatalog("memory")
                     .setSchema("default")
                     .build());
             queryRunner.installPlugin(new GeoPlugin());
-            queryRunner.createCatalog("memory", new MemoryConnectorFactory(), ImmutableMap.of());
+            queryRunner.installPlugin(new MemoryPlugin());
+            queryRunner.createCatalog("memory", "memory", ImmutableMap.of());
 
             Path path = new File(getResource("us-states.tsv").toURI()).toPath();
-            String polygonValues = Files.lines(path)
-                    .map(line -> line.split("\t"))
-                    .map(parts -> format("('%s', '%s')", parts[0], parts[1]))
-                    .collect(Collectors.joining(","));
+            String polygonValues;
+            try (Stream<String> lines = Files.lines(path)) {
+                polygonValues = lines
+                        .map(line -> line.split("\t"))
+                        .map(parts -> format("('%s', '%s')", parts[0], parts[1]))
+                        .collect(Collectors.joining(","));
+            }
 
             queryRunner.execute(
                     format("CREATE TABLE memory.default.us_states AS SELECT ST_GeometryFromText(t.wkt) AS geom FROM (VALUES %s) as t (name, wkt)",

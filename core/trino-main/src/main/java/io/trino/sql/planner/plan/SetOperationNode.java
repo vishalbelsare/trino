@@ -24,10 +24,9 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
+import com.google.errorprone.annotations.Immutable;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.tree.SymbolReference;
-
-import javax.annotation.concurrent.Immutable;
 
 import java.util.Collection;
 import java.util.List;
@@ -106,21 +105,21 @@ public abstract class SetOperationNode
     /**
      * Returns the output to input symbol mapping for the given source channel
      */
-    public Map<Symbol, SymbolReference> sourceSymbolMap(int sourceIndex)
+    public Map<Symbol, Reference> sourceSymbolMap(int sourceIndex)
     {
-        ImmutableMap.Builder<Symbol, SymbolReference> builder = ImmutableMap.builder();
+        ImmutableMap.Builder<Symbol, Reference> builder = ImmutableMap.builder();
         for (Map.Entry<Symbol, Collection<Symbol>> entry : outputToInputs.asMap().entrySet()) {
             builder.put(entry.getKey(), Iterables.get(entry.getValue(), sourceIndex).toSymbolReference());
         }
 
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     /**
      * Returns the input to output symbol mapping for the given source channel.
      * A single input symbol can map to multiple output symbols, thus requiring a Multimap.
      */
-    public Multimap<Symbol, SymbolReference> outputSymbolMap(int sourceIndex)
+    public Multimap<Symbol, Reference> outputSymbolMap(int sourceIndex)
     {
         return Multimaps.transformValues(FluentIterable.from(getOutputSymbols())
                 .toMap(outputToSourceSymbolFunction(sourceIndex))

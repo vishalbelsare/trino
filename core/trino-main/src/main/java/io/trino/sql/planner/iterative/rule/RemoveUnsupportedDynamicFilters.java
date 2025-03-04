@@ -14,19 +14,19 @@
 package io.trino.sql.planner.iterative.rule;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import io.trino.Session;
-import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
 import io.trino.metadata.OperatorNotFoundException;
 import io.trino.spi.type.Type;
 import io.trino.sql.DynamicFilters;
-import io.trino.sql.parser.SqlParser;
-import io.trino.sql.planner.PlanNodeIdAllocator;
+import io.trino.sql.PlannerContext;
+import io.trino.sql.ir.Cast;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.ExpressionRewriter;
+import io.trino.sql.ir.ExpressionTreeRewriter;
+import io.trino.sql.ir.Logical;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.SymbolAllocator;
-import io.trino.sql.planner.TypeAnalyzer;
-import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
 import io.trino.sql.planner.plan.DynamicFilterId;
 import io.trino.sql.planner.plan.FilterNode;
@@ -36,13 +36,6 @@ import io.trino.sql.planner.plan.PlanVisitor;
 import io.trino.sql.planner.plan.SemiJoinNode;
 import io.trino.sql.planner.plan.SpatialJoinNode;
 import io.trino.sql.planner.plan.TableScanNode;
-import io.trino.sql.tree.Cast;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.ExpressionRewriter;
-import io.trino.sql.tree.ExpressionTreeRewriter;
-import io.trino.sql.tree.LogicalExpression;
-import io.trino.sql.tree.NodeRef;
-import io.trino.sql.tree.SymbolReference;
 import io.trino.type.TypeCoercion;
 
 import java.util.HashSet;
@@ -54,15 +47,17 @@ import java.util.Set;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.operator.join.JoinUtils.getJoinDynamicFilters;
+import static io.trino.operator.join.JoinUtils.getSemiJoinDynamicFilterId;
 import static io.trino.spi.function.OperatorType.SATURATED_FLOOR_CAST;
 import static io.trino.sql.DynamicFilters.extractDynamicFilters;
 import static io.trino.sql.DynamicFilters.getDescriptor;
 import static io.trino.sql.DynamicFilters.isDynamicFilter;
-import static io.trino.sql.ExpressionUtils.combineConjuncts;
-import static io.trino.sql.ExpressionUtils.combinePredicates;
-import static io.trino.sql.ExpressionUtils.extractConjuncts;
+import static io.trino.sql.ir.Booleans.TRUE;
+import static io.trino.sql.ir.IrUtils.combineConjuncts;
+import static io.trino.sql.ir.IrUtils.combinePredicates;
+import static io.trino.sql.ir.IrUtils.extractConjuncts;
 import static io.trino.sql.planner.plan.ChildReplacer.replaceChildren;
-import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 
@@ -75,34 +70,29 @@ import static java.util.stream.Collectors.toList;
 public class RemoveUnsupportedDynamicFilters
         implements PlanOptimizer
 {
-    private final Metadata metadata;
-    private final TypeAnalyzer typeAnalyzer;
+    private final PlannerContext plannerContext;
 
-    public RemoveUnsupportedDynamicFilters(Metadata metadata)
+    public RemoveUnsupportedDynamicFilters(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeAnalyzer = new TypeAnalyzer(new SqlParser(), metadata);
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
+        // This is a limited type analyzer for the simple expressions used in dynamic filters
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanNode optimize(PlanNode plan, Context context)
     {
-        PlanWithConsumedDynamicFilters result = plan.accept(new RemoveUnsupportedDynamicFilters.Rewriter(session, types), ImmutableSet.of());
+        PlanWithConsumedDynamicFilters result = plan.accept(new RemoveUnsupportedDynamicFilters.Rewriter(), ImmutableSet.of());
         return result.getNode();
     }
 
     private class Rewriter
             extends PlanVisitor<PlanWithConsumedDynamicFilters, Set<DynamicFilterId>>
     {
-        private final Session session;
-        private final TypeProvider types;
         private final TypeCoercion typeCoercion;
 
-        public Rewriter(Session session, TypeProvider types)
+        public Rewriter()
         {
-            this.session = requireNonNull(session, "session is null");
-            this.types = requireNonNull(types, "types is null");
-            this.typeCoercion = new TypeCoercion(metadata::getType);
+            this.typeCoercion = new TypeCoercion(plannerContext.getTypeManager()::getType);
         }
 
         @Override
@@ -129,14 +119,15 @@ public class RemoveUnsupportedDynamicFilters
         @Override
         public PlanWithConsumedDynamicFilters visitJoin(JoinNode node, Set<DynamicFilterId> allowedDynamicFilterIds)
         {
+            Map<DynamicFilterId, Symbol> currentJoinDynamicFilters = getJoinDynamicFilters(node);
             ImmutableSet<DynamicFilterId> allowedDynamicFilterIdsProbeSide = ImmutableSet.<DynamicFilterId>builder()
-                    .addAll(node.getDynamicFilters().keySet())
+                    .addAll(currentJoinDynamicFilters.keySet())
                     .addAll(allowedDynamicFilterIds)
                     .build();
 
             PlanWithConsumedDynamicFilters leftResult = node.getLeft().accept(this, allowedDynamicFilterIdsProbeSide);
             Set<DynamicFilterId> consumedProbeSide = leftResult.getConsumedDynamicFilterIds();
-            Map<DynamicFilterId, Symbol> dynamicFilters = node.getDynamicFilters().entrySet().stream()
+            Map<DynamicFilterId, Symbol> dynamicFilters = currentJoinDynamicFilters.entrySet().stream()
                     .filter(entry -> consumedProbeSide.contains(entry.getKey()))
                     .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
 
@@ -147,13 +138,13 @@ public class RemoveUnsupportedDynamicFilters
 
             Optional<Expression> filter = node
                     .getFilter().map(this::removeAllDynamicFilters)  // no DF support at Join operators.
-                    .filter(expression -> !expression.equals(TRUE_LITERAL));
+                    .filter(expression -> !expression.equals(TRUE));
 
             PlanNode left = leftResult.getNode();
             PlanNode right = rightResult.getNode();
             if (!left.equals(node.getLeft())
                     || !right.equals(node.getRight())
-                    || !dynamicFilters.equals(node.getDynamicFilters())
+                    || !dynamicFilters.equals(currentJoinDynamicFilters)
                     || !filter.equals(node.getFilter())) {
                 return new PlanWithConsumedDynamicFilters(new JoinNode(
                         node.getId(),
@@ -169,7 +160,8 @@ public class RemoveUnsupportedDynamicFilters
                         node.getRightHashSymbol(),
                         node.getDistributionType(),
                         node.isSpillable(),
-                        dynamicFilters,
+                        // When there was no dynamic filter in join, it should remain empty
+                        node.getDynamicFilters().isEmpty() ? ImmutableMap.of() : dynamicFilters,
                         node.getReorderJoinStatsAndCost()),
                         ImmutableSet.copyOf(consumed));
             }
@@ -212,11 +204,12 @@ public class RemoveUnsupportedDynamicFilters
         @Override
         public PlanWithConsumedDynamicFilters visitSemiJoin(SemiJoinNode node, Set<DynamicFilterId> allowedDynamicFilterIds)
         {
-            if (node.getDynamicFilterId().isEmpty()) {
+            Optional<DynamicFilterId> dynamicFilterIdOptional = getSemiJoinDynamicFilterId(node);
+            if (dynamicFilterIdOptional.isEmpty()) {
                 return visitPlan(node, allowedDynamicFilterIds);
             }
 
-            DynamicFilterId dynamicFilterId = node.getDynamicFilterId().get();
+            DynamicFilterId dynamicFilterId = dynamicFilterIdOptional.get();
 
             Set<DynamicFilterId> allowedDynamicFilterIdsSourceSide = ImmutableSet.<DynamicFilterId>builder()
                     .add(dynamicFilterId)
@@ -240,7 +233,7 @@ public class RemoveUnsupportedDynamicFilters
             PlanNode newFilteringSource = filteringSourceResult.getNode();
             if (!newSource.equals(node.getSource())
                     || !newFilteringSource.equals(node.getFilteringSource())
-                    || !newFilterId.equals(node.getDynamicFilterId())) {
+                    || !newFilterId.equals(dynamicFilterIdOptional)) {
                 return new PlanWithConsumedDynamicFilters(new SemiJoinNode(
                         node.getId(),
                         newSource,
@@ -251,7 +244,8 @@ public class RemoveUnsupportedDynamicFilters
                         node.getSourceHashSymbol(),
                         node.getFilteringSourceHashSymbol(),
                         node.getDistributionType(),
-                        newFilterId),
+                        // When there was no dynamic filter in semi-join, it should remain empty
+                        node.getDynamicFilterId().isEmpty() ? Optional.empty() : newFilterId),
                         ImmutableSet.copyOf(consumed));
             }
             return new PlanWithConsumedDynamicFilters(node, ImmutableSet.copyOf(consumed));
@@ -276,7 +270,7 @@ public class RemoveUnsupportedDynamicFilters
                 modified = removeAllDynamicFilters(original);
             }
 
-            if (TRUE_LITERAL.equals(modified)) {
+            if (TRUE.equals(modified)) {
                 return new PlanWithConsumedDynamicFilters(source, consumedDynamicFilterIds.build());
             }
 
@@ -291,7 +285,7 @@ public class RemoveUnsupportedDynamicFilters
 
         private Expression removeDynamicFilters(Expression expression, Set<DynamicFilterId> allowedDynamicFilterIds, ImmutableSet.Builder<DynamicFilterId> consumedDynamicFilterIds)
         {
-            return combineConjuncts(metadata, extractConjuncts(expression)
+            return combineConjuncts(extractConjuncts(expression)
                     .stream()
                     .map(this::removeNestedDynamicFilters)
                     .filter(conjunct ->
@@ -309,19 +303,17 @@ public class RemoveUnsupportedDynamicFilters
 
         private boolean isSupportedDynamicFilterExpression(Expression expression)
         {
-            if (expression instanceof SymbolReference) {
+            if (expression instanceof Reference) {
                 return true;
             }
-            if (!(expression instanceof Cast)) {
+            if (!(expression instanceof Cast castExpression)) {
                 return false;
             }
-            Cast castExpression = (Cast) expression;
-            if (!(castExpression.getExpression() instanceof SymbolReference)) {
+            if (!(castExpression.expression() instanceof Reference)) {
                 return false;
             }
-            Map<NodeRef<Expression>, Type> expressionTypes = typeAnalyzer.getTypes(session, types, expression);
-            Type castSourceType = expressionTypes.get(NodeRef.of(castExpression.getExpression()));
-            Type castTargetType = expressionTypes.get(NodeRef.<Expression>of(castExpression));
+            Type castSourceType = castExpression.expression().type();
+            Type castTargetType = castExpression.type();
             // CAST must be an implicit coercion
             if (!typeCoercion.canCoerce(castSourceType, castTargetType)) {
                 return false;
@@ -332,7 +324,7 @@ public class RemoveUnsupportedDynamicFilters
         private boolean doesSaturatedFloorCastOperatorExist(Type fromType, Type toType)
         {
             try {
-                metadata.getCoercion(session, SATURATED_FLOOR_CAST, fromType, toType);
+                plannerContext.getMetadata().getCoercion(SATURATED_FLOOR_CAST, fromType, toType);
             }
             catch (OperatorNotFoundException e) {
                 return false;
@@ -347,7 +339,7 @@ public class RemoveUnsupportedDynamicFilters
             if (extractResult.getDynamicConjuncts().isEmpty()) {
                 return rewrittenExpression;
             }
-            return combineConjuncts(metadata, extractResult.getStaticConjuncts());
+            return combineConjuncts(extractResult.getStaticConjuncts());
         }
 
         private Expression removeNestedDynamicFilters(Expression expression)
@@ -355,16 +347,16 @@ public class RemoveUnsupportedDynamicFilters
             return ExpressionTreeRewriter.rewriteWith(new ExpressionRewriter<>()
             {
                 @Override
-                public Expression rewriteLogicalExpression(LogicalExpression node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
+                public Expression rewriteLogical(Logical node, Void context, ExpressionTreeRewriter<Void> treeRewriter)
                 {
-                    LogicalExpression rewrittenNode = treeRewriter.defaultRewrite(node, context);
+                    Logical rewrittenNode = treeRewriter.defaultRewrite(node, context);
 
                     boolean modified = (node != rewrittenNode);
                     ImmutableList.Builder<Expression> expressionBuilder = ImmutableList.builder();
 
-                    for (Expression term : rewrittenNode.getTerms()) {
+                    for (Expression term : rewrittenNode.terms()) {
                         if (isDynamicFilter(term)) {
-                            expressionBuilder.add(TRUE_LITERAL);
+                            expressionBuilder.add(TRUE);
                             modified = true;
                         }
                         else {
@@ -375,7 +367,7 @@ public class RemoveUnsupportedDynamicFilters
                     if (!modified) {
                         return node;
                     }
-                    return combinePredicates(metadata, node.getOperator(), expressionBuilder.build());
+                    return combinePredicates(node.operator(), expressionBuilder.build());
                 }
             }, expression);
         }

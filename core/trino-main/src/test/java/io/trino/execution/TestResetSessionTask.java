@@ -13,22 +13,28 @@
  */
 package io.trino.execution;
 
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import io.trino.FeaturesConfig;
 import io.trino.Session;
+import io.trino.client.NodeVersion;
+import io.trino.connector.MockConnectorFactory;
+import io.trino.connector.MockConnectorPlugin;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Catalog;
-import io.trino.metadata.CatalogManager;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.SessionPropertyManager;
 import io.trino.security.AccessControl;
-import io.trino.security.AllowAllAccessControl;
 import io.trino.spi.resourcegroups.ResourceGroupId;
+import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.ResetSession;
+import io.trino.testing.QueryRunner;
+import io.trino.testing.StandaloneQueryRunner;
 import io.trino.transaction.TransactionManager;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.net.URI;
 import java.util.Optional;
@@ -37,62 +43,69 @@ import java.util.concurrent.ExecutorService;
 
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
 import static io.trino.spi.session.PropertyMetadata.stringProperty;
-import static io.trino.testing.TestingSession.createBogusTestingCatalog;
 import static io.trino.testing.TestingSession.testSessionBuilder;
-import static io.trino.transaction.InMemoryTransactionManager.createTestTransactionManager;
 import static java.util.Collections.emptyList;
 import static java.util.concurrent.Executors.newCachedThreadPool;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestResetSessionTask
 {
-    private static final String CATALOG_NAME = "catalog";
+    private static final String CATALOG_NAME = "my_catalog";
     private ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
-    private final TransactionManager transactionManager;
-    private final AccessControl accessControl;
-    private final Metadata metadata;
+    private QueryRunner queryRunner;
+    private TransactionManager transactionManager;
+    private AccessControl accessControl;
+    private Metadata metadata;
+    private SessionPropertyManager sessionPropertyManager;
 
-    public TestResetSessionTask()
+    @BeforeAll
+    public void setUp()
     {
-        CatalogManager catalogManager = new CatalogManager();
-        transactionManager = createTestTransactionManager(catalogManager);
-        accessControl = new AllowAllAccessControl();
+        queryRunner = new StandaloneQueryRunner(TEST_SESSION);
+        queryRunner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                .withSessionProperty(stringProperty(
+                        "baz",
+                        "test property",
+                        null,
+                        false))
+                .build()));
+        queryRunner.createCatalog(CATALOG_NAME, "mock", ImmutableMap.of());
 
-        metadata = createTestMetadataManager(transactionManager, new FeaturesConfig());
-
-        metadata.getSessionPropertyManager().addSystemSessionProperty(stringProperty(
-                "foo",
-                "test property",
-                null,
-                false));
-
-        Catalog bogusTestingCatalog = createBogusTestingCatalog(CATALOG_NAME);
-        metadata.getSessionPropertyManager().addConnectorSessionProperties(bogusTestingCatalog.getConnectorCatalogName(), ImmutableList.of(stringProperty(
-                "baz",
-                "test property",
-                null,
-                false)));
-        catalogManager.registerCatalog(bogusTestingCatalog);
+        transactionManager = queryRunner.getTransactionManager();
+        accessControl = queryRunner.getAccessControl();
+        metadata = queryRunner.getPlannerContext().getMetadata();
+        sessionPropertyManager = queryRunner.getSessionPropertyManager();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         executor.shutdownNow();
         executor = null;
+        queryRunner.close();
+        queryRunner = null;
+        transactionManager = null;
+        accessControl = null;
+        metadata = null;
+        sessionPropertyManager = null;
     }
 
     @Test
     public void test()
     {
-        Session session = testSessionBuilder(metadata.getSessionPropertyManager())
-                .setSystemProperty("foo", "bar")
+        Session session = testSessionBuilder(sessionPropertyManager)
                 .setCatalogSessionProperty(CATALOG_NAME, "baz", "blah")
                 .build();
 
         QueryStateMachine stateMachine = QueryStateMachine.begin(
+                Optional.empty(),
                 "reset foo",
                 Optional.empty(),
                 session,
@@ -104,15 +117,19 @@ public class TestResetSessionTask
                 executor,
                 metadata,
                 WarningCollector.NOOP,
-                Optional.empty());
+                createPlanOptimizersStatsCollector(),
+                Optional.empty(),
+                true,
+                Optional.empty(),
+                new NodeVersion("test"));
 
-        getFutureValue(new ResetSessionTask(metadata).execute(
-                new ResetSession(QualifiedName.of(CATALOG_NAME, "baz")),
+        getFutureValue(new ResetSessionTask(metadata, sessionPropertyManager).execute(
+                new ResetSession(new NodeLocation(1, 1), QualifiedName.of(CATALOG_NAME, "baz")),
                 stateMachine,
                 emptyList(),
                 WarningCollector.NOOP));
 
         Set<String> sessionProperties = stateMachine.getResetSessionProperties();
-        assertEquals(sessionProperties, ImmutableSet.of("catalog.baz"));
+        assertThat(sessionProperties).isEqualTo(ImmutableSet.of(CATALOG_NAME + ".baz"));
     }
 }

@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableList;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
@@ -27,24 +26,14 @@ public final class SetProperties
 {
     public enum Type
     {
-        TABLE
+        TABLE, MATERIALIZED_VIEW
     }
 
     private final Type type;
     private final QualifiedName name;
     private final List<Property> properties;
 
-    public SetProperties(Type type, QualifiedName name, List<Property> properties)
-    {
-        this(Optional.empty(), type, name, properties);
-    }
-
     public SetProperties(NodeLocation location, Type type, QualifiedName name, List<Property> properties)
-    {
-        this(Optional.of(location), type, name, properties);
-    }
-
-    private SetProperties(Optional<NodeLocation> location, Type type, QualifiedName name, List<Property> properties)
     {
         super(location);
         this.type = requireNonNull(type, "type is null");

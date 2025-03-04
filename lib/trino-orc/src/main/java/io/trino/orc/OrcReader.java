@@ -16,6 +16,7 @@ package io.trino.orc;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.errorprone.annotations.FormatMethod;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
@@ -65,7 +66,7 @@ import static org.joda.time.DateTimeZone.UTC;
 
 public class OrcReader
 {
-    public static final int MAX_BATCH_SIZE = 1024;
+    public static final int MAX_BATCH_SIZE = 8 * 1024;
     public static final int INITIAL_BATCH_SIZE = 1;
     public static final int BATCH_SIZE_GROWTH_FACTOR = 2;
 
@@ -126,7 +127,7 @@ public class OrcReader
     {
         this.options = requireNonNull(options, "options is null");
         this.orcDataSource = orcDataSource;
-        this.metadataReader = new ExceptionWrappingMetadataReader(orcDataSource.getId(), new OrcMetadataReader());
+        this.metadataReader = new ExceptionWrappingMetadataReader(orcDataSource.getId(), new OrcMetadataReader(options));
 
         this.writeValidation = requireNonNull(writeValidation, "writeValidation is null");
 
@@ -157,7 +158,7 @@ public class OrcReader
                     throw new OrcCorruptionException(orcDataSource.getId(), "Not an ORC file");
                 }
             }
-            catch (IOException ignored) {
+            catch (IOException _) {
                 // throw original exception
             }
 
@@ -253,7 +254,7 @@ public class OrcReader
             List<Type> readTypes,
             OrcPredicate predicate,
             DateTimeZone legacyFileTimeZone,
-            AggregatedMemoryContext systemMemoryUsage,
+            AggregatedMemoryContext memoryUsage,
             int initialBatchSize,
             Function<Exception, RuntimeException> exceptionTransform)
             throws OrcCorruptionException
@@ -266,7 +267,7 @@ public class OrcReader
                 0,
                 orcDataSource.getEstimatedSize(),
                 legacyFileTimeZone,
-                systemMemoryUsage,
+                memoryUsage,
                 initialBatchSize,
                 exceptionTransform,
                 NameBasedFieldMapper::create);
@@ -280,7 +281,7 @@ public class OrcReader
             long offset,
             long length,
             DateTimeZone legacyFileTimeZone,
-            AggregatedMemoryContext systemMemoryUsage,
+            AggregatedMemoryContext memoryUsage,
             int initialBatchSize,
             Function<Exception, RuntimeException> exceptionTransform,
             FieldMapperFactory fieldMapperFactory)
@@ -306,7 +307,7 @@ public class OrcReader
                 metadataReader,
                 options,
                 footer.getUserMetadata(),
-                systemMemoryUsage,
+                memoryUsage,
                 writeValidation,
                 initialBatchSize,
                 exceptionTransform,
@@ -366,7 +367,7 @@ public class OrcReader
                             orcDataSourceId))
                     .collect(toImmutableList());
         }
-        return new OrcColumn(path, columnId, fieldName, orcType.getOrcTypeKind(), orcDataSourceId, nestedColumns, orcType.getAttributes());
+        return new OrcColumn(path, columnId, fieldName, orcType, orcDataSourceId, nestedColumns, orcType.getAttributes());
     }
 
     /**
@@ -393,6 +394,8 @@ public class OrcReader
         }
     }
 
+    @SuppressWarnings("FormatStringAnnotation")
+    @FormatMethod
     private void validateWrite(Predicate<OrcWriteValidation> test, String messageFormat, Object... args)
             throws OrcCorruptionException
     {
@@ -485,7 +488,7 @@ public class OrcReader
                 }
             }
 
-            return new NameBasedProjectedLayout(Optional.of(fieldLayouts.build()));
+            return new NameBasedProjectedLayout(Optional.of(fieldLayouts.buildOrThrow()));
         }
     }
 

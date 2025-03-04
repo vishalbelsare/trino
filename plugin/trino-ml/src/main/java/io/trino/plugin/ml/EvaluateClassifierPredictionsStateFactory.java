@@ -16,15 +16,16 @@ package io.trino.plugin.ml;
 import io.trino.array.ObjectBigArray;
 import io.trino.spi.function.AccumulatorStateFactory;
 import io.trino.spi.function.GroupedAccumulatorState;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.HashMap;
 import java.util.Map;
 
+import static io.airlift.slice.SizeOf.instanceSize;
+
 public class EvaluateClassifierPredictionsStateFactory
         implements AccumulatorStateFactory<EvaluateClassifierPredictionsState>
 {
-    private static final long HASH_MAP_SIZE = ClassLayout.parseClass(HashMap.class).instanceSize();
+    private static final long HASH_MAP_SIZE = instanceSize(HashMap.class);
 
     @Override
     public EvaluateClassifierPredictionsState createSingleState()
@@ -44,11 +45,11 @@ public class EvaluateClassifierPredictionsStateFactory
         private final ObjectBigArray<Map<String, Integer>> truePositives = new ObjectBigArray<>();
         private final ObjectBigArray<Map<String, Integer>> falsePositives = new ObjectBigArray<>();
         private final ObjectBigArray<Map<String, Integer>> falseNegatives = new ObjectBigArray<>();
-        private long groupId;
+        private int groupId;
         private long memoryUsage;
 
         @Override
-        public void setGroupId(long groupId)
+        public void setGroupId(int groupId)
         {
             this.groupId = groupId;
         }
@@ -90,7 +91,7 @@ public class EvaluateClassifierPredictionsStateFactory
         }
 
         @Override
-        public void ensureCapacity(long size)
+        public void ensureCapacity(int size)
         {
             truePositives.ensureCapacity(size);
             falsePositives.ensureCapacity(size);

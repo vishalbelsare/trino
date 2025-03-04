@@ -32,7 +32,7 @@ import io.trino.spi.statistics.TableStatistics;
 import io.trino.tpch.PartColumn;
 import io.trino.tpch.TpchColumn;
 import io.trino.tpch.TpchTable;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -70,10 +70,8 @@ import static java.lang.String.format;
 import static java.util.Arrays.stream;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.withinPercentage;
 
 public class TestTpchMetadata
 {
@@ -148,21 +146,21 @@ public class TestTpchMetadata
 
     private void testGetTableMetadata(String schema, TpchTable<?> table)
     {
-        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()));
+        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()), Optional.empty(), Optional.empty());
         ConnectorTableMetadata tableMetadata = tpchMetadata.getTableMetadata(session, tableHandle);
-        assertEquals(tableMetadata.getTableSchema().getTable().getTableName(), table.getTableName());
-        assertEquals(tableMetadata.getTableSchema().getTable().getSchemaName(), schema);
+        assertThat(tableMetadata.getTableSchema().getTable().getTableName()).isEqualTo(table.getTableName());
+        assertThat(tableMetadata.getTableSchema().getTable().getSchemaName()).isEqualTo(schema);
     }
 
     @Test
     public void testHiddenSchemas()
     {
-        assertTrue(tpchMetadata.schemaExists(session, "sf1"));
-        assertTrue(tpchMetadata.schemaExists(session, "sf3000.0"));
-        assertFalse(tpchMetadata.schemaExists(session, "sf0"));
-        assertFalse(tpchMetadata.schemaExists(session, "hf1"));
-        assertFalse(tpchMetadata.schemaExists(session, "sf"));
-        assertFalse(tpchMetadata.schemaExists(session, "sfabc"));
+        assertThat(tpchMetadata.schemaExists(session, "sf1")).isTrue();
+        assertThat(tpchMetadata.schemaExists(session, "sf3000.0")).isTrue();
+        assertThat(tpchMetadata.schemaExists(session, "sf0")).isFalse();
+        assertThat(tpchMetadata.schemaExists(session, "hf1")).isFalse();
+        assertThat(tpchMetadata.schemaExists(session, "sf")).isFalse();
+        assertThat(tpchMetadata.schemaExists(session, "sfabc")).isFalse();
     }
 
     private void testTableStats(String schema, TpchTable<?> table, double expectedRowCount)
@@ -172,19 +170,24 @@ public class TestTpchMetadata
 
     private void testTableStats(String schema, TpchTable<?> table, Constraint constraint, double expectedRowCount)
     {
-        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()));
-        TableStatistics tableStatistics = tpchMetadata.getTableStatistics(session, tableHandle, constraint);
+        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()), Optional.empty(), Optional.empty());
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = tpchMetadata.applyFilter(session, tableHandle, constraint);
+        if (result.isPresent()) {
+            tableHandle = (TpchTableHandle) result.get().getHandle();
+        }
+        TableStatistics tableStatistics = tpchMetadata.getTableStatistics(session, tableHandle);
 
         double actualRowCountValue = tableStatistics.getRowCount().getValue();
-        assertEquals(tableStatistics.getRowCount(), Estimate.of(actualRowCountValue));
-        assertEquals(actualRowCountValue, expectedRowCount, expectedRowCount * TOLERANCE);
+        assertThat(tableStatistics.getRowCount()).isEqualTo(Estimate.of(actualRowCountValue));
+        assertThat(actualRowCountValue)
+                .isCloseTo(expectedRowCount, withinPercentage(TOLERANCE * 100));
     }
 
     private void testNoTableStats(String schema, TpchTable<?> table)
     {
-        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()));
-        TableStatistics tableStatistics = tpchMetadata.getTableStatistics(session, tableHandle, alwaysTrue());
-        assertTrue(tableStatistics.getRowCount().isUnknown());
+        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()), Optional.empty(), Optional.empty());
+        TableStatistics tableStatistics = tpchMetadata.getTableStatistics(session, tableHandle);
+        assertThat(tableStatistics.getRowCount().isUnknown()).isTrue();
     }
 
     @Test
@@ -273,8 +276,12 @@ public class TestTpchMetadata
 
     private void testColumnStats(String schema, TpchTable<?> table, TpchColumn<?> column, Constraint constraint, ColumnStatistics expected)
     {
-        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()));
-        TableStatistics tableStatistics = tpchMetadata.getTableStatistics(session, tableHandle, constraint);
+        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName(schema, table.getTableName()), Optional.empty(), Optional.empty());
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result = tpchMetadata.applyFilter(session, tableHandle, constraint);
+        if (result.isPresent()) {
+            tableHandle = (TpchTableHandle) result.get().getHandle();
+        }
+        TableStatistics tableStatistics = tpchMetadata.getTableStatistics(session, tableHandle);
         ColumnHandle columnHandle = tpchMetadata.getColumnHandles(session, tableHandle).get(column.getSimplifiedColumnName());
 
         ColumnStatistics actual = tableStatistics.getColumnStatistics().get(columnHandle);
@@ -290,7 +297,7 @@ public class TestTpchMetadata
     @Test
     public void testOrdersOrderStatusPredicatePushdown()
     {
-        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName("sf1", ORDERS.getTableName()));
+        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName("sf1", ORDERS.getTableName()), Optional.empty(), Optional.empty());
 
         TupleDomain<ColumnHandle> domain;
         ConstraintApplicationResult<ConnectorTableHandle> result;
@@ -298,13 +305,13 @@ public class TestTpchMetadata
         domain = fixedValueTupleDomain(tpchMetadata, ORDER_STATUS, utf8Slice("P"));
         result = tpchMetadata.applyFilter(session, tableHandle, new Constraint(domain, convertToPredicate(domain, ORDER_STATUS), Set.of(tpchMetadata.toColumnHandle(ORDER_STATUS)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), TupleDomain.all(), session);
-        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).getConstraint(), domain, session);
+        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).constraint(), domain, session);
 
         domain = fixedValueTupleDomain(tpchMetadata, ORDER_KEY, 42L);
         result = tpchMetadata.applyFilter(session, tableHandle, new Constraint(domain, convertToPredicate(domain, ORDER_STATUS), Set.of(tpchMetadata.toColumnHandle(ORDER_STATUS)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), domain, session);
         assertTupleDomainEquals(
-                ((TpchTableHandle) result.getHandle()).getConstraint(),
+                ((TpchTableHandle) result.getHandle()).constraint(),
                 // The most important thing about the expected value that it is NOT TupleDomain.none() (or equivalent).
                 // Using concrete expected value instead of checking TupleDomain::isNone to make sure the test doesn't pass on some other wrong value.
                 TupleDomain.columnWiseUnion(
@@ -317,7 +324,7 @@ public class TestTpchMetadata
     @Test
     public void testPartTypeAndPartContainerPredicatePushdown()
     {
-        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName("sf1", PART.getTableName()));
+        TpchTableHandle tableHandle = tpchMetadata.getTableHandle(session, new SchemaTableName("sf1", PART.getTableName()), Optional.empty(), Optional.empty());
 
         TupleDomain<ColumnHandle> domain;
         ConstraintApplicationResult<ConnectorTableHandle> result;
@@ -329,7 +336,7 @@ public class TestTpchMetadata
                 Set.of(tpchMetadata.toColumnHandle(PartColumn.TYPE)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), TupleDomain.all(), session);
         assertTupleDomainEquals(
-                filterOutColumnFromPredicate(((TpchTableHandle) result.getHandle()).getConstraint(), tpchMetadata.toColumnHandle(PartColumn.CONTAINER)),
+                filterOutColumnFromPredicate(((TpchTableHandle) result.getHandle()).constraint(), tpchMetadata.toColumnHandle(PartColumn.CONTAINER)),
                 domain,
                 session);
 
@@ -339,7 +346,7 @@ public class TestTpchMetadata
                 convertToPredicate(domain, PartColumn.TYPE),
                 Set.of(tpchMetadata.toColumnHandle(PartColumn.TYPE)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), TupleDomain.all(), session);
-        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).getConstraint(), TupleDomain.none(), session);
+        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).constraint(), TupleDomain.none(), session);
 
         domain = fixedValueTupleDomain(tpchMetadata, PartColumn.CONTAINER, utf8Slice("SM BAG"));
         result = tpchMetadata.applyFilter(session, tableHandle, new Constraint(
@@ -348,7 +355,7 @@ public class TestTpchMetadata
                 Set.of(tpchMetadata.toColumnHandle(PartColumn.CONTAINER)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), TupleDomain.all(), session);
         assertTupleDomainEquals(
-                filterOutColumnFromPredicate(((TpchTableHandle) result.getHandle()).getConstraint(), tpchMetadata.toColumnHandle(PartColumn.TYPE)),
+                filterOutColumnFromPredicate(((TpchTableHandle) result.getHandle()).constraint(), tpchMetadata.toColumnHandle(PartColumn.TYPE)),
                 domain,
                 session);
 
@@ -358,7 +365,7 @@ public class TestTpchMetadata
                 convertToPredicate(domain, PartColumn.CONTAINER),
                 Set.of(tpchMetadata.toColumnHandle(PartColumn.CONTAINER)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), TupleDomain.all(), session);
-        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).getConstraint(), TupleDomain.none(), session);
+        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).constraint(), TupleDomain.none(), session);
 
         domain = fixedValueTupleDomain(tpchMetadata, PartColumn.TYPE, utf8Slice("SMALL BRUSHED COPPER"), PartColumn.CONTAINER, utf8Slice("SM BAG"));
         result = tpchMetadata.applyFilter(session, tableHandle, new Constraint(
@@ -366,7 +373,7 @@ public class TestTpchMetadata
                 convertToPredicate(domain, PartColumn.CONTAINER),
                 Set.of(tpchMetadata.toColumnHandle(PartColumn.CONTAINER)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), TupleDomain.all(), session);
-        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).getConstraint(), domain, session);
+        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).constraint(), domain, session);
 
         domain = fixedValueTupleDomain(tpchMetadata, PartColumn.TYPE, utf8Slice("UNKNOWN"), PartColumn.CONTAINER, utf8Slice("UNKNOWN"));
         result = tpchMetadata.applyFilter(session, tableHandle, new Constraint(
@@ -374,7 +381,7 @@ public class TestTpchMetadata
                 convertToPredicate(domain, PartColumn.TYPE, PartColumn.CONTAINER),
                 Set.of(tpchMetadata.toColumnHandle(PartColumn.TYPE), tpchMetadata.toColumnHandle(PartColumn.CONTAINER)))).get();
         assertTupleDomainEquals(result.getRemainingFilter(), TupleDomain.all(), session);
-        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).getConstraint(), TupleDomain.none(), session);
+        assertTupleDomainEquals(((TpchTableHandle) result.getHandle()).constraint(), TupleDomain.none(), session);
     }
 
     private Predicate<Map<ColumnHandle, NullableValue>> convertToPredicate(TupleDomain<ColumnHandle> domain, TpchColumn<?>... columns)
@@ -397,7 +404,7 @@ public class TestTpchMetadata
     private void assertTupleDomainEquals(TupleDomain<?> actual, TupleDomain<?> expected, ConnectorSession session)
     {
         if (!Objects.equals(actual, expected)) {
-            fail(format("expected [%s] but found [%s]", expected.toString(session), actual.toString(session)));
+            throw new AssertionError(format("expected [%s] but found [%s]", expected.toString(session), actual.toString(session)));
         }
     }
 

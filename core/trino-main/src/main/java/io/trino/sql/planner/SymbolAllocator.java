@@ -13,27 +13,30 @@
  */
 package io.trino.sql.planner;
 
+import com.google.common.base.CharMatcher;
 import com.google.common.primitives.Ints;
-import io.trino.metadata.ResolvedFunction;
-import io.trino.spi.type.BigintType;
 import io.trino.spi.type.Type;
 import io.trino.sql.analyzer.Field;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.GroupingOperation;
-import io.trino.sql.tree.Identifier;
-import io.trino.sql.tree.SymbolReference;
+import io.trino.sql.ir.Call;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
 
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toMap;
 
 public class SymbolAllocator
 {
-    private final Map<Symbol, Type> symbols;
+    public static final CharMatcher EXCLUDED_CHARACTERS = CharMatcher.inRange('a', 'z')
+            .or(CharMatcher.inRange('0', '9'))
+            .negate()
+            .precomputed();
+
+    private final Map<String, Symbol> symbols;
     private int nextId;
 
     public SymbolAllocator()
@@ -41,39 +44,23 @@ public class SymbolAllocator
         symbols = new HashMap<>();
     }
 
-    public SymbolAllocator(Map<Symbol, Type> initial)
+    public SymbolAllocator(Collection<Symbol> initial)
     {
-        symbols = new HashMap<>(initial);
+        symbols = new HashMap<>(initial.stream()
+                .collect(toMap(Symbol::name, e -> e)));
     }
 
     public Symbol newSymbol(Symbol symbolHint)
     {
-        return newSymbol(symbolHint, null);
-    }
-
-    public Symbol newSymbol(Symbol symbolHint, String suffix)
-    {
-        checkArgument(symbols.containsKey(symbolHint), "symbolHint not in symbols map");
-        return newSymbol(symbolHint.getName(), symbols.get(symbolHint), suffix);
+        return newSymbol(symbolHint.name(), symbolHint.type());
     }
 
     public Symbol newSymbol(String nameHint, Type type)
     {
-        return newSymbol(nameHint, type, null);
-    }
-
-    public Symbol newHashSymbol()
-    {
-        return newSymbol("$hashValue", BigintType.BIGINT);
-    }
-
-    public Symbol newSymbol(String nameHint, Type type, String suffix)
-    {
         requireNonNull(nameHint, "nameHint is null");
         requireNonNull(type, "type is null");
 
-        // TODO: workaround for the fact that QualifiedName lowercases parts
-        nameHint = nameHint.toLowerCase(ENGLISH);
+        nameHint = EXCLUDED_CHARACTERS.trimAndCollapseFrom(nameHint.toLowerCase(ENGLISH), '_');
 
         // don't strip the tail if the only _ is the first character
         int index = nameHint.lastIndexOf("_");
@@ -86,45 +73,26 @@ public class SymbolAllocator
             }
         }
 
-        String unique = nameHint;
-
-        if (suffix != null) {
-            unique = unique + "$" + suffix;
+        if (nameHint.isEmpty()) {
+            nameHint = "col";
+        }
+        Symbol symbol = new Symbol(type, nameHint);
+        while (symbols.putIfAbsent(symbol.name(), symbol) != null) {
+            symbol = new Symbol(type, nameHint + "_" + nextId());
         }
 
-        String attempt = unique;
-        while (symbols.containsKey(new Symbol(attempt))) {
-            attempt = unique + "_" + nextId();
-        }
-
-        Symbol symbol = new Symbol(attempt);
-        symbols.put(symbol, type);
         return symbol;
     }
 
-    public Symbol newSymbol(Expression expression, Type type)
+    public Symbol newSymbol(Expression expression)
     {
-        return newSymbol(expression, type, null);
-    }
+        String nameHint = switch (expression) {
+            case Call call -> call.function().name().getFunctionName();
+            case Reference reference -> reference.name();
+            default -> "expr";
+        };
 
-    public Symbol newSymbol(Expression expression, Type type, String suffix)
-    {
-        String nameHint = "expr";
-        if (expression instanceof Identifier) {
-            nameHint = ((Identifier) expression).getValue();
-        }
-        else if (expression instanceof FunctionCall) {
-            FunctionCall functionCall = (FunctionCall) expression;
-            nameHint = ResolvedFunction.extractFunctionName(functionCall.getName());
-        }
-        else if (expression instanceof SymbolReference) {
-            nameHint = ((SymbolReference) expression).getName();
-        }
-        else if (expression instanceof GroupingOperation) {
-            nameHint = "grouping";
-        }
-
-        return newSymbol(nameHint, type, suffix);
+        return newSymbol(nameHint, expression.type());
     }
 
     public Symbol newSymbol(Field field)
@@ -133,9 +101,9 @@ public class SymbolAllocator
         return newSymbol(nameHint, field.getType());
     }
 
-    public TypeProvider getTypes()
+    public Collection<Symbol> getSymbols()
     {
-        return TypeProvider.viewOf(symbols);
+        return symbols.values();
     }
 
     private int nextId()

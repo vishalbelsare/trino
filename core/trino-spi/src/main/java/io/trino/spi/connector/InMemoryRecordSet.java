@@ -16,10 +16,16 @@ package io.trino.spi.connector;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Int128;
+import io.trino.spi.type.LongTimeWithTimeZone;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 
 import java.util.ArrayList;
@@ -29,18 +35,17 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
+import static io.trino.spi.connector.Preconditions.checkArgument;
+import static io.trino.spi.connector.Preconditions.checkState;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
-import static io.trino.spi.type.Decimals.isLongDecimal;
-import static io.trino.spi.type.Decimals.isShortDecimal;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class InMemoryRecordSet
@@ -67,18 +72,18 @@ public class InMemoryRecordSet
         return new InMemoryRecordCursor(types, records.iterator());
     }
 
-    private static class InMemoryRecordCursor
+    public static class InMemoryRecordCursor
             implements RecordCursor
     {
         private final List<Type> types;
-        private final Iterator<? extends List<?>> records;
+        private Iterator<? extends List<?>> records;
         private List<?> record;
         private long completedBytes;
 
-        private InMemoryRecordCursor(List<Type> types, Iterator<? extends List<?>> records)
+        protected InMemoryRecordCursor(List<Type> types, Iterator<? extends List<?>> records)
         {
-            this.types = types;
-            this.records = records;
+            this.types = requireNonNull(types, "types is null");
+            this.records = requireNonNull(records, "records is null");
         }
 
         @Override
@@ -173,6 +178,8 @@ public class InMemoryRecordSet
         @Override
         public void close()
         {
+            records = null;
+            record = null;
         }
     }
 
@@ -223,9 +230,12 @@ public class InMemoryRecordSet
                 else if (INTEGER.equals(type)) {
                     checkArgument(value instanceof Integer, "Expected value %s to be an instance of Integer, but is a %s", i, value.getClass().getSimpleName());
                 }
-                else if (BIGINT.equals(type) || DATE.equals(type) || TIMESTAMP_MILLIS.equals(type) || TIMESTAMP_WITH_TIME_ZONE.equals(type)) {
+                else if (BIGINT.equals(type) || DATE.equals(type) || TIMESTAMP_MILLIS.equals(type) || TIMESTAMP_TZ_MILLIS.equals(type)) {
                     checkArgument(value instanceof Integer || value instanceof Long,
                             "Expected value %d to be an instance of Integer or Long, but is a %s", i, value.getClass().getSimpleName());
+                }
+                else if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType && !timestampWithTimeZoneType.isShort()) {
+                    checkArgument(value instanceof LongTimestampWithTimeZone, "Expected value %s to be an instance of LongTimestampWithTimeZone, but is a %s", i, value.getClass().getSimpleName());
                 }
                 else if (DOUBLE.equals(type)) {
                     checkArgument(value instanceof Double, "Expected value %s to be an instance of Double, but is a %s", i, value.getClass().getSimpleName());
@@ -246,13 +256,13 @@ public class InMemoryRecordSet
                     checkArgument(value instanceof Block,
                             "Expected value %d to be an instance of Block, but is a %s", i, value.getClass().getSimpleName());
                 }
-                else if (isShortDecimal(type)) {
+                else if (type instanceof DecimalType decimalType && decimalType.isShort()) {
                     checkArgument(value instanceof Long,
                             "Expected value %d to be an instance of Long, but is a %s", i, value.getClass().getSimpleName());
                 }
-                else if (isLongDecimal(type)) {
-                    checkArgument(value instanceof Slice,
-                            "Expected value %d to be an instance of Slice, but is a %s", i, value.getClass().getSimpleName());
+                else if (type instanceof DecimalType decimalType && !decimalType.isShort()) {
+                    checkArgument(value instanceof Int128,
+                            "Expected value %d to be an instance of LongDecimal, but is a %s", i, value.getClass().getSimpleName());
                 }
                 else {
                     throw new IllegalStateException("Unsupported column type " + types.get(i));
@@ -267,20 +277,6 @@ public class InMemoryRecordSet
         public InMemoryRecordSet build()
         {
             return new InMemoryRecordSet(types, records);
-        }
-    }
-
-    private static void checkArgument(boolean test, String message, Object... args)
-    {
-        if (!test) {
-            throw new IllegalArgumentException(format(message, args));
-        }
-    }
-
-    private static void checkState(boolean test, String message)
-    {
-        if (!test) {
-            throw new IllegalStateException(message);
         }
     }
 
@@ -306,6 +302,12 @@ public class InMemoryRecordSet
             else if (value instanceof Block) {
                 completedBytes += ((Block) value).getSizeInBytes();
             }
+            else if (value instanceof SqlMap map) {
+                completedBytes += map.getSizeInBytes();
+            }
+            else if (value instanceof SqlRow row) {
+                completedBytes += row.getSizeInBytes();
+            }
             else if (value instanceof Slice) {
                 completedBytes += ((Slice) value).length();
             }
@@ -314,6 +316,12 @@ public class InMemoryRecordSet
             }
             else if (value instanceof LongTimestampWithTimeZone) {
                 completedBytes += LongTimestampWithTimeZone.INSTANCE_SIZE;
+            }
+            else if (value instanceof LongTimeWithTimeZone) {
+                completedBytes += LongTimeWithTimeZone.INSTANCE_SIZE;
+            }
+            else if (value instanceof Int128) {
+                completedBytes += Int128.INSTANCE_SIZE;
             }
             else {
                 throw new IllegalArgumentException("Unknown type: " + value.getClass());

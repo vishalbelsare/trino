@@ -15,7 +15,6 @@ package io.trino.sql.planner.sanity;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.spi.type.TypeOperators;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.plan.Assignments;
@@ -24,14 +23,15 @@ import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.ValuesNode;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
+import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
+import static io.trino.type.UnknownType.UNKNOWN;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestVerifyOnlyOneOutputNode
 {
     private final PlanNodeIdAllocator idAllocator = new PlanNodeIdAllocator();
-    private final TypeOperators typeOperators = new TypeOperators();
 
     @Test
     public void testValidateSuccessful()
@@ -40,11 +40,10 @@ public class TestVerifyOnlyOneOutputNode
         PlanNode root =
                 new OutputNode(idAllocator.getNextId(),
                         new ProjectNode(idAllocator.getNextId(),
-                                new ValuesNode(
-                                        idAllocator.getNextId(), ImmutableList.of(), ImmutableList.of()),
+                                new ValuesNode(idAllocator.getNextId(), ImmutableList.of()),
                                 Assignments.of()
                         ), ImmutableList.of(), ImmutableList.of());
-        new VerifyOnlyOneOutputNode().validate(root, null, null, typeOperators, null, null, WarningCollector.NOOP);
+        new VerifyOnlyOneOutputNode().validate(root, null, PLANNER_CONTEXT, WarningCollector.NOOP);
     }
 
     @Test
@@ -56,15 +55,14 @@ public class TestVerifyOnlyOneOutputNode
                         new ExplainAnalyzeNode(idAllocator.getNextId(),
                                 new OutputNode(idAllocator.getNextId(),
                                         new ProjectNode(idAllocator.getNextId(),
-                                                new ValuesNode(
-                                                        idAllocator.getNextId(), ImmutableList.of(), ImmutableList.of()),
+                                                new ValuesNode(idAllocator.getNextId(), ImmutableList.of()),
                                                 Assignments.of()
                                         ), ImmutableList.of(), ImmutableList.of()
-                                ), new Symbol("a"),
+                                ), new Symbol(UNKNOWN, "a"),
                                 ImmutableList.of(),
                                 false),
                         ImmutableList.of(), ImmutableList.of());
-        assertThatThrownBy(() -> new VerifyOnlyOneOutputNode().validate(root, null, null, typeOperators, null, null, WarningCollector.NOOP))
+        assertThatThrownBy(() -> new VerifyOnlyOneOutputNode().validate(root, null, PLANNER_CONTEXT, WarningCollector.NOOP))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Expected plan to have single instance of OutputNode");
     }

@@ -17,27 +17,28 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
+import io.trino.operator.AggregationMetrics;
+import io.trino.operator.FlatHashStrategyCompiler;
 import io.trino.operator.OperatorContext;
 import io.trino.operator.WorkProcessor;
 import io.trino.operator.WorkProcessor.Transformation;
 import io.trino.operator.WorkProcessor.TransformationState;
-import io.trino.operator.aggregation.AccumulatorFactory;
+import io.trino.operator.aggregation.AggregatorFactory;
 import io.trino.spi.Page;
 import io.trino.spi.type.Type;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.AggregationNode;
-import io.trino.type.BlockTypeOperators;
 
 import java.io.Closeable;
 import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Verify.verify;
+import static java.util.Objects.requireNonNull;
 
 public class MergingHashAggregationBuilder
         implements Closeable
 {
-    private final List<AccumulatorFactory> accumulatorFactories;
+    private final List<AggregatorFactory> aggregatorFactories;
     private final AggregationNode.Step step;
     private final int expectedGroups;
     private final ImmutableList<Integer> groupByPartialChannels;
@@ -49,11 +50,11 @@ public class MergingHashAggregationBuilder
     private final LocalMemoryContext memoryContext;
     private final long memoryLimitForMerge;
     private final int overwriteIntermediateChannelOffset;
-    private final JoinCompiler joinCompiler;
-    private final BlockTypeOperators blockTypeOperators;
+    private final FlatHashStrategyCompiler hashStrategyCompiler;
+    private final AggregationMetrics aggregationMetrics;
 
     public MergingHashAggregationBuilder(
-            List<AccumulatorFactory> accumulatorFactories,
+            List<AggregatorFactory> aggregatorFactories,
             AggregationNode.Step step,
             int expectedGroups,
             List<Type> groupByTypes,
@@ -63,15 +64,15 @@ public class MergingHashAggregationBuilder
             AggregatedMemoryContext aggregatedMemoryContext,
             long memoryLimitForMerge,
             int overwriteIntermediateChannelOffset,
-            JoinCompiler joinCompiler,
-            BlockTypeOperators blockTypeOperators)
+            FlatHashStrategyCompiler hashStrategyCompiler,
+            AggregationMetrics aggregationMetrics)
     {
-        ImmutableList.Builder<Integer> groupByPartialChannels = ImmutableList.builder();
+        ImmutableList.Builder<Integer> groupByPartialChannels = ImmutableList.builderWithExpectedSize(groupByTypes.size());
         for (int i = 0; i < groupByTypes.size(); i++) {
             groupByPartialChannels.add(i);
         }
 
-        this.accumulatorFactories = accumulatorFactories;
+        this.aggregatorFactories = aggregatorFactories;
         this.step = AggregationNode.Step.partialInput(step);
         this.expectedGroups = expectedGroups;
         this.groupByPartialChannels = groupByPartialChannels.build();
@@ -82,8 +83,8 @@ public class MergingHashAggregationBuilder
         this.memoryContext = aggregatedMemoryContext.newLocalMemoryContext(MergingHashAggregationBuilder.class.getSimpleName());
         this.memoryLimitForMerge = memoryLimitForMerge;
         this.overwriteIntermediateChannelOffset = overwriteIntermediateChannelOffset;
-        this.joinCompiler = joinCompiler;
-        this.blockTypeOperators = blockTypeOperators;
+        this.hashStrategyCompiler = hashStrategyCompiler;
+        this.aggregationMetrics = requireNonNull(aggregationMetrics, "aggregationMetrics is null");
 
         rebuildHashAggregationBuilder();
     }
@@ -92,8 +93,8 @@ public class MergingHashAggregationBuilder
     {
         return sortedPages.flatTransform(new Transformation<>()
         {
-            boolean reset = true;
-            long memorySize;
+            private boolean reset = true;
+            private long memorySize;
 
             @Override
             public TransformationState<WorkProcessor<Page>> process(Page inputPage)
@@ -144,7 +145,7 @@ public class MergingHashAggregationBuilder
     private void rebuildHashAggregationBuilder()
     {
         this.hashAggregationBuilder = new InMemoryHashAggregationBuilder(
-                accumulatorFactories,
+                aggregatorFactories,
                 step,
                 expectedGroups,
                 groupByTypes,
@@ -153,9 +154,9 @@ public class MergingHashAggregationBuilder
                 operatorContext,
                 Optional.of(DataSize.succinctBytes(0)),
                 Optional.of(overwriteIntermediateChannelOffset),
-                joinCompiler,
-                blockTypeOperators,
+                hashStrategyCompiler,
                 // TODO: merging should also yield on memory reservations
-                () -> true);
+                () -> true,
+                aggregationMetrics);
     }
 }

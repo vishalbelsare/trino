@@ -24,10 +24,69 @@ import static java.util.Objects.requireNonNull;
 public class ComparisonExpression
         extends Expression
 {
+    public enum Operator
+    {
+        EQUAL("="),
+        NOT_EQUAL("<>"),
+        LESS_THAN("<"),
+        LESS_THAN_OR_EQUAL("<="),
+        GREATER_THAN(">"),
+        GREATER_THAN_OR_EQUAL(">="),
+        IS_DISTINCT_FROM("IS DISTINCT FROM");
+
+        private final String value;
+
+        Operator(String value)
+        {
+            this.value = value;
+        }
+
+        public String getValue()
+        {
+            return value;
+        }
+
+        public Operator flip()
+        {
+            return switch (this) {
+                case EQUAL -> EQUAL;
+                case NOT_EQUAL -> NOT_EQUAL;
+                case LESS_THAN -> GREATER_THAN;
+                case LESS_THAN_OR_EQUAL -> GREATER_THAN_OR_EQUAL;
+                case GREATER_THAN -> LESS_THAN;
+                case GREATER_THAN_OR_EQUAL -> LESS_THAN_OR_EQUAL;
+                case IS_DISTINCT_FROM -> IS_DISTINCT_FROM;
+            };
+        }
+
+        public Operator negate()
+        {
+            switch (this) {
+                case EQUAL:
+                    return NOT_EQUAL;
+                case NOT_EQUAL:
+                    return EQUAL;
+                case LESS_THAN:
+                    return GREATER_THAN_OR_EQUAL;
+                case LESS_THAN_OR_EQUAL:
+                    return GREATER_THAN;
+                case GREATER_THAN:
+                    return LESS_THAN_OR_EQUAL;
+                case GREATER_THAN_OR_EQUAL:
+                    return LESS_THAN;
+                case IS_DISTINCT_FROM:
+                    // Cannot negate
+                    break;
+            }
+            throw new IllegalArgumentException("Unsupported comparison: " + this);
+        }
+    }
+
     private final Operator operator;
     private final Expression left;
     private final Expression right;
 
+    @Deprecated
     public ComparisonExpression(Operator operator, Expression left, Expression right)
     {
         this(Optional.empty(), operator, left, right);
@@ -35,7 +94,10 @@ public class ComparisonExpression
 
     public ComparisonExpression(NodeLocation location, Operator operator, Expression left, Expression right)
     {
-        this(Optional.of(location), operator, left, right);
+        super(location);
+        this.operator = requireNonNull(operator, "operator is null");
+        this.left = requireNonNull(left, "left is null");
+        this.right = requireNonNull(right, "right is null");
     }
 
     private ComparisonExpression(Optional<NodeLocation> location, Operator operator, Expression left, Expression right)
@@ -97,72 +159,6 @@ public class ComparisonExpression
     public int hashCode()
     {
         return Objects.hash(operator, left, right);
-    }
-
-    public enum Operator
-    {
-        EQUAL("="),
-        NOT_EQUAL("<>"),
-        LESS_THAN("<"),
-        LESS_THAN_OR_EQUAL("<="),
-        GREATER_THAN(">"),
-        GREATER_THAN_OR_EQUAL(">="),
-        IS_DISTINCT_FROM("IS DISTINCT FROM");
-
-        private final String value;
-
-        Operator(String value)
-        {
-            this.value = value;
-        }
-
-        public String getValue()
-        {
-            return value;
-        }
-
-        public Operator flip()
-        {
-            switch (this) {
-                case EQUAL:
-                    return EQUAL;
-                case NOT_EQUAL:
-                    return NOT_EQUAL;
-                case LESS_THAN:
-                    return GREATER_THAN;
-                case LESS_THAN_OR_EQUAL:
-                    return GREATER_THAN_OR_EQUAL;
-                case GREATER_THAN:
-                    return LESS_THAN;
-                case GREATER_THAN_OR_EQUAL:
-                    return LESS_THAN_OR_EQUAL;
-                case IS_DISTINCT_FROM:
-                    return IS_DISTINCT_FROM;
-            }
-            throw new IllegalArgumentException("Unsupported comparison: " + this);
-        }
-
-        public Operator negate()
-        {
-            switch (this) {
-                case EQUAL:
-                    return NOT_EQUAL;
-                case NOT_EQUAL:
-                    return EQUAL;
-                case LESS_THAN:
-                    return GREATER_THAN_OR_EQUAL;
-                case LESS_THAN_OR_EQUAL:
-                    return GREATER_THAN;
-                case GREATER_THAN:
-                    return LESS_THAN_OR_EQUAL;
-                case GREATER_THAN_OR_EQUAL:
-                    return LESS_THAN;
-                case IS_DISTINCT_FROM:
-                    // Cannot negate
-                    break;
-            }
-            throw new IllegalArgumentException("Unsupported comparison: " + this);
-        }
     }
 
     @Override

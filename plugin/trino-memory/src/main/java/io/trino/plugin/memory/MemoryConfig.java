@@ -15,8 +15,7 @@ package io.trino.plugin.memory;
 
 import io.airlift.configuration.Config;
 import io.airlift.units.DataSize;
-
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotNull;
 
 public class MemoryConfig
 {
@@ -24,7 +23,6 @@ public class MemoryConfig
     private DataSize maxDataPerNode = DataSize.of(128, DataSize.Unit.MEGABYTE);
     private boolean enableLazyDynamicFiltering = true;
 
-    @NotNull
     public int getSplitsPerNode()
     {
         return splitsPerNode;
